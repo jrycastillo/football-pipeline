@@ -1,0 +1,66 @@
+# Environment Settings
+env:
+  SRC_VIDEO: null
+  DET_WEIGHTS: "/home/ubuntu/videoforprocessing_link/ronan/new/models/detect.pt"
+  POSE_WEIGHTS: "/home/ubuntu/videoforprocessing_link/ronan/new/models/pose.pt"
+  JNR_WEIGHTS: null # "/home/ubuntu/football/runs/qwen_h100_finetune_merged"
+  BALL_MODEL_PATH: null
+  
+  # Output
+  OUT_JSON: "players_stats.json"
+  OUT_CSV: "players_stats.csv"
+
+  # Database
+  MYSQL_HOST: "db-mysql-sgp1-18289-do-user-18922201-0.f.db.ondigitalocean.com"
+  MYSQL_PORT: 25060
+  MYSQL_USER: "scoutbridge"
+  MYSQL_DB: "footballgallery"
+  TABLE_NAME: "MatchesVideoAnalysis_test"
+
+  # ScoutBridge API
+  SBG_BASE: "https://api-staging.scoutbridge.net/football-gallery/api"
+  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQzMzAzNDAsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiI0MjRkYzI2ZiJ9.vwl3-QkomqmN3TIs-TFfJTe5wZ-B4o9EDMFk_q_ZTI0"
+
+# Heuristics & Thresholds
+heuristics:
+  # Detection
+  DET_CONF: 0.25
+  DET_IOU: 0.50
+  DET_IMG_SIZE: 832
+  VID_STRIDE: 1
+  
+  # JNR
+  JNR_IMG_SIZE: 160
+  JNR_GATE: 0.35
+  
+  # Tracking
+  MAX_TRACK_FRAMES: null # Set to integer to limit
+  STORE_IMAGES: 1
+  STORE_IMAGES_UP_TO: 1500
+  
+  # Stats
+  FPS: 25
+  MAX_OWNER_PX: 300
+  TACKLE_PX: 100
+  CHALLENGE_PX: 100
+  DRIBBLE_MIN_PX: 25
+  OPP_NEAR_PX: 150
+  MAX_GAP: 25
+  SPEED_PX_THR_FRAC: 0.015
+  NEAR_GOAL_FRAC: 0.50
+  OPP_THR_PX: 90
+  
+  # xG
+  XG_DIST_NORM_W: 0.6
+  
+  # Goal Detection
+  GOAL_MOUTH_WIDTH_FRAC: 0.12 # 12% from edge
+  GOAL_TOP_FRAC: 0.15
+  GOAL_BOTTOM_FRAC: 0.85
+
+# Class IDs
+classes:
+  ball: 0
+  goalkeeper: 1
+  player: 2
+  referee: 3

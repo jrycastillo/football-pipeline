@@ -1,0 +1,16 @@
+names:
+- barca-player
+- jersey-number
+- match-score
+- mu-player
+- referee-and-goalkeepers
+nc: 5
+roboflow:
+  license: CC BY 4.0
+  project: jersey-number-detection
+  url: https://universe.roboflow.com/cbu/jersey-number-detection/dataset/1
+  version: 1
+  workspace: cbu
+test: ../test/images
+train: ../train/images
+val: ../valid/images

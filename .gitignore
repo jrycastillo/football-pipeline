@@ -1,0 +1,20 @@
+# Ignore the specific large folders from your screenshots
+output/
+temp_crops/
+runs/
+training/
+weights/
+models/
+__pycache__/
+
+# Ignore specific large file types anywhere in the project
+*.mp4
+*.pt
+*.csv
+*.json
+*.jpg
+*.png
+
+# Keep the important stuff
+!config.yaml
+!schemas.py

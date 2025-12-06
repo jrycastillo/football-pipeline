@@ -1,0 +1,5 @@
+collate_fn called with 32 examples
+collate_fn called with 1 examples
+collate_fn called with 1 examples
+collate_fn called with 1 examples
+collate_fn called with 1 examples
