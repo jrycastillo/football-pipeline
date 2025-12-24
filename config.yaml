@@ -19,12 +19,12 @@ env:
 
   # ScoutBridge API
   SBG_BASE: "https://api-staging.scoutbridge.net/football-gallery/api"
-  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQzMzAzNDAsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiI0MjRkYzI2ZiJ9.vwl3-QkomqmN3TIs-TFfJTe5wZ-B4o9EDMFk_q_ZTI0"
+  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjY1NzgwNDQsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.YZ4r1Ahp--tX0h2rO-FnV8ZusfOshPZO7sn4Kat_J1E"
 
 # Heuristics & Thresholds
 heuristics:
   # Detection
-  DET_CONF: 0.25
+  DET_CONF: 0.10
   DET_IOU: 0.50
   DET_IMG_SIZE: 832
   VID_STRIDE: 1

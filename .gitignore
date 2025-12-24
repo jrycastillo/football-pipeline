@@ -1,8 +1,10 @@
 # Ignore the specific large folders from your screenshots
+training/
+hf_cache/
+backups/
 output/
 temp_crops/
 runs/
-training/
 weights/
 models/
 __pycache__/
@@ -12,8 +14,12 @@ __pycache__/
 *.pt
 *.csv
 *.json
+*.jsonl
+*.zip
 *.jpg
 *.png
+*.log
+*.pdf
 
 # Keep the important stuff
 !config.yaml

@@ -9,6 +9,7 @@ import torch
 import traceback
 import argparse
 import sys
+import subprocess
 from pymysql.cursors import DictCursor
 
 # Load Config
@@ -99,8 +100,118 @@ def is_video_processed(matches_video_id, source_url):
         print(f"[db] Error checking status: {e}")
     return False
 
+def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None, 
+                 locking_mode=2, jnr_stride=None, make_video=False):
+    """
+    Unified metadata-aware pipeline wrapper.
+    Delegates to pipeline_consolidated.py and handles DB updates.
+    """
+    import cv2
+    import tempfile
+    
+    local_video_path = video_path
+    use_streaming = True
+    temp_video_path = None
+    filename = os.path.basename(video_path.split("?")[0]) or "video.mp4"
+
+    # 1. Download/Streaming Hybrid Logic
+    if video_path.startswith("http"):
+        print(f"[pipeline] Attempting to stream: {video_path[:50]}...")
+        cap = cv2.VideoCapture(video_path)
+        if cap.isOpened():
+            success_count = 0
+            for _ in range(3):
+                ret, _ = cap.read()
+                if ret: success_count += 1
+            cap.release()
+            if success_count >= 2:
+                print(f"[pipeline] Streaming verified.")
+                local_video_path = video_path
+            else:
+                use_streaming = False
+        else:
+            use_streaming = False
+
+        if not use_streaming:
+            print(f"[pipeline] Streaming failed/unstable. Downloading to temp...")
+            temp_dir = tempfile.mkdtemp(prefix="pf_")
+            temp_video_path = os.path.join(temp_dir, filename)
+            try:
+                print(f"[pipeline] FULL URL: {video_path}")
+                resp = requests.get(video_path, stream=True, timeout=300)
+                resp.raise_for_status()
+                with open(temp_video_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        f.write(chunk)
+                local_video_path = temp_video_path
+                print(f"[pipeline] Downloaded to {temp_video_path}")
+            except Exception as e:
+                print(f"[pipeline] Download Failed: {e}")
+                if not no_db:
+                    upsert_status_row(video_id, user_id, spaces_url or video_path, "error", None, error=f"Download failed: {e}")
+                return False
+
+    # 2. Initial status update (In Progress)
+    if not no_db:
+        print(f"[pipeline] Setting In Progress for {video_id}...")
+        upsert_status_row(video_id, user_id, spaces_url or video_path, "in_progress", None)
+
+    try:
+        # 3. Execute Subprocess
+        cmd = [
+            sys.executable, "pipeline_consolidated.py",
+            "--video", local_video_path,
+            "--output_dir", output_dir,
+            "--locking_mode", str(locking_mode)
+        ]
+        if not make_video:
+            cmd.append("--no_video_output")
+        
+        if max_frames:
+            cmd.extend(["--max_frames", str(max_frames)])
+        if jnr_stride:
+            cmd.extend(["--jnr_stride", str(jnr_stride)])
+            
+        print(f"[pipeline] Executing Core: {' '.join(cmd)}")
+        result = subprocess.run(cmd, env=os.environ, timeout=7200)
+        
+        if result.returncode != 0:
+            print(f"[pipeline] Core failed with code {result.returncode}")
+            if not no_db:
+                upsert_status_row(video_id, user_id, spaces_url or video_path, "error", None, error=f"Core exit {result.returncode}")
+            return False
+
+        # 3. Handle Results & DB
+        stats_path = os.path.join(output_dir, "player_stats.json")
+        if os.path.exists(stats_path):
+            with open(stats_path, 'r') as f:
+                stats_data = json.load(f)
+            
+            if not no_db:
+                print(f"[pipeline] Updating DB for {video_id}...")
+                upsert_status_row(video_id, user_id, spaces_url or video_path, "finished", None, analysis={"stats": stats_data})
+            return True
+        else:
+            print(f"[pipeline] Missing player_stats.json in {output_dir}")
+            return False
+
+    except Exception as e:
+        print(f"[pipeline] Error: {e}")
+        if not no_db:
+            upsert_status_row(video_id, user_id, spaces_url or video_path, "error", None, error=str(e))
+        return False
+    finally:
+        # Cleanup temp
+        if temp_video_path and os.path.exists(temp_video_path):
+            print(f"[pipeline] Cleaning up temp file...")
+            try:
+                os.remove(temp_video_path)
+                os.rmdir(os.path.dirname(temp_video_path))
+            except: pass
+
 # Polling Logic
 def fetch_pending_videos():
+    """Fetch list of pending videos from ScoutBridge API."""
     print(f"[poll] Fetching from {SBG_LIST_URL}...")
     headers = {
         "Authorization": f"Bearer {SBG_TOKEN}",
@@ -118,119 +229,135 @@ def fetch_pending_videos():
         print(f"[poll] Exception fetching videos: {e}")
         return []
 
-def run_pipeline(video_path, output_json, output_csv, make_video=False, max_frames=None, viz_dir=None):
-    # --- PIPELINE START ---
-    from vision.tracking import track_video
-    from vision.identity import assign_teams, get_jersey_numbers
-    from stats.logic import calculate_ownership, detect_passes_and_events, detect_shots_and_xg
-    from stats.formatting import format_and_save
+
+def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, make_video=False):
+    """
+    Process a single video from SPACES using the unified run_pipeline wrapper.
+    """
+    video_id = video_item.get("id", "unknown")
+    spaces_url = video_item.get("spacesURL")
+    filename = video_item.get("filename", "video.mp4")
     
-    # 1. Tracking
-    print(f"[pipeline] Step 1: Tracking (Max Frames: {max_frames})...")
-    frames, model = track_video(video_path, CONFIG["env"]["DET_WEIGHTS"], max_frames=max_frames)
+    # Extract UserID from fileLocation or filename
+    # Usually: matches_upload/{userID}/{filename}
+    file_loc = video_item.get("fileLocation", "")
+    if "/" in file_loc:
+        user_id = file_loc.split("/")[1]
+    else:
+        user_id = filename.split("_")[0] if "_" in filename else "unknown"
     
-    # 2. Team Assignment
-    print("[pipeline] Step 2: Team Assignment...")
-    team_map, team_labels = assign_teams(frames)
+    print(f"[process] Starting: {filename}")
+    print(f"[process] Video ID: {video_id}, User ID: {user_id}")
     
-    # 3. Jersey Numbers
-    print("[pipeline] Step 3: Jersey Numbers...")
-    jersey_map = get_jersey_numbers(frames, team_map)
+    if not spaces_url:
+        print(f"[process] Error: No spacesURL for {video_id}")
+        return {"status": "error", "error": "No spacesURL"}
     
-    # 3.5 Global Identity Registry
-    print("[pipeline] Step 3.5: Global Identity Registry...")
-    from vision.identity_manager import GlobalRegistry
-    registry = GlobalRegistry()
+    # Create output directory
+    out_dir = f"./output/{video_id}"
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
     
-    track_to_global = {}
-    
-    # Register all tracks
-    # We iterate over all tracks found in frames to ensure everyone gets a Global ID
-    all_track_ids = set()
-    for f in frames:
-        for b in f["boxes"]:
-            if b["id"] is not None:
-                all_track_ids.add(b["id"])
-                
-    for tid in all_track_ids:
-        # Get info from jersey_map if available
-        j_info = jersey_map.get(tid, {"number": "Unknown"})
-        number = j_info.get("number", "Unknown")
-        team = team_map.get(tid, "Unknown")
-        
-        # Get or Create Global ID
-        gid = registry.get_or_create_global_id(team, number, tid)
-        track_to_global[tid] = gid
-        
-    # Remap Data Structures to Global IDs
-    print(f"[pipeline] Remapping {len(track_to_global)} tracks to Global IDs...")
-    
-    # 1. Remap Frames (Mutate in place)
-    for f in frames:
-        for b in f["boxes"]:
-            if b["id"] is not None:
-                b["id"] = track_to_global.get(b["id"], b["id"]) # Should always be in map
-                
-    # 2. Remap Jersey Map
-    global_jersey_map = {}
-    for tid, info in jersey_map.items():
-        gid = track_to_global.get(tid)
-        if gid:
-            # If multiple tracks map to same GID, we keep the one with info (or merge?)
-            # Since GID is based on (Team, Number), the info should be consistent.
-            global_jersey_map[gid] = info
-            
-    # 3. Remap Team Map
-    global_team_map = {}
-    for tid, team in team_map.items():
-        gid = track_to_global.get(tid)
-        if gid:
-            global_team_map[gid] = team
-            
-    # Update references for next steps
-    jersey_map = global_jersey_map
-    team_map = global_team_map
-    
-    # 4. Stats
-    print("[pipeline] Step 4: Stats Calculation...")
-    ownership = calculate_ownership(frames, team_map)
-    events, player_stats, team_stats = detect_passes_and_events(frames, ownership, team_map)
-    shots, xg_player = detect_shots_and_xg(frames, ownership, team_map)
-    
-    # 5. Formatting & Saving
-    print("[pipeline] Step 5: Formatting...")
-    
-    # Collect all tracked IDs (Now Global IDs)
-    all_tracked_ids = set()
-    for f in frames:
-        for b in f["boxes"]:
-            if b["id"] is not None and b["cls"] in (CONFIG["classes"]["player"], CONFIG["classes"]["goalkeeper"]):
-                all_tracked_ids.add(b["id"])
-                
-    payload = format_and_save(
-        events, player_stats, team_stats, shots, xg_player, 
-        team_map, team_labels, jersey_map, 
-        output_json, output_csv,
-        all_tracked_ids=all_tracked_ids
+    # Process using the new unified wrapper
+    success = run_pipeline(
+        video_path=spaces_url,
+        output_dir=out_dir,
+        max_frames=max_frames,
+        no_db=no_db,
+        video_id=video_id,
+        user_id=user_id,
+        spaces_url=spaces_url,
+        locking_mode=locking_mode,
+        jnr_stride=jnr_stride,
+        make_video=make_video
     )
     
-    # 6. Visualization (Optional)
-    if make_video:
-        from vision.visualization import generate_debug_video
-        if viz_dir is None:
-            viz_dir = "/home/ubuntu/football/output_viz"
-        if not os.path.exists(viz_dir):
-            os.makedirs(viz_dir)
-        viz_path = os.path.join(viz_dir, "debug_run.mp4")
-        generate_debug_video(video_path, frames, jersey_map, viz_path)
+    if success:
+        return {"status": "success", "video_id": video_id, "stats_path": os.path.join(out_dir, "player_stats.json")}
+    else:
+        return {"status": "error", "video_id": video_id, "error": "Pipeline failed"}
+
+
+def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_size_mb=float('inf'), 
+                       locking_mode=2, jnr_stride=None, make_video=False):
+    """
+    Continuously poll for pending videos and process them.
     
-    # Cleanup Memory
-    del model
-    del frames
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        
-    return payload
+    Args:
+        poll_interval: Seconds between polls (default 60)
+        max_videos: Max videos to process before stopping (None = infinite)
+        min_size_mb: Minimum file size filter in MB
+        max_size_mb: Maximum file size filter in MB
+        locking_mode: Mode passed down to pipeline
+        jnr_stride: Stride passed down to pipeline
+    """
+    print(f"[poll] Starting polling loop (interval={poll_interval}s)...")
+    print(f"[poll] Size filter: {min_size_mb}MB - {max_size_mb}MB")
+    
+    processed_count = 0
+    processed_ids = set()
+    
+    while True:
+        try:
+            videos = fetch_pending_videos()
+            
+            if not videos:
+                print(f"[poll] No pending videos. Waiting {poll_interval}s...")
+                time.sleep(poll_interval)
+                continue
+            
+            # Filter by size and already processed
+            for video in videos:
+                video_id = video.get("id")
+                file_size_mb = video.get("fileSize", 0) / 1024 / 1024
+                
+                # Skip already processed
+                if video_id in processed_ids:
+                    continue
+                
+                # Skip if outside size range
+                if file_size_mb < min_size_mb or file_size_mb > max_size_mb:
+                    continue
+                
+                # Skip if already in DB
+                if is_video_processed(video_id, video.get("spacesURL")):
+                    print(f"[poll] Already processed: {video_id}")
+                    processed_ids.add(video_id)
+                    continue
+                
+                # Process this video
+                result = process_spaces_video(
+                    video, save_local=True, no_db=NO_DB,
+                    locking_mode=locking_mode,
+                    jnr_stride=jnr_stride,
+                    make_video=make_video
+                )
+                processed_ids.add(video_id)
+                processed_count += 1
+                
+                if result.get("status") == "success":
+                    print(f"[poll] Successfully processed {processed_count} videos")
+                
+                # Check max limit
+                if max_videos and processed_count >= max_videos:
+                    print(f"[poll] Reached max_videos limit ({max_videos}). Stopping.")
+                    return
+                
+                # Small delay between videos
+                time.sleep(5)
+            
+            # Wait before next poll
+            print(f"[poll] Cycle complete. Waiting {poll_interval}s...")
+            time.sleep(poll_interval)
+            
+        except KeyboardInterrupt:
+            print("[poll] Interrupted by user. Stopping.")
+            break
+        except Exception as e:
+            print(f"[poll] Error in polling loop: {e}")
+            traceback.print_exc()
+            time.sleep(poll_interval)
+
 
 # ... (process_video remains mostly unchanged, but we could update it if needed, though this request is for debug mode)
 
@@ -238,12 +365,22 @@ def main():
     global NO_DB
     
     parser = argparse.ArgumentParser(description="Football Pipeline Orchestrator")
-    parser.add_argument("--local_video", type=str, help="Path to local video file for debug mode")
+    parser.add_argument("--local_video", type=str, help="Path to local video file or SPACES URL for debug mode")
     parser.add_argument("--no_db", action="store_true", help="Skip DB connections")
     parser.add_argument("--save_local", action="store_true", help="Save output to ./output folder (or --output_dir)")
     parser.add_argument("--make_video", action="store_true", help="Generate debug video output")
     parser.add_argument("--max_frames", type=int, help="Limit number of frames to process")
+    parser.add_argument("--resume_frame", type=int, default=0, help="Start processing from this frame index")
     parser.add_argument("--output_dir", type=str, help="Directory to save output files")
+    
+    # Polling mode arguments
+    parser.add_argument("--poll", action="store_true", help="Enable polling mode to fetch from SPACES")
+    parser.add_argument("--poll_interval", type=int, default=60, help="Seconds between polls (default 60)")
+    parser.add_argument("--max_videos", type=int, help="Max videos to process before stopping")
+    parser.add_argument("--min_size_mb", type=float, default=0, help="Minimum video size in MB")
+    parser.add_argument("--max_size_mb", type=float, default=float('inf'), help="Maximum video size in MB")
+    parser.add_argument("--locking_mode", type=int, choices=[1, 2], default=2, help="Internal pipeline locking mode")
+    parser.add_argument("--jnr_stride", type=int, help="Internal pipeline JNR stride (frames)")
     
     args = parser.parse_args()
     
@@ -252,8 +389,8 @@ def main():
         print("[debug] DB connections disabled.")
         
     if args.local_video:
-        # DEBUG PATH
-        if not os.path.exists(args.local_video):
+        # DEBUG PATH - Single video
+        if not args.local_video.startswith("http") and not os.path.exists(args.local_video):
             print(f"Error: Video file {args.local_video} not found.")
             sys.exit(1)
             
@@ -270,29 +407,49 @@ def main():
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
             
-        base_name = os.path.splitext(os.path.basename(args.local_video))[0]
-        out_json = os.path.join(out_dir, f"{base_name}_stats.json")
-        out_csv = os.path.join(out_dir, f"{base_name}_stats.csv")
+        base_name = os.path.splitext(os.path.basename(args.local_video.split("?")[0]))[0]
         
         try:
-            run_pipeline(
-                args.local_video, 
-                out_json, 
-                out_csv, 
-                make_video=args.make_video, 
+            # We use the new unified wrapper
+            success = run_pipeline(
+                video_path=args.local_video, 
+                output_dir=out_dir,
+                no_db=args.no_db, 
                 max_frames=args.max_frames,
-                viz_dir=out_dir # Save video to same dir
+                video_id=os.path.splitext(os.path.basename(args.local_video))[0].split('?')[0],
+                user_id="local_user",
+                locking_mode=args.locking_mode,
+                jnr_stride=args.jnr_stride,
+                make_video=args.make_video
             )
-            print(f"Finished. Output saved to {out_dir}")
+            if success:
+                print(f"Finished successfully. Output in {out_dir}")
+            else:
+                print("Pipeline execution failed.")
+                sys.exit(1)
         except Exception as e:
             print(f"Pipeline failed: {e}")
             traceback.print_exc()
             sys.exit(1)
             
         sys.exit(0)
+        
+    elif args.poll:
+        # POLLING MODE - Fetch from SPACES and process
+        print("[main] Starting SPACES polling mode...")
+        start_polling_loop(
+            poll_interval=args.poll_interval,
+            max_videos=args.max_videos,
+            min_size_mb=args.min_size_mb,
+            max_size_mb=args.max_size_mb,
+            locking_mode=args.locking_mode,
+            jnr_stride=args.jnr_stride,
+            make_video=args.make_video
+        )
     else:
-        # PRODUCTION PATH
-        start_polling_loop()
+        # Show help if no mode specified
+        parser.print_help()
+        print("\n[main] Use --local_video for single video or --poll for SPACES polling mode.")
 
 if __name__ == "__main__":
     main()

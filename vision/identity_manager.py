@@ -1,103 +1,208 @@
-import uuid
+import time
 from collections import defaultdict
+from .visualization import get_jersey_color
 
-class GlobalRegistry:
+class IdentityManager:
     def __init__(self):
-        # Maps (team, jersey_number) -> global_id
-        self.jersey_registry = {}
+        # Maps Jersey Number -> Global UUID (The "Permanent" ID)
+        self.jersey_registry = {} 
         
-        # Maps track_id -> global_id
-        self.active_tracks = {}
+        # Maps Jersey Number -> Detected Color (e.g. "Red")
+        self.player_colors = {}
         
-        # Maps global_id -> { "team": ..., "number": ..., "track_ids": set() }
-        self.global_identities = {}
+        # Maps Track ID -> Detected Color (Fallback for Unknowns)
+        self.track_colors = {}
         
-        # Start Global IDs at a high number to avoid conflict with Track IDs
-        self.next_global_id = 1000000
+        # Maps Current YOLO Track ID -> Jersey Number
+        self.active_bindings = {}
 
-    def get_or_create_global_id(self, team, number, track_id):
-        """
-        Resolves the Global ID for a given track based on its team and jersey number.
-        """
-        if number == "Unknown":
-            return self._register_unknown(track_id, team)
+        # Buffer to prevent "Flickering"
+        self.vote_buffer = {} 
+        
+        # Memory Management
+        self.last_seen = {} # track_id -> frame_idx
+        self.player_last_pos = {} # jersey_num -> (x_center, y_center, frame_idx)
+        self.color_samples = {} # track_id -> list of [r,g,b]
+        self.jersey_color_samples = {} # jersey_num -> list of [r,g,b]
 
-        # 1. Fuzzy Lookup: Team="Unknown" but Number is Known
-        if team == "Unknown":
-            # Check if this number exists in the registry for ANY team
-            candidates = [k for k in self.jersey_registry.keys() if k[1] == number]
-            if len(candidates) == 1:
-                # Unambiguous match! Assume this is the player.
-                # assumed_team = candidates[0][0]
-                # print(f"[GlobalRegistry] Fuzzy Match: Track {track_id} (Unknown Team, #{number}) -> Assumed Team {assumed_team}")
-                # We return the existing ID, but we don't necessarily update the registry key for (Unknown, 10)
-                # unless we want to cache it. Let's just return the ID.
-                return self.jersey_registry[candidates[0]]
+    def get_global_id(self, track_id):
+        """
+        Returns the Permanent UUID for a given YOLO Track ID.
+        """
+        jersey_num = self.active_bindings.get(track_id)
+        if jersey_num is not None:
+            return self.jersey_registry.get(jersey_num)
+        return None
+        
+    def get_player_color(self, jersey_num):
+        return self.player_colors.get(str(jersey_num)) or self.player_colors.get(int(jersey_num))
+
+    def is_jersey_number(self, val):
+        return str(val) in self.jersey_registry or int(val) in self.jersey_registry if str(val).isdigit() else False
+
+    def touch(self, track_id, frame_idx):
+        self.last_seen[track_id] = frame_idx
+
+    def update_position(self, track_id, box, frame_idx):
+        # If this track is bound to a jersey, update the Jersey's last known location
+        jersey = self.active_bindings.get(track_id)
+        if jersey:
+            x1, y1, x2, y2 = box["xyxy"]
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            self.player_last_pos[jersey] = (cx, cy, frame_idx)
+
+    def try_merge(self, track_id, box, frame_idx):
+        # Task 1: Spatial Proximity Merging
+        # Check if this NEW track appears where a KNOWN player disappeared
+        x1, y1, x2, y2 = box["xyxy"]
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        
+        candidates = []
+        for jersey, (lx, ly, lframe) in self.player_last_pos.items():
+            # Only consider players lost recently (e.g. < 30 frames ago)
+            if frame_idx - lframe > 30: continue
             
-            # If ambiguous or new, fall through to create/lookup (Unknown, 10)
-
-        key = (team, number)
+            # Simple Euclidean distance
+            dist = ((cx - lx)**2 + (cy - ly)**2)**0.5
+            
+            # Threshold: 50 pixels (tuned for 1080p sports)
+            if dist < 50:
+                candidates.append((dist, jersey))
         
-        if key in self.jersey_registry:
-            # Re-Identification: Existing player
-            global_id = self.jersey_registry[key]
-            self.active_tracks[track_id] = global_id
-            self.global_identities[global_id]["track_ids"].add(track_id)
-            return global_id
+        if candidates:
+            # Pick closest
+            candidates.sort(key=lambda x: x[0])
+            best_dist, best_jersey = candidates[0]
+            
+            # Force Link
+            print(f"👻 [IdentityManager] GHOST MERGE: Track {track_id} -> Jersey #{best_jersey} (Dist: {best_dist:.1f}, Frames: {frame_idx - self.player_last_pos[best_jersey][2]})")
+            self.active_bindings[track_id] = best_jersey
+            return True
+            
+        return False
+
+    def cleanup(self, current_frame):
+        # Delete tracks not seen in last 30 seconds (900 frames)
+        expired = [tid for tid, last in self.last_seen.items() if current_frame - last > 900]
+        cleaned = 0
+        for tid in expired:
+            if tid in self.active_bindings:
+                del self.active_bindings[tid]
+            if tid in self.vote_buffer:
+                del self.vote_buffer[tid]
+            if tid in self.last_seen:
+                del self.last_seen[tid]
+            cleaned += 1
+        
+        if cleaned > 0:
+            import gc
+            gc.collect()
+            print(f"[IdentityManager] Cleanup: Removed {cleaned} expired tracks.", flush=True)
+
+    def process_detection(self, track_id, detected_number, confidence, crop=None):
+        """
+        Main Logic: Decides if we should lock this track to a jersey.
+        """
+        # --- Task 56: Always store track color for fallbacks ---
+        # MOVED TO TOP (Phase 74 Fix): Collect samples even if locked!
+        if crop is not None and crop.size > 0:
+             detected_color = get_jersey_color(crop) # "Red", "White", "Unknown"
+             if detected_color != "Unknown":
+                 self.track_colors[track_id] = detected_color
+             
+             # Capture Sample for K-Means (Center 50%)
+             try:
+                 h, w = crop.shape[:2]
+                 cy, cx = h // 2, w // 2
+                 dy, dx = int(h * 0.25), int(w * 0.25)
+                 center = crop[cy-dy:cy+dy, cx-dx:cx+dx]
+                 if center.size > 0:
+                     mean_rgb = cv2.mean(center)[:3] # (B, G, R)
+                     
+                     # Check if bound
+                     if track_id in self.active_bindings:
+                         jersey = self.active_bindings[track_id]
+                         if jersey not in self.jersey_color_samples: self.jersey_color_samples[jersey] = []
+                         if len(self.jersey_color_samples[jersey]) < 100:
+                             self.jersey_color_samples[jersey].append(mean_rgb)
+                     else:
+                         if track_id not in self.color_samples: self.color_samples[track_id] = []
+                         if len(self.color_samples[track_id]) < 50: 
+                             self.color_samples[track_id].append(mean_rgb)
+             except Exception:
+                 pass
+
+        # 1. If already locked, ignore new detections (Strict Mode)
+        if track_id in self.active_bindings:
+            return
+
+        # 2. CONFIDENCE PARSING & SCORING (Bayesian-ish)
+        # Map Qwen confidence ("high", "medium", "low") to scores
+        score_map = {"high": 3.0, "medium": 2.0, "low": 1.0}
+        
+        try:
+             # Try float first (Legacy/YOLO)
+             conf_val = float(confidence)
+             # Map float to score? 0.9->3, 0.5->2
+             if conf_val >= 0.8: score = 3.0
+             elif conf_val >= 0.5: score = 2.0
+             else: score = 1.0
+        except:
+             # String handling
+             s_conf = str(confidence).lower().strip()
+             score = score_map.get(s_conf, 1.0)
+        
+        # Rule A: High Confidence (Score 3) -> Lock Instantly?
+        # REMOVED (Phase 85): Fast lock causes hallucinations to stuck.
+        # We now require aggregation in all cases (unless extremely persistent).
+        # if score >= 3.0:
+        #      self._lock_identity(track_id, detected_number, crop=crop)
+        #      return
+
+        # 3. Bayesian Accumulation
+        if track_id not in self.vote_buffer:
+            self.vote_buffer[track_id] = defaultdict(float)
+        
+        votes = self.vote_buffer[track_id]
+        votes[detected_number] += score
+        
+        # 4. Check Threshold
+        # Threshold: 6.0 (Equivalent to 2 Highs, or 3 Mediums)
+        # Increased to prevent single-frame hallucinations
+        if votes[detected_number] >= 6.0:
+            # Check if it's the dominant winner
+            winner = max(votes, key=votes.get)
+            if winner == detected_number:
+                self._lock_identity(track_id, detected_number, crop=crop)
+
+    def _lock_identity(self, track_id, jersey_num, crop=None):
+        """
+        The 'Bind' Event. Links temporary Track ID to permanent Jersey ID.
+        """
+        if jersey_num not in self.jersey_registry:
+            self.jersey_registry[jersey_num] = f"Player_Jersey_{jersey_num}"
+            print(f"🆕 [IdentityManager] NEW PLAYER CREATED: Jersey #{jersey_num}")
+            
+            # Detect Color
+            if crop is not None:
+                color = get_jersey_color(crop)
+                self.player_colors[jersey_num] = color
+                print(f"   [IdentityManager] Assigned Color: {color}")
+            else:
+                self.player_colors[jersey_num] = "Unknown"
         else:
-            # 2. Merge Logic: Check if (Unknown, Number) exists
-            # If we are registering (Red, 10), but (Unknown, 10) exists, we should claim it.
-            unknown_key = ("Unknown", number)
-            if unknown_key in self.jersey_registry:
-                # Merge!
-                global_id = self.jersey_registry[unknown_key]
-                print(f"[GlobalRegistry] Merging Identity: Found (Unknown, #{number}) -> Updating to ({team}, #{number}) (Global ID {global_id})")
-                
-                # Link new key
-                self.jersey_registry[key] = global_id
-                
-                # Update metadata
-                self.global_identities[global_id]["team"] = team
-                self.global_identities[global_id]["track_ids"].add(track_id)
-                self.active_tracks[track_id] = global_id
-                
-                # Optional: Remove unknown_key? No, keep it as an alias.
-                return global_id
+             print(f"🔄 [IdentityManager] WELCOME BACK: Track {track_id} re-linked to Jersey #{jersey_num}")
+             # Optionally update color if unknown?
+             if self.player_colors.get(jersey_num) == "Unknown" and crop is not None:
+                 self.player_colors[jersey_num] = get_jersey_color(crop)
 
-            # New Player
-            global_id = self._create_new_identity(team, number)
-            self.jersey_registry[key] = global_id
-            self.active_tracks[track_id] = global_id
-            self.global_identities[global_id]["track_ids"].add(track_id)
-            print(f"[GlobalRegistry] New Identity: Track {track_id} assigned to {team} #{number} (Global ID {global_id})")
-            return global_id
-
-    def _create_new_identity(self, team, number):
-        global_id = self.next_global_id
-        self.next_global_id += 1
+        # Step B: Bind the current track to this Jersey
+        self.active_bindings[track_id] = jersey_num
         
-        self.global_identities[global_id] = {
-            "team": team,
-            "number": number,
-            "track_ids": set()
-        }
-        return global_id
-
-    def _register_unknown(self, track_id, team):
-        # For unknown players, we treat each track as a unique identity 
-        # (unless we have advanced tracking logic, which we don't yet).
-        # We check if we already assigned a GID to this track (unlikely in batch, but good practice).
-        if track_id in self.active_tracks:
-            return self.active_tracks[track_id]
-            
-        # Create a new "Unknown" identity
-        global_id = self.next_global_id
-        self.next_global_id += 1
-        
-        self.active_tracks[track_id] = global_id
-        self.global_identities[global_id] = {
-            "team": team,
-            "number": "Unknown",
-            "track_ids": {track_id}
-        }
-        return global_id
+        # Step C: Migrate Color Samples
+        if track_id in self.color_samples:
+            if jersey_num not in self.jersey_color_samples: self.jersey_color_samples[jersey_num] = []
+            # Append track samples to jersey samples
+            self.jersey_color_samples[jersey_num].extend(self.color_samples[track_id])
+            # Free memory
+            del self.color_samples[track_id]

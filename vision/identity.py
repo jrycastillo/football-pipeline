@@ -54,6 +54,7 @@ def assign_teams(frames):
                 if box_idx >= len(f["boxes"]): continue
                 b = f["boxes"][box_idx]
                 pid = b["id"]
+                
                 if pid is None: continue
                 
                 crop = c["img"]
@@ -180,30 +181,72 @@ class FineTunedJNRService:
         print("Model loaded successfully.")
         
     def predict_number(self, image_path):
-        # Re-use logic from JNRService or reimplement
-        # Since we can't easily inherit if JNRService is not available or structure differs,
-        # we'll reimplement the predict logic here (it's short).
+        return self.predict_batch([image_path])[0]
+
+    def predict_batch(self, images):
+        """
+        Takes a list of image paths OR numpy arrays (BGR).
+        Returns list of results: [{"number": "10", "confidence": "high"}, ...]
+        """
         from qwen_vl_utils import process_vision_info
+        from PIL import Image
+        import numpy as np
+        import cv2
+
+        if not images: return []
+
+        # Prepare messages
+        messages = []
+        for img in images:
+            # Handle numpy array (convert to PIL)
+            if isinstance(img, np.ndarray):
+                # Check Laplacian Variance (Smart Stride)
+                try:
+                    gray_check = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    blur_score = cv2.Laplacian(gray_check, cv2.CV_64F).var()
+                except:
+                    blur_score = 100.0 # Fallback 
+
+                if blur_score < 50:
+                    messages.append(None) # Mark as skipped
+                    continue
+
+                # Convert BGR to RGB
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb_img)
+            else:
+                # Assume path
+                pil_img = img
+
+            messages.append([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_img},
+                        {"type": "text", "text": "Analyze the jersey number. Return a Strict JSON object: {\"number\": <int> or null, \"confidence\": \"high\"|\"medium\"|\"low\"}."},
+                    ],
+                }
+            ])
+
+        # Handle all skipped or empty
+        if not messages or all(m is None for m in messages): 
+            return [{"number": None, "confidence": None}] * len(images)
+
+        # Filter out skipped messages
+        valid_indices = [i for i, m in enumerate(messages) if m is not None]
+        valid_messages = [messages[i] for i in valid_indices]
         
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": image_path,
-                    },
-                    {"type": "text", "text": "You are a sports referee. Analyze the image of the jersey. Return a JSON object with two keys:\n'number': The visible number (integer). If you can see a number but it's blurry, output it. If no number is visible, return null.\n'confidence': 'high', 'medium', or 'low'."},
-                ],
-            }
+        # Prepare batch inputs
+        texts = [
+            self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+            for msg in valid_messages
         ]
         
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, video_inputs = process_vision_info(messages)
+        # Helper for batch processing
+        image_inputs, video_inputs = process_vision_info(valid_messages)
+        
         inputs = self.processor(
-            text=[text],
+            text=texts,
             images=image_inputs,
             videos=video_inputs,
             padding=True,
@@ -211,15 +254,42 @@ class FineTunedJNRService:
         )
         inputs = inputs.to(self.model.device)
 
-        generated_ids = self.model.generate(**inputs, max_new_tokens=10)
+        # Generate
+        generated_ids = self.model.generate(**inputs, max_new_tokens=64)
+        
         generated_ids_trimmed = [
             out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
-        output_text = self.processor.batch_decode(
+        output_texts = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
         
-        return output_text[0].strip()
+        valid_results = []
+        for text in output_texts:
+            clean_pred = text.replace("```json", "").replace("```", "").strip()
+            try:
+                # Simple JSON parse
+                start = clean_pred.find("{")
+                end = clean_pred.rfind("}") + 1
+                if start != -1 and end != -1:
+                    json_str = clean_pred[start:end]
+                    data = json.loads(json_str)
+                    results_dict = {"number": str(data.get("number")), "confidence": data.get("confidence")}
+                    # Normalize None
+                    if results_dict["number"] in [None, "None", "null", "NaN"]:
+                         results_dict["number"] = None
+                    valid_results.append(results_dict)
+                else:
+                    valid_results.append({"number": None, "confidence": None})
+            except Exception:
+                 valid_results.append({"number": None, "confidence": None})
+                 
+        # Reconstruct full results list
+        final_results = [{"number": None, "confidence": None}] * len(images)
+        for idx, res in zip(valid_indices, valid_results):
+            final_results[idx] = res
+            
+        return final_results
 
 class MergedJNRService:
     def __init__(self, model_path):
@@ -242,27 +312,72 @@ class MergedJNRService:
         print("Processor loaded successfully.")
         
     def predict_number(self, image_path):
+        return self.predict_batch([image_path])[0]
+
+    def predict_batch(self, images):
+        """
+        Takes a list of image paths OR numpy arrays (BGR).
+        Returns list of results: [{"number": "10", "confidence": "high"}, ...]
+        """
         from qwen_vl_utils import process_vision_info
+        from PIL import Image
+        import numpy as np
+        import cv2
+
+        if not images: return []
+
+        # Prepare messages
+        messages = []
+        for img in images:
+            # Handle numpy array (convert to PIL)
+            if isinstance(img, np.ndarray):
+                # Check Laplacian Variance (Smart Stride)
+                try:
+                    gray_check = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    blur_score = cv2.Laplacian(gray_check, cv2.CV_64F).var()
+                except:
+                    blur_score = 100.0 # Fallback 
+
+                if blur_score < 50:
+                    messages.append(None) # Mark as skipped
+                    continue
+
+                # Convert BGR to RGB
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb_img)
+            else:
+                # Assume path
+                pil_img = img
+
+            messages.append([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_img},
+                        {"type": "text", "text": "Analyze the jersey number. Return a Strict JSON object: {\"number\": <int> or null, \"confidence\": \"high\"|\"medium\"|\"low\"}."},
+                    ],
+                }
+            ])
+
+        # Handle all skipped or empty
+        if not messages or all(m is None for m in messages): 
+            return [{"number": None, "confidence": None}] * len(images)
+
+        # Filter out skipped messages
+        valid_indices = [i for i, m in enumerate(messages) if m is not None]
+        valid_messages = [messages[i] for i in valid_indices]
         
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": image_path,
-                    },
-                    {"type": "text", "text": "You are a sports referee. Analyze the image of the jersey. Return a JSON object with two keys:\n'number': The visible number (integer). If you can see a number but it's blurry, output it. If no number is visible, return null.\n'confidence': 'high', 'medium', or 'low'."},
-                ],
-            }
+        # Prepare batch inputs
+        texts = [
+            self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+            for msg in valid_messages
         ]
         
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, video_inputs = process_vision_info(messages)
+        # Helper for batch processing
+        image_inputs, video_inputs = process_vision_info(valid_messages)
+        
         inputs = self.processor(
-            text=[text],
+            text=texts,
             images=image_inputs,
             videos=video_inputs,
             padding=True,
@@ -270,15 +385,42 @@ class MergedJNRService:
         )
         inputs = inputs.to(self.model.device)
 
-        generated_ids = self.model.generate(**inputs, max_new_tokens=10)
+        # Generate
+        generated_ids = self.model.generate(**inputs, max_new_tokens=64)
+        
         generated_ids_trimmed = [
             out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
-        output_text = self.processor.batch_decode(
+        output_texts = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
         
-        return output_text[0].strip()
+        valid_results = []
+        for text in output_texts:
+            clean_pred = text.replace("```json", "").replace("```", "").strip()
+            try:
+                # Simple JSON parse
+                start = clean_pred.find("{")
+                end = clean_pred.rfind("}") + 1
+                if start != -1 and end != -1:
+                    json_str = clean_pred[start:end]
+                    data = json.loads(json_str)
+                    results_dict = {"number": str(data.get("number")), "confidence": data.get("confidence")}
+                    # Normalize None
+                    if results_dict["number"] in [None, "None", "null", "NaN"]:
+                         results_dict["number"] = None
+                    valid_results.append(results_dict)
+                else:
+                    valid_results.append({"number": None, "confidence": None})
+            except Exception:
+                 valid_results.append({"number": None, "confidence": None})
+                 
+        # Reconstruct full results list
+        final_results = [{"number": None, "confidence": None}] * len(images)
+        for idx, res in zip(valid_indices, valid_results):
+            final_results[idx] = res
+            
+        return final_results
 
 _jnr_service = None
 
@@ -307,9 +449,116 @@ def get_jnr_service():
         if _jnr_service is None and JNR_AVAILABLE:
             try:
                 _jnr_service = JNRService()
+                print("[identity] Initialized Base JNRService.")
             except Exception as e:
                 print(f"[identity] Failed to initialize JNRService: {e}")
                 
+    # Polyfill predict_batch if missing (Crucial for Phase 21)
+    if _jnr_service and not hasattr(_jnr_service, "predict_batch"):
+        print("[identity] Polyfilling predict_batch for Base JNRService...")
+        # We can borrow the implementation from MergedJNRService concept via a helper
+        # But since we can't easily reference the method bound to another class, we'll define a standalone wrapper
+        # Or simpler: Just define it right here and bind it.
+        
+        def _predict_batch_polyfill(self, images):
+            from qwen_vl_utils import process_vision_info
+            from PIL import Image
+            import numpy as np
+            import cv2
+            import json # Ensure json is imported
+    
+            if not images: return []
+    
+            messages = []
+            for img_idx, img in enumerate(images): # Added index for debugging if needed
+                if isinstance(img, np.ndarray):
+                    # Phase 85: Signal Maximization (Torso + SR)
+                    # REGRESSION TEST: DISABLED (Phase 28+79 Baseline)
+                    # 1. Torso Crop
+                    # t_crop = _torso_crop(img)
+                    
+                    # 2. Super Resolution
+                    # sr_img = preprocess_sr(t_crop)
+
+                    # rgb_img = cv2.cvtColor(sr_img, cv2.COLOR_BGR2RGB)
+                    
+                    # BASELINE LOGIC (Phase 28)
+                    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(rgb_img)
+                else:
+                    pil_img = img
+    
+                messages.append([
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": pil_img},
+                            {"type": "text", "text": "You are a sports referee. Analyze the image of the jersey. Return a JSON object with two keys:\n'number': The visible number (integer). If you can see a number but it's blurry, output it. If no number is visible, return null.\n'confidence': 'high', 'medium', or 'low'."},
+                        ],
+                    }
+                ])
+    
+            texts = [
+                self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+                for msg in messages
+            ]
+            
+            image_inputs, video_inputs = process_vision_info(messages)
+            
+            # Move to device
+            inputs = self.processor(
+                text=texts,
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.model.device)
+    
+            generated_ids = self.model.generate(**inputs, max_new_tokens=128)
+            
+            generated_ids_trimmed = [
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_texts = self.processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )
+            
+            results = []
+            for text in output_texts:
+                clean_pred = text.replace("```json", "").replace("```", "").strip()
+                print(f"DEBUG RAW QWEN (Polyfill): {clean_pred}")
+                try:
+                    start = clean_pred.find("{")
+                    end = clean_pred.rfind("}") + 1
+                    if start != -1 and end != -1:
+                        json_str = clean_pred[start:end]
+                        data = json.loads(json_str)
+                        
+                        raw_num = data.get("number")
+                        raw_conf = data.get("confidence")
+                        
+                        # VALIDATION (Same as class method)
+                        if isinstance(raw_num, int):
+                            final_num = str(raw_num)
+                        elif isinstance(raw_num, str) and raw_num.isdigit():
+                            final_num = raw_num
+                        else:
+                            final_num = None
+                        
+                        if final_num:
+                             results.append({"number": final_num, "confidence": raw_conf})
+                        else:
+                             results.append({"number": None, "confidence": None})
+                    else:
+                        results.append({"number": None, "confidence": None})
+                except Exception:
+                     results.append({"number": None, "confidence": None})
+            return results
+
+        import types
+        _jnr_service.predict_batch = types.MethodType(_predict_batch_polyfill, _jnr_service)
+
     return _jnr_service
 
 import json
@@ -320,30 +569,64 @@ def get_upsampler():
     global _upsampler
     if _upsampler is None:
         try:
-            from basicsr.archs.rrdbnet_arch import RRDBNet
-            from realesrgan import RealESRGANer
+            # Phase 85: Re-enable Super-Resolution (Signal Maximization)
+            # REGRESSION TEST: DISABLED (Phase 28+79 Baseline)
+            # sr = cv2.dnn_superres.DnnSuperResImpl_create()
+            # model_path = "models/EDSR_x4.pb"
             
-            print("[identity] Initializing Real-ESRGAN...")
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-            _upsampler = RealESRGANer(
-                scale=4,
-                model_path='weights/RealESRGAN_x4plus.pth',
-                model=model,
-                tile=0,
-                tile_pad=10,
-                pre_pad=0,
-                half=True, # Use FP16
-                gpu_id=0
-            )
-            print("[identity] Real-ESRGAN initialized.")
+            # if not os.path.exists(model_path):
+            #     print(f"[identity] Model not found at {model_path}")
+            #     _upsampler = False
+            #     return _upsampler
+                
+            # sr.readModel(model_path)
+            # sr.setModel("edsr", 4)
+            # if torch.cuda.is_available():
+            #     sr.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+            #     sr.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+                
+            # _upsampler = sr
+            # print("[identity] EDSR SuperRes initialized.")
+            
+            # Fallback to Bicubic (Simulating Phase 28)
+            class BicubicUpsampler:
+                def upsample(self, img):
+                    if img is None or img.size == 0: return img
+                    return cv2.resize(img, (img.shape[1]*4, img.shape[0]*4), interpolation=cv2.INTER_CUBIC)
+            
+            _upsampler = BicubicUpsampler()
+            print("[identity] Bicubic Upsampler initialized (REGRESSION TEST MODE).")
+
         except Exception as e:
-            print(f"[identity] Failed to init Real-ESRGAN: {e}")
+            print(f"[identity] Failed to init SuperRes: {e}")
+            _upsampler = False # Flag as failed
+
+        except Exception as e:
+            print(f"[identity] Failed to init SuperRes: {e}")
             _upsampler = False # Flag as failed
             
     return _upsampler
 
+def _torso_crop(img):
+    """
+    Heuristic: Crop to "Torso" (Top 15% to 65% of height).
+    Used to focus Qwen on the jersey number, removing head and legs.
+    """
+    if img is None or img.size == 0: return img
+    h, w = img.shape[:2]
+    
+    # Heuristic: y_start=0.15, y_end=0.65
+    y1 = int(h * 0.15)
+    y2 = int(h * 0.65)
+    
+    # Safety Check: ensure we have at least 50% of the crop or 30px
+    if y2 - y1 < 20: 
+        return img # Tool small to crop
+        
+    return img[y1:y2, 0:w]
+
 def _finalize_processing(img):
-    # 1. Upscale to min 224 (Bicubic) - if needed
+    # 1. Upscale to min 224 (Bicubic) - if needed (Only if SR didn't already make it huge)
     TARGET_MIN = 224
     h, w = img.shape[:2]
     min_dim = min(h, w)
@@ -373,13 +656,15 @@ def _finalize_processing(img):
     return img
 
 def preprocess_sr(img):
-    # Try Real-ESRGAN
+    # Try Super-Resolution
     upsampler = get_upsampler()
     if upsampler:
         try:
-            img, _ = upsampler.enhance(img, outscale=4)
+            # Upscale
+            img = upsampler.upsample(img)
         except Exception as e:
             print(f"[identity] SR Failed: {e}")
+            
     return _finalize_processing(img)
 
 def preprocess_bicubic(img):
@@ -463,7 +748,7 @@ def get_jersey_numbers(frames, team_map):
                     return None, None
                 finally:
                     if os.path.exists(fname): os.remove(fname)
-
+ 
             # Helper for Adaptive Rotation
             def predict_with_adaptive_rotation(base_img, base_suffix):
                 # 1. Try 0 degrees
@@ -499,7 +784,7 @@ def get_jersey_numbers(frames, team_map):
                             best_score = r_score
                             
                 return best_num, best_conf
-
+ 
             # Hybrid Fallback Strategy + Adaptive Rotation
             
             # Attempt 1: Super-Resolution
@@ -554,10 +839,10 @@ def get_jersey_numbers(frames, team_map):
             # Debug
             print(f"[identity] Player {pid} Weighted Votes: {dict(vote_counts)} -> Winner: {winner} (Conf: {conf:.2f})")
             final_num = winner
-
+ 
         # Store result
         jersey_map[pid] = {"number": final_num, "conf": conf, "votes": votes}
-
+ 
     # Cleanup dir
     if os.path.exists(temp_dir):
         try:
