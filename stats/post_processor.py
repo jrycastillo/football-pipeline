@@ -168,40 +168,90 @@ class StatsEngine:
                     "total_distance": round(s["distance_m"], 2),
                     "time_on_ball_s": time_on_ball,
                     "touch_frames": s["touch_frames"],
-                    "shots_on_target": s["shots_on_target"],
-                    "shots_wide": 0, 
-                    "penalty": 0,
-                    "crosses": s["crosses_total"],
-                    "crosses_accurate": s["crosses_complete"],
-                    "dribbles": s["dribbles"],
-                    "dribbles_successful": s["dribbles_successful"],
-                    "passes": p_comp,
-                    "accurate_passes_%": round(acc_pass, 1),
-                    "challenges": s["dribbles"],
-                    "challenges_won": s["dribbles_successful"],
-                    "tackles": s["tackles"],
-                    "tackles_successful": s["tackles_successful"],
-                    "ball_interceptions": s["interceptions"],
-                    "fouls": s["fouls_total"],
-                    "goals": s["goals"],
+                    
+                    # Offensive (Target)
+                    "goals_total": s["goals"],
+                    "shots_on_target_total": s["shots_on_target"],
+                    "shots_wide_total": 0, 
+                    "penalty_total": 0,
+                    
+                    # Offensive (Delivering)
+                    "crosses_total": s["crosses_total"],
+                    "crosses_accurate_total": s["crosses_complete"],
+                    "dribbles_total": s["dribbles"],
+                    "dribbles_successful_total": s["dribbles_successful"],
+                    
+                    # Interaction
+                    "passes_total": p_total,
+                    "passes_accurate": p_comp,
+                    "accurate_passes_percent": round(acc_pass, 1),
+                    
+                    # Defensive
+                    "challenges_total": s["challenges_total"], # Fixed from dribbles
+                    "challenges_won_total": s["challenges_won_total"],
+                    "tackles_total": s["tackles"],
+                    "tackles_successful_total": s["tackles_successful"],
+                    "ball_interceptions_total": s["interceptions"], # Mapped
+                    "fouls_total": s["fouls_total"],
+                    
+                    # xG
                     "xg_foot_no_opponent": round(s["xg_foot_no_opponent"], 2),
                     "xg_header_no_opponent": 0.0,
                     "xg_foot_opponent_present": round(s["xg_foot_opponent_present"], 2),
                     "xg_header_opponent_present": 0.0,
                     
+                    # --- ADVANCED STATS (Phase 86) ---
+                    # Offensive
+                    "blocked_shots_by_opponent": s.get("blocked_shots", 0),
+                    "shots_on_post_bar": 0, # Model Gap
+                    "goals_standard_situation": 0, # Model Gap
+                    "free_kick_scored": 0, # Model Gap
+                    
+                    # Delivering
+                    "expected_assists": round(s.get("expected_assists", 0.0), 2),
+                    "offsides_total": 0, # Complex Heuristic Gap
+                    "packing_total": s.get("packing", 0),
+                    
+                    # Interaction
+                    "ball_touches_total": s["touch_frames"], # Correct mapping
+                    
+                    # Defensive
+                    "fouls_suffered": 0, # Inverse of committed (Model Gap)
+                    "ball_recoveries_opp_half": s.get("ball_recoveries_opp_half", 0),
+                    "played_offside": 0, # Gap
+                    
+                    # Categorization (Passes)
+                    "foot_passes_open_play_total": 0, # Model Gap
+                    "hand_passes_total": 0, # Model Gap
+                    "short_passes_total": s.get("short_passes", 0),
+                    "medium_passes_total": s.get("medium_passes", 0),
+                    "long_passes_total": s.get("long_passes", 0),
+                    "accurate_foot_passes_open_play_total": 0,
+                    "hand_passes_accurate_total": 0,
+                    "short_passes_accurate_total": s.get("short_passes_accurate", 0),
+                    "medium_passes_accurate_total": s.get("medium_passes_accurate", 0),
+                    # "long_passes_accurate_total" is "accurate_long_passes_total" (Existing)
+                    "accurate_long_passes_total": s["accurate_long_passes"],    
+
+                    # Categorization (Shots)
+                    "close_range_shots_total": s.get("close_range_shots", 0),
+                    "mid_range_shots_total": s.get("mid_range_shots", 0),
+                    "long_range_shots_total": s.get("long_range_shots", 0),
+
                     # GK Stats
                     "shots_saved_total": s["shots_saved_total"],
-                    "close_range_saves": s["close_range_saves"],
-                    "mid_range_saves": s["mid_range_saves"],
-                    "long_range_saves": s["long_range_saves"],
-                    "jumping_saves": s["jumping_saves"],
-                    "saves_without_jumping": s["shots_saved_total"] - s["jumping_saves"],
-                    "penalties_saved": s["penalties_saved"],
-                    "freekick_saved": s["freekick_saved"],
-                    "corners_saved": s["corners_saved"],
-                    "goals_conceded": s["goals_conceded"],
-                    "fouls_total": s["fouls_total"],
-                    "accurate_long_passes": s["accurate_long_passes"]
+                    "close_range_saved_total": s["close_range_saves"],
+                    "mid_range_saved_total": s["mid_range_saves"],
+                    "long_range_saved_total": s["long_range_saves"],
+                    "jumping_saves_total": s["jumping_saves"],
+                    "saves_without_jumping_total": s["shots_saved_total"] - s["jumping_saves"],
+                    "penalties_saved_total": s["penalties_saved"],
+                    "freekick_saved_total": s["freekick_saved"],
+                    "corners_saved_total": s["corners_saved"],
+                    "goals_standard_situation_conceded": 0, # Gap
+                    "xg_per_shot_saved": round(s.get("xg_saved_sum", 0) / max(1, s["shots_saved_total"]), 2),
+
+                    "goals_conceded": s["goals_conceded"]
                 }
             }
             

@@ -47,7 +47,7 @@ import torch
 import math
 from collections import defaultdict, Counter
 from stats.metrics import StatsEngine # Import new engine
-from vision.color_classifier import TeamColorClassifier  # Phase 139
+from vision.color_classifier import TeamColorClassifier, KitCoordinator  # Phase 139
 from ultralytics import YOLO
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
@@ -278,14 +278,14 @@ class IdentityManager:
         
         # --- MODE 1: Instant Lock on High Conf ---
         if self.locking_mode == 1:
-            if score >= 0.9:
+            if score >= 0.65: # LOWERED to 65% per user request
                 log(f"🔒 [IdentityManager] MODE 1 LOCK: Track {track_id} -> Jersey #{detected_number}")
                 self._lock_identity(track_id, detected_number)
             return
 
         # --- MODE 2: Consecutive High Conf (Replacement for Bayesian) ---
         if self.locking_mode == 2:
-            if score >= 0.9:
+            if score >= 0.65: # LOWERED to 65% per user request
                 last_num, count = self.consecutive_counter.get(track_id, (None, 0))
                 if detected_number == last_num:
                     count += 1
@@ -331,6 +331,9 @@ class IdentityManager:
         else:
             # First time seeing this jersey. Register it with color.
             self.master_registry[player_key] = (current_track_id, team_color)
+            # FIX: Populate player_colors so StatsEngine knows the team
+            self.player_colors[player_key] = team_color
+            
             # Also register in color_registry for color-based Re-ID
             color_key = f"{team_color}_{current_track_id}"
             self.color_registry[color_key] = jersey_number
@@ -509,8 +512,15 @@ def pose_torso_crop(img, keypoints, xyxy_fallback):
 # --- 7. JNR SERVICE (Real Qwen) ---
 class JNRService:
     def __init__(self):
-        log("Initializing Real JNRService (Qwen2.5-VL-3B)...")
-        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+        # Determine Model Path
+        model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
+        if CONFIG["env"].get("JNR_WEIGHTS"):
+            model_path = CONFIG["env"]["JNR_WEIGHTS"]
+            log(f"Initializing Real JNRService from Custom Weights: {model_path}")
+        else:
+            log(f"Initializing Real JNRService (Base Model): {model_path}")
+
+        self.processor = AutoProcessor.from_pretrained(model_path)
         # Fix padding warning for decoder-only architecture
         self.processor.tokenizer.padding_side = 'left'
         
@@ -518,7 +528,7 @@ class JNRService:
         max_mem = {0: "60GB"} 
         try:
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                "Qwen/Qwen2.5-VL-3B-Instruct",
+                model_path,
                 torch_dtype=torch.float16,
                 device_map="auto",
                 max_memory=max_mem,
@@ -560,9 +570,10 @@ class JNRService:
         for img_bgr in images:
             if self.sr:
                 try: upscaled = self.sr.upsample(img_bgr)
-                except: upscaled = cv2.resize(img_bgr, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+                except: upscaled = cv2.resize(img_bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
             else:
-                upscaled = cv2.resize(img_bgr, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+                # OPTIMIZATION v25: Reduce upscale from 4x to 2x for faster JNR
+                upscaled = cv2.resize(img_bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
             
             upscaled_bgrs.append(upscaled)
             img_rgb = cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB)
@@ -701,6 +712,195 @@ Look at the ACTUAL digit shapes, not what you expect to see."""})
         except:
             return None, 0.0
 
+# --- 7.1 SmolVLM2 Service (Lightweight Alternative to Qwen) - Phase 193 Original ---
+class SmolVLM2Service:
+    """
+    Lightweight VLM-based Jersey Number Recognition using SmolVLM2-2.2B.
+    Phase 193 (Original):
+    - Single-scale inference (384px)
+    - LANCZOS4 + CLAHE + Sharpening + Denoising
+    - Simple voting/stability logic
+    - No EasyOCR, No Multi-scale
+    """
+    def __init__(self):
+        from transformers import AutoProcessor, SmolVLMForConditionalGeneration
+        
+        model_path = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+        log(f"Initializing SmolVLM2Service (Phase 193 Original): {model_path}")
+        
+        self.processor = AutoProcessor.from_pretrained(model_path)
+        self.model = SmolVLMForConditionalGeneration.from_pretrained(
+            model_path,
+            _attn_implementation="eager",
+            device_map="auto",
+        ).to(torch.float16)
+        
+        # Phase 193+: Single scale (High Res for small crops)
+        self.target_height = 768
+        
+        # Voting state
+        self.vote_history = {}
+        self.history_size = 5
+        self.min_consensus = 1  # Aggressive: trust even a single sighting if consistent
+        
+        # Phase 193: Greedy decoding
+        self.do_sample = False
+        self.temperature = 1.0
+        
+        # Phase 194 "Better Prompt" (Restored for stability)
+        self.prompt = """Look at this football player's jersey number.
+Count each digit you can see on the back or front:
+- If you see digits '1' and '0' together, the number is 10
+- If you see digits '2' and '4' together, the number is 24
+- If only a single digit is visible, give that digit
+- Be careful: '6' has a curved tail, '9' is inverted '6', '4' has closed top
+Reply with ONLY the jersey number (1-99), nothing else."""
+        
+        log("SmolVLM2Service Phase 193+ (Aggressive High-Res) initialized.")
+    
+    def _preprocess(self, img_bgr):
+        """Preprocess image at single scale (768px)."""
+        if img_bgr is None or img_bgr.size == 0:
+            return None
+            
+        h, w = img_bgr.shape[:2]
+        scale = self.target_height / h
+        new_w = max(1, int(w * scale))
+        
+        # LANCZOS4 upscaling
+        upscaled = cv2.resize(img_bgr, (new_w, self.target_height), interpolation=cv2.INTER_LANCZOS4)
+        
+        # CLAHE
+        lab = cv2.cvtColor(upscaled, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        
+        # Unsharp Masking (Restored - it helps define edges)
+        gaussian = cv2.GaussianBlur(enhanced, (0, 0), 3)
+        sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+        
+        # Denoising
+        denoised = cv2.fastNlMeansDenoisingColored(sharpened, None, 10, 10, 7, 21)
+        
+        return denoised
+    
+    def _apply_voting(self, track_id, prediction):
+        """Simple temporal voting for stability."""
+        if track_id not in self.vote_history:
+            self.vote_history[track_id] = []
+        
+        if prediction is not None and isinstance(prediction, int) and 1 <= prediction <= 99:
+            self.vote_history[track_id].append(prediction)
+            if len(self.vote_history[track_id]) > self.history_size:
+                self.vote_history[track_id] = self.vote_history[track_id][-self.history_size:]
+        
+        history = self.vote_history[track_id]
+        if not history:
+            return None, 0.0
+        
+        from collections import Counter
+        counts = Counter(history)
+        most_common = counts.most_common(1)[0]
+        number, count = most_common
+        
+        if count >= self.min_consensus:
+            return number, count / len(history)
+        
+        return None, 0.0
+    
+    def predict_batch(self, images, track_ids=None, reference_crops=None):
+        """
+        Standard batch prediction (Phase 193).
+        """
+        results = []
+        if not images:
+            return []
+        
+        if track_ids is None:
+            track_ids = list(range(len(images)))
+        
+        for idx, img_bgr in enumerate(images):
+            track_id = track_ids[idx] if idx < len(track_ids) else idx
+            
+            if img_bgr is None or img_bgr.size == 0:
+                results.append({"number": None, "confidence": 0.0, "visibility": "invalid_crop"})
+                continue
+            
+            # Preprocess
+            processed = self._preprocess(img_bgr)
+            if processed is None:
+                results.append({"number": None, "confidence": 0.0, "visibility": "invalid_crop"})
+                continue
+            
+            # VLM Inference
+            final_number = None
+            confidence = 0.0
+            
+            try:
+                img_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(img_rgb)
+                
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": pil_img},
+                            {"type": "text", "text": self.prompt}
+                        ]
+                    }
+                ]
+                
+                inputs = self.processor.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.model.device)
+                
+                with torch.no_grad():
+                    generated_ids = self.model.generate(
+                        **inputs,
+                        max_new_tokens=10,
+                        do_sample=False
+                    )
+                
+                output_text = self.processor.decode(
+                    generated_ids[0][inputs["input_ids"].shape[1]:],
+                    skip_special_tokens=True
+                ).strip()
+                
+                # Parse
+                num = self._parse_number(output_text)
+                
+                # Vote
+                final_number, confidence = self._apply_voting(track_id, num)
+                
+            except Exception as e:
+                pass
+            
+            results.append({
+                "number": final_number,
+                "confidence": confidence,
+                "visibility": "detected" if final_number else "uncertain",
+                "source": "vlm"
+            })
+        
+        return results
+    
+    def _parse_number(self, text):
+        """Extract digits only from VLM output."""
+        digits = ''.join(c for c in text if c.isdigit())
+        if digits and len(digits) <= 2:
+            try:
+                num = int(digits)
+                if 1 <= num <= 99:
+                    return num
+            except:
+                pass
+        return None
+
 # --- 7.5. VISUALIZER ---
 class Visualizer:
     def __init__(self, fps=25.0):
@@ -828,12 +1028,20 @@ class EventDetector:
 class StatsAdapter:
     def __init__(self, camera=None, pitch_manager=None):
         self.camera = camera
-        self.engine = StatsEngine() # Use imported engine
-        self.event_detector = EventDetector(pitch_manager)
+        # Initialize new engine (Patched to point to post_processor.py logic)
+        from stats.metrics import StatsEngine 
+        self.engine = StatsEngine() 
+        # Note: EventDetector in StatsEngine creates its own Camera. 
+        # We assume that is sufficient as it uses the same Homography logic.
 
     def process_events(self, all_frames, id_manager=None):
-        # 1. Run Event Detection (Populates stats engine)
-        self.event_detector.process(all_frames, self.engine, id_manager)
+        # Delegate to new engine
+        # returns (formatted_stats, events)
+        formatted_stats, events = self.engine.process_events(all_frames, id_manager)
+        
+        # Return in order expected by pipeline: raw_tracks, player_stats
+        return events, formatted_stats
+
 
         # Generate RAW TRACKS for Post-Processing Merge
         raw_tracks = []
@@ -923,12 +1131,6 @@ class StatsAdapter:
                     "team": track["team"],
                     "stats": dict(track["stats"])  # Copy stats
                 }
-            else:
-                # Merge stats (sum cumulative fields)
-                existing = player_stats[key]["stats"]
-                for k, v in track["stats"].items():
-                    if isinstance(v, (int, float)):
-                        existing[k] = existing.get(k, 0) + v
             
         return raw_tracks, player_stats 
 
@@ -937,6 +1139,7 @@ if __name__ == "__main__":
     import argparse
     import tempfile
     import requests
+    import json # Added for JSON output
     
     parser = argparse.ArgumentParser(description="Football Analysis Pipeline (Consolidated)")
     parser.add_argument("--video", type=str, help="Video path (local file or SPACES URL)")
@@ -945,6 +1148,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_frames", type=int, help="Limit number of frames to process")
     parser.add_argument("--locking_mode", type=int, choices=[1, 2], default=2, help="Locking mode: 1=Instant, 2=Consecutive High Conf")
     parser.add_argument("--jnr_stride", type=int, help="JNR processing stride (frames)")
+    parser.add_argument("--vid_stride", type=int, default=1, help="Video frame stride (skip frames). Default=1 (process all). 2=half speed/2x faster.")
     args = parser.parse_args()
     
     # Determine video path
@@ -991,9 +1195,13 @@ if __name__ == "__main__":
     
     # Init Components
     id_manager = IdentityManager()
+    # Phase 196 Revert: Switch back to Qwen (JNRService) as requested
     jnr_service = JNRService()
+    # jnr_service = SmolVLM2Service()  # Original Qwen-based
+    # jnr_service = SmolVLM2Service()  # Lighter SmolVLM2-2.2B with preprocessing
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
+    kit_coordinator = KitCoordinator()  # Phase 168
     pitch_manager = PitchManager(model_path="/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_field_keypoint.pt", device=0)
     camera = Camera(pitch_manager.H_default)
     
@@ -1015,7 +1223,8 @@ if __name__ == "__main__":
     else:
         writer = cv2.VideoWriter(out_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
     
-    jnr_stride = args.jnr_stride if args.jnr_stride is not None else int(fps)
+    # OPTIMIZATION v25: Default JNR stride to 3 seconds (was 1s) to reduce Qwen calls
+    jnr_stride = args.jnr_stride if args.jnr_stride is not None else int(fps * 3)
     log(f"JNR Stride set to {jnr_stride} (approx once every {jnr_stride/fps:.1f} seconds)")
     
     # Configure ID Manager
@@ -1033,6 +1242,10 @@ if __name__ == "__main__":
             f = loader.read()
             if f is None: break
             n += 1
+            
+            # OPTIMIZATION v25: Skip frames based on vid_stride
+            if args.vid_stride > 1 and n % args.vid_stride != 0:
+                continue
             
             if n % 10 == 0: log(f"Processing Frame {n}...")
             
@@ -1097,6 +1310,9 @@ if __name__ == "__main__":
                                color = color_classifier.predict_with_voting(crop, tid)
                                id_manager.set_track_color(tid, color)
                                
+                               # Phase 168: Global Kit Discovery
+                               kit_coordinator.observe(cls_id, color)
+                               
                                # Skip JNR for Goalkeepers (class 1) - only need color
                                if cls_id == 1:
                                    continue
@@ -1148,7 +1364,14 @@ if __name__ == "__main__":
                                      # Also update color for the new ID just in case
                                      id_manager.set_track_color(stable_id, team_color)
                                      break
-    
+
+            # 3. Final ID Replacement (Track -> Jersey) for Stats & Viz
+            for box in frame_data["boxes"]:
+                tid = box["id"]
+                # Check mapping
+                if tid is not None and tid in id_manager.active_bindings:
+                    box["id"] = id_manager.active_bindings[tid]
+
             # Visualization
             annotated_img = visualizer.draw_hud(img.copy(), frame_data, id_manager)
             if writer:
@@ -1167,14 +1390,34 @@ if __name__ == "__main__":
             log(f"Video saved to {out_video_path}")
         log(f"Tracking finished in {time.time() - start_time:.2f}s.")
     
-    # Save Best Crops - DISABLED for speed (Phase 131)
-    # os.makedirs("output/crops", exist_ok=True)
-    # for tid, crop in best_crops.items():
-    #     if crop is not None:
-    #         cv2.imwrite(f"output/crops/{tid}.jpg", crop)
-    # log(f"Saved {len(best_crops)} track crops to output/crops/")
-    log("Crop saving DISABLED (Phase 131 - Speed).")
+    # Save Best Crops - ENABLED for evaluation (Phase 196)
+    crops_dir = os.path.join(output_dir, "crops")
+    os.makedirs(crops_dir, exist_ok=True)
+    for tid, crop in best_crops.items():
+        if crop is not None:
+            cv2.imwrite(os.path.join(crops_dir, f"{tid}.jpg"), crop)
+    log(f"Saved {len(best_crops)} track crops to {crops_dir}/")
     
+    # Phase 170: Retroactive Identity Propagation (Fix for Zero Stats)
+    # Apply final known identities to ALL historical frames to recover stats from before identification.
+    log("Applying Retroactive Identity Propagation...")
+    start_prop = time.time()
+    updates_count = 0
+    
+    # Iterate ALL frames and update IDs based on final accumulated bindings
+    for frame in all_frames:
+        for box in frame["boxes"]:
+            tid = box["id"]
+            if tid is not None:
+                # If this Track ID was eventually bound to a Jersey Number, use it!
+                if tid in id_manager.active_bindings:
+                     new_id = id_manager.active_bindings[tid]
+                     if new_id != tid:
+                         box["id"] = new_id
+                         updates_count += 1
+                         
+    log(f"Propagated {updates_count} identity updates in {time.time() - start_prop:.2f}s")
+
     # --- 9. STATS GENERATION (Entity Resolution) ---
     stats_adapter = StatsAdapter(camera, pitch_manager) # Pass pitch_manager
     raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager)
@@ -1184,10 +1427,43 @@ if __name__ == "__main__":
         json.dump(raw_tracks, f, indent=2)
     log(f"Saved {output_dir}/raw_tracks.json")
     
+    # Phase 186: Filter out Unknown players before saving
+    # Drop if key starts with "Unknown" AND jersey_number is None
+    original_count = len(player_stats)
+    filtered_stats = {
+        pid: pdata for pid, pdata in player_stats.items()
+        if not (str(pid).startswith("Unknown") and pdata.get("jersey_number") is None)
+    }
+    player_stats = filtered_stats
+    log(f"Filtered Unknown players: {original_count} -> {len(player_stats)}")
+    
     # Save Player Stats
     with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
         json.dump(player_stats, f, indent=2)
     log(f"Saved {output_dir}/player_stats.json")
+    
+    # Phase 168: Save Discovered Kits
+    kits = kit_coordinator.get_discovery_result()
+    with open(os.path.join(output_dir, "match_kits.json"), "w") as f:
+        json.dump(kits, f, indent=2)
+    log(f"Match Kits saved to match_kits.json: {kits}")
+    
+    # Phase 169: Color Reconciliation
+    # Enforce only discovered colors in player_stats
+    valid_colors = set(kits["goalkeepers"] + kits["players"])
+    log(f"Reconciling colors against valid set: {valid_colors}")
+    
+    reconciled_count = 0
+    for pid, pdata in player_stats.items():
+        original_color = pdata.get("team", "Unknown")
+        if original_color not in valid_colors:
+            pdata["team"] = "Unknown"
+            reconciled_count += 1
+            
+    if reconciled_count > 0:
+        with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
+            json.dump(player_stats, f, indent=2)
+        log(f"Reconciled {reconciled_count} players to 'Unknown' color.")
     
     # Run Entity Resolution Script
     # DISABLED per user request (Phase 116) - not needed anymore

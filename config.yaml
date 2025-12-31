@@ -3,7 +3,7 @@ env:
   SRC_VIDEO: null
   DET_WEIGHTS: "/home/ubuntu/videoforprocessing_link/ronan/new/models/detect.pt"
   POSE_WEIGHTS: "/home/ubuntu/videoforprocessing_link/ronan/new/models/pose.pt"
-  JNR_WEIGHTS: null # "/home/ubuntu/football/runs/qwen_h100_finetune_merged"
+  JNR_WEIGHTS: "/home/ubuntu/football/runs/qwen_h100_finetune_merged"
   BALL_MODEL_PATH: null
   
   # Output
@@ -19,7 +19,7 @@ env:
 
   # ScoutBridge API
   SBG_BASE: "https://api-staging.scoutbridge.net/football-gallery/api"
-  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjY1NzgwNDQsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.YZ4r1Ahp--tX0h2rO-FnV8ZusfOshPZO7sn4Kat_J1E"
+  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjcyNjcxODIsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.aGwQ9T3hCkimw60EyqMnrHFfMBwI0CmtfI0-hLdq6fc"
 
 # Heuristics & Thresholds
 heuristics:

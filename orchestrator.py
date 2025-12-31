@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import json
 import uuid
 import requests
@@ -41,6 +42,11 @@ def _conn():
 
 def _sha1(s: str) -> str:
     import hashlib
+    from urllib.parse import urlparse
+    # Strip query parameters from signed URLs (they contain timestamps)
+    if s and s.startswith("http"):
+        parsed = urlparse(s)
+        s = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 def upsert_status_row(matches_video_id, user_id, source_url, status, task_id,
@@ -83,8 +89,14 @@ def upsert_status_row(matches_video_id, user_id, source_url, status, task_id,
                 """
                 cur.execute(ins_sql, (mv_id_num, user_id, unique_id, validation_status_id,
                                       source_url, task_id, status, payload_json, error))
+            # Log success
+            has_stats = analysis is not None and 'stats' in (analysis or {})
+            if has_stats:
+                print(f"[db] ✅ SUCCESS: Stats dumped for {matches_video_id} (status={status})")
+            else:
+                print(f"[db] ✅ Status updated for {matches_video_id}: {status}")
     except Exception as e:
-        print(f"[db] Failed to upsert status: {e}")
+        print(f"[db] ❌ FAILED to upsert: {e}")
 
 def is_video_processed(matches_video_id, source_url):
     if NO_DB: return False
@@ -94,14 +106,14 @@ def is_video_processed(matches_video_id, source_url):
             sql = f"SELECT status FROM {ANALYSIS_TABLE} WHERE unique_id=%s LIMIT 1"
             cur.execute(sql, (unique_id,))
             row = cur.fetchone()
-            if row and row["status"] == "finished":
+            if row and row["status"] in ("finished", "running", "failed"):
                 return True
     except Exception as e:
         print(f"[db] Error checking status: {e}")
     return False
 
 def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None, 
-                 locking_mode=2, jnr_stride=None, make_video=False):
+                 locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, task_id=0):
     """
     Unified metadata-aware pipeline wrapper.
     Delegates to pipeline_consolidated.py and handles DB updates.
@@ -115,22 +127,29 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
     filename = os.path.basename(video_path.split("?")[0]) or "video.mp4"
 
     # 1. Download/Streaming Hybrid Logic
+    # 1. Download/Streaming Hybrid Logic
     if video_path.startswith("http"):
         print(f"[pipeline] Attempting to stream: {video_path[:50]}...")
-        cap = cv2.VideoCapture(video_path)
-        if cap.isOpened():
-            success_count = 0
-            for _ in range(3):
-                ret, _ = cap.read()
-                if ret: success_count += 1
-            cap.release()
-            if success_count >= 2:
-                print(f"[pipeline] Streaming verified.")
-                local_video_path = video_path
+        
+        # Force download for Ikorudo match to ensure full processing (User Request)
+        if "2e5f877b" in video_path:
+             print("[pipeline] Force-downloading Ikorudo match for stability.")
+             use_streaming = False
+        else:
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                success_count = 0
+                for _ in range(3):
+                    ret, _ = cap.read()
+                    if ret: success_count += 1
+                cap.release()
+                if success_count >= 2:
+                    print(f"[pipeline] Streaming verified.")
+                    local_video_path = video_path
+                else:
+                    use_streaming = False
             else:
                 use_streaming = False
-        else:
-            use_streaming = False
 
         if not use_streaming:
             print(f"[pipeline] Streaming failed/unstable. Downloading to temp...")
@@ -148,13 +167,13 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             except Exception as e:
                 print(f"[pipeline] Download Failed: {e}")
                 if not no_db:
-                    upsert_status_row(video_id, user_id, spaces_url or video_path, "error", None, error=f"Download failed: {e}")
+                    upsert_status_row(video_id, user_id, spaces_url or video_path, "failed", task_id, error=f"Download failed: {e}")
                 return False
 
-    # 2. Initial status update (In Progress)
+    # 2. Initial status update (In Progress) - Use 'running' (7 chars) instead of 'in_progress' (11 chars)
     if not no_db:
-        print(f"[pipeline] Setting In Progress for {video_id}...")
-        upsert_status_row(video_id, user_id, spaces_url or video_path, "in_progress", None)
+        print(f"[pipeline] Setting status 'running' for {video_id} (Task {task_id})...")
+        upsert_status_row(video_id, user_id, spaces_url or video_path, "running", task_id)
 
     try:
         # 3. Execute Subprocess
@@ -171,25 +190,28 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             cmd.extend(["--max_frames", str(max_frames)])
         if jnr_stride:
             cmd.extend(["--jnr_stride", str(jnr_stride)])
+        if vid_stride:
+            cmd.extend(["--vid_stride", str(vid_stride)])
             
         print(f"[pipeline] Executing Core: {' '.join(cmd)}")
-        result = subprocess.run(cmd, env=os.environ, timeout=7200)
+        # Increased timeout to 4 hours for H100 full matches
+        result = subprocess.run(cmd, env=os.environ, timeout=14400)
         
         if result.returncode != 0:
             print(f"[pipeline] Core failed with code {result.returncode}")
             if not no_db:
-                upsert_status_row(video_id, user_id, spaces_url or video_path, "error", None, error=f"Core exit {result.returncode}")
+                upsert_status_row(video_id, user_id, spaces_url or video_path, "failed", task_id, error=f"Core exit {result.returncode}")
             return False
 
-        # 3. Handle Results & DB
+        # 3. Handle Results & DB - Use 'finished' to match DB ENUM
         stats_path = os.path.join(output_dir, "player_stats.json")
         if os.path.exists(stats_path):
             with open(stats_path, 'r') as f:
                 stats_data = json.load(f)
             
             if not no_db:
-                print(f"[pipeline] Updating DB for {video_id}...")
-                upsert_status_row(video_id, user_id, spaces_url or video_path, "finished", None, analysis={"stats": stats_data})
+                print(f"[pipeline] Updating DB with stats for {video_id}...")
+                upsert_status_row(video_id, user_id, spaces_url or video_path, "finished", task_id, analysis={"stats": stats_data})
             return True
         else:
             print(f"[pipeline] Missing player_stats.json in {output_dir}")
@@ -198,7 +220,7 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
     except Exception as e:
         print(f"[pipeline] Error: {e}")
         if not no_db:
-            upsert_status_row(video_id, user_id, spaces_url or video_path, "error", None, error=str(e))
+            upsert_status_row(video_id, user_id, spaces_url or video_path, "failed", task_id, error=str(e))
         return False
     finally:
         # Cleanup temp
@@ -230,7 +252,7 @@ def fetch_pending_videos():
         return []
 
 
-def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, make_video=False):
+def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False):
     """
     Process a single video from SPACES using the unified run_pipeline wrapper.
     """
@@ -247,7 +269,14 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         user_id = filename.split("_")[0] if "_" in filename else "unknown"
     
     print(f"[process] Starting: {filename}")
+    print(f"[process] Starting: {filename}")
     print(f"[process] Video ID: {video_id}, User ID: {user_id}")
+    
+    # Generate unique TaskID (pseudo-unique 32-bit int)
+    # Avoids 'Duplicate entry 0' error
+    import random
+    task_id = int(time.time() * 1000) % 1000000000 + random.randint(0, 100000)
+    print(f"[process] Generated Task ID: {task_id}")
     
     if not spaces_url:
         print(f"[process] Error: No spacesURL for {video_id}")
@@ -259,6 +288,7 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         os.makedirs(out_dir)
     
     # Process using the new unified wrapper
+    # Process using the new unified wrapper
     success = run_pipeline(
         video_path=spaces_url,
         output_dir=out_dir,
@@ -269,7 +299,9 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         spaces_url=spaces_url,
         locking_mode=locking_mode,
         jnr_stride=jnr_stride,
-        make_video=make_video
+        vid_stride=vid_stride,
+        make_video=make_video,
+        task_id=task_id
     )
     
     if success:
@@ -278,21 +310,26 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         return {"status": "error", "video_id": video_id, "error": "Pipeline failed"}
 
 
+import concurrent.futures
+
 def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_size_mb=float('inf'), 
-                       locking_mode=2, jnr_stride=None, make_video=False):
+                       locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, parallel_workers=1):
     """
     Continuously poll for pending videos and process them.
     
     Args:
         poll_interval: Seconds between polls (default 60)
-        max_videos: Max videos to process before stopping (None = infinite)
+        max_videos: Max videos to PROCESS (submit) before stopping
         min_size_mb: Minimum file size filter in MB
         max_size_mb: Maximum file size filter in MB
         locking_mode: Mode passed down to pipeline
         jnr_stride: Stride passed down to pipeline
+        parallel_workers: Number of concurrent pipeline jobs
     """
-    print(f"[poll] Starting polling loop (interval={poll_interval}s)...")
+    print(f"[poll] Starting polling loop (interval={poll_interval}s, workers={parallel_workers})...")
     print(f"[poll] Size filter: {min_size_mb}MB - {max_size_mb}MB")
+    
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers)
     
     processed_count = 0
     processed_ids = set()
@@ -307,11 +344,13 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                 continue
             
             # Filter by size and already processed
+            submitted_in_this_cycle = 0
+            
             for video in videos:
                 video_id = video.get("id")
                 file_size_mb = video.get("fileSize", 0) / 1024 / 1024
                 
-                # Skip already processed
+                # Skip already processed (local cache)
                 if video_id in processed_ids:
                     continue
                 
@@ -319,39 +358,52 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                 if file_size_mb < min_size_mb or file_size_mb > max_size_mb:
                     continue
                 
-                # Skip if already in DB
+                # Skip if already in DB (Persistent check)
                 if is_video_processed(video_id, video.get("spacesURL")):
-                    print(f"[poll] Already processed: {video_id}")
-                    processed_ids.add(video_id)
-                    continue
+                   print(f"[poll] Already processed (DB): {video_id}")
+                   processed_ids.add(video_id)
+                   continue
+
+                # No filename filter - process all videos
                 
-                # Process this video
-                result = process_spaces_video(
+                # Submit to worker pool
+                print(f"[poll] Submitting {video_id} ({file_size_mb:.1f}MB) to worker pool...")
+
+                # FULL RUN (No Limit)
+                limit_frames = None 
+                
+                executor.submit(
+                    process_spaces_video,
                     video, save_local=True, no_db=NO_DB,
                     locking_mode=locking_mode,
                     jnr_stride=jnr_stride,
-                    make_video=make_video
+                    vid_stride=vid_stride,
+                    make_video=make_video,
+                    max_frames=limit_frames
                 )
+                
                 processed_ids.add(video_id)
                 processed_count += 1
-                
-                if result.get("status") == "success":
-                    print(f"[poll] Successfully processed {processed_count} videos")
+                submitted_in_this_cycle += 1
                 
                 # Check max limit
                 if max_videos and processed_count >= max_videos:
-                    print(f"[poll] Reached max_videos limit ({max_videos}). Stopping.")
+                    print(f"[poll] Reached max_videos limit ({max_videos}). Stopping submissions.")
+                    executor.shutdown(wait=False) # We act as a daemon mostly, but returning exits main loop
                     return
-                
-                # Small delay between videos
-                time.sleep(5)
             
+            if submitted_in_this_cycle == 0:
+                 print(f"[poll] No new actionable videos found this cycle.")
+            else:
+                 print(f"[poll] Submitted {submitted_in_this_cycle} new jobs.")
+
             # Wait before next poll
             print(f"[poll] Cycle complete. Waiting {poll_interval}s...")
             time.sleep(poll_interval)
             
         except KeyboardInterrupt:
             print("[poll] Interrupted by user. Stopping.")
+            executor.shutdown(wait=False)
             break
         except Exception as e:
             print(f"[poll] Error in polling loop: {e}")
@@ -381,6 +433,9 @@ def main():
     parser.add_argument("--max_size_mb", type=float, default=float('inf'), help="Maximum video size in MB")
     parser.add_argument("--locking_mode", type=int, choices=[1, 2], default=2, help="Internal pipeline locking mode")
     parser.add_argument("--jnr_stride", type=int, help="Internal pipeline JNR stride (frames)")
+    parser.add_argument("--vid_stride", type=int, help="Internal pipeline VIDEO stride (skip frames)")
+    
+    parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent pipelines (default 1)")
     
     args = parser.parse_args()
     
@@ -407,8 +462,6 @@ def main():
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
             
-        base_name = os.path.splitext(os.path.basename(args.local_video.split("?")[0]))[0]
-        
         try:
             # We use the new unified wrapper
             success = run_pipeline(
@@ -420,6 +473,7 @@ def main():
                 user_id="local_user",
                 locking_mode=args.locking_mode,
                 jnr_stride=args.jnr_stride,
+                vid_stride=args.vid_stride,
                 make_video=args.make_video
             )
             if success:
@@ -436,7 +490,7 @@ def main():
         
     elif args.poll:
         # POLLING MODE - Fetch from SPACES and process
-        print("[main] Starting SPACES polling mode...")
+        print(f"[main] Starting SPACES polling mode (Parallel Workers: {args.parallel})...")
         start_polling_loop(
             poll_interval=args.poll_interval,
             max_videos=args.max_videos,
@@ -444,7 +498,9 @@ def main():
             max_size_mb=args.max_size_mb,
             locking_mode=args.locking_mode,
             jnr_stride=args.jnr_stride,
-            make_video=args.make_video
+            vid_stride=args.vid_stride,
+            make_video=args.make_video,
+            parallel_workers=args.parallel
         )
     else:
         # Show help if no mode specified

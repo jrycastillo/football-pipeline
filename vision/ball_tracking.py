@@ -17,7 +17,7 @@ class BallTracker:
     def __init__(self):
         self.tracks = {} # frame_idx -> (x, y)
         self.raw_detections = {} # frame_idx -> box
-        self.max_gap = 5 # frames to interpolate
+        self.max_gap = 25 # Phase 187: Increased from 5 to fill more gaps
 
     def update(self, frame_idx, boxes):
         """

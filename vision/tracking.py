@@ -93,8 +93,8 @@ def track_video(video_path, weights_path, ball_model_path=None, max_frames=None,
         # Ball Inference (Optional)
         ball_results = [None] * len(batch)
         if ball_model:
-             ball_params = {"conf": 0.15, "verbose": False, "device": device, "imgsz": imgsz, "save": False}
-             ball_results = ball_model.track(source=batch, persist=True, tracker="/home/ubuntu/football/football_bytetrack.yaml", **ball_params)
+            ball_params = {"conf": 0.05, "verbose": False, "device": device, "imgsz": imgsz, "save": False}  # Phase 187: Lower threshold for more ball detections
+            ball_results = ball_model.track(source=batch, persist=True, tracker="/home/ubuntu/football/football_bytetrack.yaml", **ball_params)
 
         # Process Results
         for i, res in enumerate(results):

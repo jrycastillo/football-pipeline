@@ -14,19 +14,19 @@ from collections import Counter
 HSV_COLOR_RANGES = {
     # (H_min, H_max, S_min, S_max, V_min, V_max)
     "Maroon": [(0, 15, 50, 255, 20, 100), (165, 180, 50, 255, 20, 100)],
-    "Red": [(0, 10, 60, 255, 60, 255), (160, 180, 60, 255, 60, 255)],
-    "Orange": [(10, 25, 80, 255, 80, 255)],
-    "Yellow": [(25, 45, 60, 255, 60, 255)],
-    "Green": [(45, 85, 40, 255, 40, 255)],
-    "Cyan": [(85, 105, 40, 255, 40, 255)],
-    "Blue": [(105, 140, 50, 255, 50, 255)],
+    "Red": [(0, 10, 60, 255, 40, 255), (160, 180, 60, 255, 40, 255)],
+    "Orange": [(10, 25, 80, 255, 60, 255)],
+    "Yellow": [(25, 45, 60, 255, 40, 255)],
+    "Green": [(45, 85, 40, 255, 20, 255)],
+    # Cyan merged into Blue to avoid confusion with cool whites/blues
+    "Blue": [(85, 140, 50, 255, 40, 255)],
     "Navy": [(105, 145, 40, 255, 20, 80)],
     "Purple": [(140, 160, 40, 255, 40, 255)],
     "Pink": [(150, 175, 30, 255, 80, 255)],
-    "White": [(0, 180, 0, 40, 180, 255)],
+    "White": [(0, 180, 0, 50, 180, 255)],
     "Silver": [(0, 180, 0, 30, 120, 180)],
-    "Black": [(0, 180, 0, 255, 0, 50)],
-    "Gray": [(0, 180, 0, 40, 50, 150)],
+    "Black": [(0, 180, 0, 255, 0, 30)],
+    "Gray": [(0, 180, 0, 40, 40, 150)],
 }
 
 
@@ -73,16 +73,52 @@ class TeamColorClassifier:
         return crop[y1:y2, x1:x2]
     
     def _find_dominant_hsv(self, hsv_pixels):
-        """Use K-Means to find dominant HSV color from pixels."""
+        """
+        Find dominant color using Histogram (Mode) rather than Median.
+        Focuses on Hue for chromatic colors, handles Grayscale separately.
+        """
         if len(hsv_pixels) < 10:
             return None
+            
+        # 1. Separate into Chromatic (Color) and Achromatic (Gray/Black/White)
+        # S < 40 considered achromatic (white/black/grey)
+        is_chromatic = hsv_pixels[:, 1] > 40
         
-        try:
-            kmeans = KMeans(n_clusters=1, n_init=3, random_state=42)
-            kmeans.fit(hsv_pixels)
-            return kmeans.cluster_centers_[0]
-        except:
-            return np.mean(hsv_pixels, axis=0)
+        chromatic_pixels = hsv_pixels[is_chromatic]
+        achromatic_pixels = hsv_pixels[~is_chromatic]
+        
+        # 2. Determine if the jersey is mostly Color or Grayscale
+        # Heuristic: If > 30% pixels are chromatic, treat as Colored. 
+        # (Jerseys usually have strong color unless they are White/Black)
+        if len(chromatic_pixels) > len(hsv_pixels) * 0.3:
+            # --- CHROMATIC PATH (Find Dominant Hue) ---
+            
+            # Histogram for Hue (0-180), bin size 10 -> 18 bins
+            hist, bins = np.histogram(chromatic_pixels[:, 0], bins=18, range=(0, 180))
+            
+            # Find peak bin
+            peak_bin_idx = np.argmax(hist)
+            start_h = bins[peak_bin_idx]
+            end_h = bins[peak_bin_idx + 1]
+            
+            # Select pixels within this Hue range
+            mask = (chromatic_pixels[:, 0] >= start_h) & (chromatic_pixels[:, 0] < end_h)
+            dominant_group = chromatic_pixels[mask]
+            
+            if len(dominant_group) == 0:
+                # Fallback to simple median if binning failed (rare)
+                return np.median(chromatic_pixels, axis=0)
+            
+            # Return median of the DOMINANT CLUSTER (Robust)
+            return np.median(dominant_group, axis=0)
+            
+        else:
+            # --- ACHROMATIC PATH (Black/White/Grey) ---
+            if len(achromatic_pixels) == 0:
+                return np.median(hsv_pixels, axis=0)
+                
+            # For greyscale, we care about Value (Brightness)
+            return np.median(achromatic_pixels, axis=0)
     
     def _classify_hsv(self, h, s, v):
         """Classify HSV values to color name with wide tolerance."""
@@ -104,7 +140,7 @@ class TeamColorClassifier:
         if h < 25: return "Orange"
         if h < 45: return "Yellow"
         if h < 85: return "Green"
-        if h < 105: return "Cyan"
+        # Expanded Blue fallback (covers old Cyan region)
         if h < 145: return "Blue"
         return "Purple"
     
@@ -181,6 +217,37 @@ class TeamColorClassifier:
             self.color_buffer.pop(track_id, None)
         else:
             self.color_buffer.clear()
+
+
+class KitCoordinator:
+    """Aggregates detection colors to find base team kits (Phase 168)."""
+    def __init__(self):
+        # 1=GK, 2=Player
+        self.counts = {1: Counter(), 2: Counter()}
+
+    def observe(self, cls_id, color):
+        """Register a color observation for a class."""
+        if color == "Unknown":
+            return
+        if cls_id in self.counts:
+            self.counts[cls_id][color] += 1
+            
+    def get_discovery_result(self):
+        """Return top 2 colors for GKs and Players."""
+        res = {
+            "goalkeepers": [],
+            "players": []
+        }
+        
+        # Top 2 GK colors
+        for color, _ in self.counts[1].most_common(2):
+            res["goalkeepers"].append(color)
+            
+        # Top 2 Player colors
+        for color, _ in self.counts[2].most_common(2):
+            res["players"].append(color)
+            
+        return res
 
 
 # Legacy function
