@@ -31,7 +31,7 @@ class BallTracker:
             
         # Select best ball (highest confidence)
         # TODO: Could add proximity logic to previous ball position
-        best_ball = max(balls, key=lambda x: x["conf"])
+        best_ball = max(balls, key=lambda x: x.get("conf", 0.0))
         
         self.raw_detections[frame_idx] = best_ball
         self.tracks[frame_idx] = bbox_center(best_ball["xyxy"])

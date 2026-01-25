@@ -32,14 +32,27 @@ class StatsEngine:
         team_map_ref = self.team_map if hasattr(self, "team_map") else None
         events, raw_stats = self.detector.analyze(ownership, player_tracks, ball_track, team_map=team_map_ref)
         
-        # Phase 192: Remap raw_stats from track IDs to jersey numbers
+        # Phase 192/216: Remap raw_stats from track IDs to jersey numbers
         # This ensures passes/events are attributed to jersey numbers, not track IDs
-        if id_manager and hasattr(id_manager, 'active_bindings'):
+        # Phase 216: Also builds reverse lookup from jersey_registry for soft-registered jerseys
+        if id_manager:
             remapped_stats = {}
             remap_count = 0
+            
+            # Build reverse lookup: track_id -> jersey_number from jersey_registry
+            track_to_jersey = {}
+            if hasattr(id_manager, 'active_bindings'):
+                track_to_jersey.update(id_manager.active_bindings)
+            if hasattr(id_manager, 'jersey_registry'):
+                for jersey_num, info in id_manager.jersey_registry.items():
+                    if isinstance(info, dict) and 'track_id' in info:
+                        tid = info['track_id']
+                        if tid not in track_to_jersey:  # active_bindings takes priority
+                            track_to_jersey[tid] = jersey_num
+            
             for track_id, stats_dict in raw_stats.items():
                 # Check if this track ID maps to a jersey number
-                jersey_num = id_manager.active_bindings.get(track_id)
+                jersey_num = track_to_jersey.get(track_id)
                 target_id = jersey_num if (jersey_num is not None and jersey_num != track_id) else track_id
                 if jersey_num is not None and jersey_num != track_id:
                     remap_count += 1
@@ -56,7 +69,7 @@ class StatsEngine:
                         # If value is a dict or other type, just assign (don't accumulate)
                         remapped_stats[target_id][key] = value
             raw_stats = remapped_stats
-            print(f"[Phase 192] Remapped {remap_count} track IDs to jersey numbers in raw_stats")
+            print(f"[Phase 216] Remapped {remap_count} track IDs to jersey numbers (active_bindings + jersey_registry)")
         
         # 3. Final Formatting
         formatted_stats = {}
@@ -65,12 +78,7 @@ class StatsEngine:
         all_ids = set(raw_stats.keys())
         if id_manager:
             all_ids.update(id_manager.jersey_registry.keys())
-            
-        # Get all distinct IDs from stats + jersey registry
-        all_ids = set(raw_stats.keys())
-        if id_manager:
-            all_ids.update(id_manager.jersey_registry.keys())
-            
+
         # Pre-calculate Minutes Played for Noise Filtering (Task 3)
         id_frame_counts = defaultdict(int)
         for f in all_frames:
@@ -192,6 +200,10 @@ class StatsEngine:
                 "team": team_name, 
                 "position": "Player", 
                 "role": "Player",
+                # Phase 216: Confidence Metadata
+                "observations": total_frames,
+                "confidence_score": round(min(1.0, total_frames / 100.0), 2),  # Normalize to 0-1
+                "soft_registered": (id_manager.jersey_registry.get(jersey_num, {}).get("soft", False) if isinstance(id_manager.jersey_registry.get(jersey_num), dict) else False) if id_manager and jersey_num else False,
                 "stats": {
                     "total_distance": round(s["distance_m"], 2),
                     "time_on_ball_s": time_on_ball,
@@ -355,7 +367,28 @@ class StatsEngine:
             self.team_map = {}
             for j in teams[team_a_color]: self.team_map[str(j)] = team_a_color.capitalize() # "Red"
             for j in teams[team_b_color]: self.team_map[str(j)] = team_b_color.capitalize() # "White"
-            
+
+            # FIX: Also add track_id -> team mappings via active_bindings reverse lookup
+            # This allows team validation to work for both jersey numbers AND track IDs
+            if hasattr(id_manager, 'active_bindings'):
+                for track_id, jersey_num in id_manager.active_bindings.items():
+                    jersey_team = self.team_map.get(str(jersey_num))
+                    if jersey_team and str(track_id) not in self.team_map:
+                        self.team_map[str(track_id)] = jersey_team
+
+            # Also add track_colors for unbound tracks
+            if hasattr(id_manager, 'track_colors'):
+                for track_id, color in id_manager.track_colors.items():
+                    if str(track_id) not in self.team_map:
+                        # Map color to team
+                        color_lower = color.lower() if color else ""
+                        if color_lower in [team_a_color.lower(), team_a_color]:
+                            self.team_map[str(track_id)] = team_a_color.capitalize()
+                        elif color_lower in [team_b_color.lower(), team_b_color]:
+                            self.team_map[str(track_id)] = team_b_color.capitalize()
+
+            print(f"[ReID Fix] team_map now has {len(self.team_map)} entries (jersey + track IDs)")
+
             # Helper for the rest
             self.primary_teams = {team_a_color.capitalize(), team_b_color.capitalize()}
             # Default others to closest? Or Unknown.

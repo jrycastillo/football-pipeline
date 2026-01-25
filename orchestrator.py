@@ -113,7 +113,7 @@ def is_video_processed(matches_video_id, source_url):
     return False
 
 def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None, 
-                 locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, task_id=0):
+                 locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", sam2_model="large", make_video=False, task_id=0):
     """
     Unified metadata-aware pipeline wrapper.
     Delegates to pipeline_consolidated.py and handles DB updates.
@@ -131,9 +131,9 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
     if video_path.startswith("http"):
         print(f"[pipeline] Attempting to stream: {video_path[:50]}...")
         
-        # Force download for Ikorudo match to ensure full processing (User Request)
-        if "2e5f877b" in video_path:
-             print("[pipeline] Force-downloading Ikorudo match for stability.")
+        # Force download for large matches to ensure full processing (User Request)
+        if "2e5f877b" in video_path or "01c073e5" in video_path or "d02a2634" in video_path:
+             print("[pipeline] Force-downloading large match for stability.")
              use_streaming = False
         else:
             cap = cv2.VideoCapture(video_path)
@@ -192,10 +192,15 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             cmd.extend(["--jnr_stride", str(jnr_stride)])
         if vid_stride:
             cmd.extend(["--vid_stride", str(vid_stride)])
+        if tracking_mode:
+            cmd.extend(["--tracking_mode", tracking_mode])
+        # SAM2 DISABLED for speed (User Request 2026-01-22)
+        # if sam2_model:
+        #     cmd.extend(["--sam2_model", sam2_model])
             
         print(f"[pipeline] Executing Core: {' '.join(cmd)}")
-        # Increased timeout to 4 hours for H100 full matches
-        result = subprocess.run(cmd, env=os.environ, timeout=14400)
+        # Increased timeout to 8 hours for H100 full matches (was 4hr, caused timeout)
+        result = subprocess.run(cmd, env=os.environ, timeout=28800)
         
         if result.returncode != 0:
             print(f"[pipeline] Core failed with code {result.returncode}")
@@ -243,7 +248,15 @@ def fetch_pending_videos():
         resp = requests.get(SBG_LIST_URL, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            return data.get("items", [])
+            items = data.get("items", [])
+            
+            # --- PRIORITY FILTER (User Request) ---
+            TARGET_USER = "d02a2634"
+            # Filter by matching user ID in file path e.g. matches_upload/{USER_ID}/...
+            filtered = [x for x in items if TARGET_USER in x.get("fileLocation", "")]
+            
+            print(f"[poll] Found {len(items)} total. Filtered {len(filtered)} for user {TARGET_USER} (by path match).")
+            return filtered
         else:
             print(f"[poll] Error fetching videos: {resp.status_code} - {resp.text}")
             return []
@@ -252,7 +265,7 @@ def fetch_pending_videos():
         return []
 
 
-def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False):
+def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", sam2_model="large", make_video=False):
     """
     Process a single video from SPACES using the unified run_pipeline wrapper.
     """
@@ -300,6 +313,8 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         locking_mode=locking_mode,
         jnr_stride=jnr_stride,
         vid_stride=vid_stride,
+        tracking_mode=tracking_mode,
+        sam2_model=sam2_model,
         make_video=make_video,
         task_id=task_id
     )
@@ -431,9 +446,11 @@ def main():
     parser.add_argument("--max_videos", type=int, help="Max videos to process before stopping")
     parser.add_argument("--min_size_mb", type=float, default=0, help="Minimum video size in MB")
     parser.add_argument("--max_size_mb", type=float, default=float('inf'), help="Maximum video size in MB")
-    parser.add_argument("--locking_mode", type=int, choices=[1, 2], default=2, help="Internal pipeline locking mode")
+    parser.add_argument("--locking_mode", type=int, choices=[1, 2, 3], default=2, help="Internal pipeline locking mode")
     parser.add_argument("--jnr_stride", type=int, help="Internal pipeline JNR stride (frames)")
     parser.add_argument("--vid_stride", type=int, help="Internal pipeline VIDEO stride (skip frames)")
+    parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "sam2", "botsort"], help="Tracking backend")
+    parser.add_argument("--sam2_model", type=str, default="large", choices=["large", "base", "small", "tiny"], help="SAM2 model variant")
     
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent pipelines (default 1)")
     
@@ -474,6 +491,8 @@ def main():
                 locking_mode=args.locking_mode,
                 jnr_stride=args.jnr_stride,
                 vid_stride=args.vid_stride,
+                tracking_mode=args.tracking_mode,
+                sam2_model=args.sam2_model,
                 make_video=args.make_video
             )
             if success:

@@ -5,24 +5,30 @@ Phase 139: Robust jersey color detection using HSV ranges for wider tolerance.
 
 import cv2
 import numpy as np
+import torch
 from sklearn.cluster import KMeans
 from collections import Counter
+from transformers import SiglipImageProcessor, SiglipVisionModel
+from PIL import Image
 
 # HSV-based color ranges with wide tolerance for lighting variations
 # Format: (H_min, H_max, S_min, V_min) - HSV ranges for each color
 # Note: OpenCV uses H: 0-180, S: 0-255, V: 0-255
 HSV_COLOR_RANGES = {
     # (H_min, H_max, S_min, S_max, V_min, V_max)
-    "Maroon": [(0, 15, 50, 255, 20, 100), (165, 180, 50, 255, 20, 100)],
-    "Red": [(0, 10, 60, 255, 40, 255), (160, 180, 60, 255, 40, 255)],
-    "Orange": [(10, 25, 80, 255, 60, 255)],
-    "Yellow": [(25, 45, 60, 255, 40, 255)],
-    "Green": [(45, 85, 40, 255, 20, 255)],
-    # Cyan merged into Blue to avoid confusion with cool whites/blues
-    "Blue": [(85, 140, 50, 255, 40, 255)],
+    "Maroon": [(0, 10, 50, 255, 20, 100), (170, 180, 50, 255, 20, 100)],
+    "Red": [(0, 10, 60, 255, 40, 255), (170, 180, 60, 255, 40, 255)],
+    "Orange": [(10, 20, 80, 255, 60, 255)],
+    "Gold": [(20, 30, 40, 255, 50, 255)],
+    "Yellow": [(25, 35, 60, 255, 40, 255)], # Narrowed to make room for Gold/Lime
+    "Lime": [(35, 55, 40, 255, 40, 255)], # The requested "Light Green"
+    "Green": [(55, 85, 40, 255, 20, 255)], # Shifted up
+    "Teal": [(80, 95, 40, 255, 30, 150)],
+    "Cyan": [(85, 105, 50, 255, 40, 255)],
+    "Blue": [(100, 140, 50, 255, 40, 255)],
     "Navy": [(105, 145, 40, 255, 20, 80)],
     "Purple": [(140, 160, 40, 255, 40, 255)],
-    "Pink": [(150, 175, 30, 255, 80, 255)],
+    "Pink": [(150, 170, 30, 255, 80, 255)],
     "White": [(0, 180, 0, 50, 180, 255)],
     "Silver": [(0, 180, 0, 30, 120, 180)],
     "Black": [(0, 180, 0, 255, 0, 30)],
@@ -137,12 +143,16 @@ class TeamColorClassifier:
             
         # 3. Last Resort: Closest Hue
         if h < 10 or h > 170: return "Red"
-        if h < 25: return "Orange"
-        if h < 45: return "Yellow"
+        if h < 20: return "Orange"
+        if h < 30: return "Gold"
+        if h < 40: return "Yellow"
+        if h < 55: return "Lime"
         if h < 85: return "Green"
-        # Expanded Blue fallback (covers old Cyan region)
+        if h < 95: return "Teal"
+        if h < 105: return "Cyan"
         if h < 145: return "Blue"
-        return "Purple"
+        if h < 165: return "Purple"
+        return "Pink"
     
     def predict(self, crop, track_id=None):
         """Predict jersey color from image crop using HSV analysis."""
@@ -248,6 +258,154 @@ class KitCoordinator:
             res["players"].append(color)
             
         return res
+
+
+class SigLIPTeamClassifier:
+    """
+    SigLIP-based semantic team classifier (Phase v28).
+    Extracts high-dimensional embeddings for player crops to cluster teams robustly.
+    """
+    def __init__(self, model_id="google/siglip-base-patch16-224"):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"🔄 [SigLIP] Initializing component on {self.device}...")
+        self.processor = SiglipImageProcessor.from_pretrained(model_id)
+        self.model = SiglipVisionModel.from_pretrained(model_id).to(self.device)
+        self.model.eval()
+        
+        # Buffer for embeddings per track: {track_id: [embedding1, embedding2, ...]}
+        self.embeddings = {}
+    
+    def extract_embedding(self, crop):
+        """Extract a semantic embedding for a player crop (BGR numpy or PIL)."""
+        if crop is None: return None
+        if isinstance(crop, np.ndarray) and crop.size == 0: return None
+            
+        try:
+            # Handle Input Type
+            if isinstance(crop, np.ndarray):
+                # Convert BGR to RGB and PIL
+                rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb)
+            elif isinstance(crop, Image.Image):
+                pil_img = crop
+            else:
+                return None
+            
+            with torch.no_grad():
+                inputs = self.processor(images=pil_img, return_tensors="pt").to(self.device)
+                outputs = self.model(**inputs)
+                # pooler_output: [1, 768]
+                embed = outputs.pooler_output[0].cpu().numpy()
+            return embed
+        except Exception as e:
+            print(f"⚠️ [SigLIP] Embedding failed: {e}")
+            return None
+
+    def verify_consistency(self, crop, reference_crops, threshold=0.6):
+        """
+        Verify if a crop is visually consistent with a set of reference crops (PIL images).
+        Returns: (is_consistent, max_score)
+        """
+        if not reference_crops:
+            return True, 1.0 # No prior data to contradict
+            
+        target_embed = self.extract_embedding(crop)
+        if target_embed is None:
+            return False, 0.0
+            
+        target_tensor = torch.tensor(target_embed).to(self.device).unsqueeze(0)
+        
+        max_score = -1.0
+        
+        # Check against gallery
+        for ref_pil in reference_crops:
+            ref_embed = self.extract_embedding(ref_pil)
+            if ref_embed is None: continue
+            
+            ref_tensor = torch.tensor(ref_embed).to(self.device).unsqueeze(0)
+            sim = torch.nn.functional.cosine_similarity(target_tensor, ref_tensor).item()
+            
+            if sim > max_score:
+                max_score = sim
+                
+        # If we have matches, use the best score
+        # 0.6 is a conservative threshold for "same person" in SigLIP space
+        if max_score >= threshold:
+            return True, max_score
+            
+        return False, max_score
+
+    def add_observation(self, track_id, crop):
+        """Add an embedding observation for a track."""
+        embed = self.extract_embedding(crop)
+        if embed is not None:
+            if track_id not in self.embeddings:
+                self.embeddings[track_id] = []
+            self.embeddings[track_id].append(embed)
+
+    def get_track_embedding(self, track_id):
+        """Get the mean embedding for a track."""
+        if track_id not in self.embeddings or not self.embeddings[track_id]:
+            return None
+        return np.mean(self.embeddings[track_id], axis=0)
+
+    def query_identity(self, crop, threshold=0.85, top_k=1):
+        """
+        Query the gallery for a matching track ID using Cosine Similarity.
+        Refined Logic:
+        - Helper for Hybrid ReID (Tier 3).
+        - Returns (best_match_tid, score) or (None, 0.0) if below threshold.
+        """
+        query_embed = self.extract_embedding(crop)
+        if query_embed is None:
+            return None, 0.0
+
+        best_tid = None
+        best_score = -1.0
+        
+        # Convert query to tensor once
+        q_tensor = torch.tensor(query_embed).to(self.device).unsqueeze(0) # [1, D]
+
+        # Compare against all known tracks
+        # Optimization: Could stack all embeddings, but loop is fine for <50 tracks
+        for tid, embedding_list in self.embeddings.items():
+            # Use the mean embedding of the track for stability
+            target_mean = np.mean(embedding_list, axis=0)
+            t_tensor = torch.tensor(target_mean).to(self.device).unsqueeze(0) # [1, D]
+            
+            # Cosine Similarity
+            sim = torch.nn.functional.cosine_similarity(q_tensor, t_tensor).item()
+            
+            if sim > best_score:
+                best_score = sim
+                best_tid = tid
+        
+        if best_score >= threshold:
+            return best_tid, best_score
+        
+        return None, best_score
+
+    def cluster_teams(self, n_teams=2):
+        """
+        Perform clustering across all observed tracks to identify team assignments.
+        Returns: {track_id: team_label}
+        """
+        track_ids = []
+        track_embeds = []
+        
+        for tid in self.embeddings.keys():
+            mean_embed = self.get_track_embedding(tid)
+            if mean_embed is not None:
+                track_ids.append(tid)
+                track_embeds.append(mean_embed)
+        
+        if len(track_embeds) < n_teams:
+            return {tid: 0 for tid in track_ids}
+            
+        kmeans = KMeans(n_clusters=n_teams, n_init=10)
+        labels = kmeans.fit_predict(np.array(track_embeds))
+        
+        return {tid: label for tid, label in zip(track_ids, labels)}
 
 
 # Legacy function

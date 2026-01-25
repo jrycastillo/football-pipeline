@@ -3,7 +3,7 @@ env:
   SRC_VIDEO: null
   DET_WEIGHTS: "/home/ubuntu/videoforprocessing_link/ronan/new/models/detect.pt"
   POSE_WEIGHTS: "/home/ubuntu/videoforprocessing_link/ronan/new/models/pose.pt"
-  JNR_WEIGHTS: "/home/ubuntu/football/runs/qwen_h100_finetune_merged"
+  JNR_WEIGHTS: null
   BALL_MODEL_PATH: null
   
   # Output

@@ -12,6 +12,7 @@
 
 import os
 import sys
+from vision.resnet_recognition import ResNetRecognizerV2 as JNRService
 
 # FORCE HF CACHE to Local Directory to avoid Permission Errors
 os.environ["HF_HOME"] = "/home/ubuntu/football/hf_cache"
@@ -41,17 +42,231 @@ def log(msg):
     logging.info(msg)
     # print(msg) # StreamHandler handles this
 
+def safe_crop(img, box):
+    """Safely crop image with bounds checking."""
+    x1, y1, x2, y2 = map(int, box)
+    h, w = img.shape[:2]
+    x1 = max(0, x1); y1 = max(0, y1)
+    x2 = min(w, x2); y2 = min(h, y2)
+    if x1 >= x2 or y1 >= y2:
+        return None
+    return img[y1:y2, x1:x2]
+
+
+import inspect
+import inspect
+# from ultralytics.trackers.byte_tracker import BYTETracker # Original
+from vision.custom_bytetrack import BYTETracker # Custom with Rescue
+from collections import namedtuple
+
+# Wrapper for clean ByteTrack
+class ByteTrackTracker(BYTETracker):
+    def __init__(self, args, frame_rate=30):
+        super().__init__(args, frame_rate)
+        
+    def update(self, results, img=None):
+        # Adapter to match Ultralytics tracker update signature
+        # results: can be direct det boxes or ultralytics result object
+        # but BYTETracker.update expects: results (preds), img
+        return super().update(results, img)
+
+# START MOCK CLASSES (For explicit control)
+class MockBox:
+    def __init__(self, xyxy, tid, conf, cls_id):
+        self.xyxy = [torch.tensor(xyxy, device="cuda")]
+        self.id = [torch.tensor([tid], device="cuda")]
+        self.conf = [torch.tensor([conf], device="cuda")]
+        self.cls = [torch.tensor([cls_id], device="cuda")]
+
+class MockResults:
+    def __init__(self, boxes, img):
+        self.boxes = boxes
+        self.orig_img = img
+# END MOCK CLASSES
+
+# Try to import custom_botsort to check its path
+try:
+    import vision.custom_botsort as cb
+    from vision.custom_botsort import JerseyBoTSORT
+    logging.warning(f"[DEBUG] custom_botsort.py path = {cb.__file__}")
+except ImportError:
+    logging.warning("[DEBUG] vision.custom_botsort not found - BoT-SORT will be unavailable")
+    JerseyBoTSORT = None
+
+logging.warning(f"[DEBUG] pipeline_consolidated.py path = {os.path.abspath(__file__)}")
+
+def build_tracker(tracker_name, fps, enable_reid, cfg):
+    name = tracker_name.lower().strip()
+    if name == "bytetrack":
+        logging.warning("🛡️ [Tracker] Using ByteTrack (NO ReID)")
+        return ByteTrackTracker(cfg, frame_rate=fps)
+    elif name == "botsort":
+        if JerseyBoTSORT is None:
+            raise ImportError("JerseyBoTSORT not found (check vision/custom_botsort.py)")
+        logging.warning("🛡️ [Tracker] Using BoT-SORT")
+        # Passing enable_reid via config or arg if supported
+        # JerseyBoTSORT usually takes args object. We'll ensure cfg has what it needs.
+        return JerseyBoTSORT(cfg, frame_rate=fps)
+    else:
+        raise ValueError(f"Unknown tracker: {tracker_name}")
+
 import cv2
 import numpy as np
 import torch
 import math
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 from stats.metrics import StatsEngine # Import new engine
 from vision.color_classifier import TeamColorClassifier, KitCoordinator  # Phase 139
 from ultralytics import YOLO
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
+from vision.resnet_recognition import ResNetRecognizerV2 as JNRService # ResNet32 only
 from PIL import Image
+from vision.sam2_tracker import SAM2Tracker # Phase v29
+from vision.track_utils import greedy_match, calculate_iou # Phase v30
+
+# --- Phase v31: Spawn Suppression Helpers ---
+def filter_detections_strict(boxes_obj, width, height, frame_idx):
+    """
+    Remove detections that are:
+    1. Too close to image edges (Partial bodies)
+    2. Malformed Aspect Ratio (Too thin/wide)
+    3. Invalid coordinates
+    """
+    if boxes_obj is None or len(boxes_obj) == 0:
+        return boxes_obj
+        
+    valid_indices = []
+    # Tuned V2: Stricter Margin, Wider AR
+    MARGIN = 30 # px
+    MIN_AR = 0.2
+    MAX_AR = 4.0 
+    
+    removed_count = 0
+    
+    for i, box in enumerate(boxes_obj.xyxy):
+        x1, y1, x2, y2 = box.cpu().numpy()
+        
+        # 0. Sanity Check
+        if x2 <= x1 or y2 <= y1:
+            continue
+            
+        # 1. Edge Filter
+        if x1 < MARGIN or y1 < MARGIN or x2 > (width - MARGIN) or y2 > (height - MARGIN):
+            removed_count += 1
+            continue
+            
+        # 2. Aspect Ratio Filter
+        w = x2 - x1
+        h = y2 - y1
+        ar = w / h
+        if ar < MIN_AR or ar > MAX_AR:
+            removed_count += 1
+            continue
+            
+        valid_indices.append(i)
+        
+    if removed_count > 0 and frame_idx % 30 == 0:
+        print(f"✂️ [Filter] Removed {removed_count} detections at Frame {frame_idx}")
+        
+    if len(valid_indices) == len(boxes_obj):
+        return boxes_obj
+        
+    return boxes_obj[valid_indices]
+
+def prevent_ghost_spawns(online_targets, all_tracks, frame_idx):
+    """
+    Reject NEW tracks that significantly overlap with EXISTING stable tracks.
+    """
+    valid_targets = []
+    
+    # 1. Separate New vs Stable
+    new_tracks = []
+    stable_tracks = []
+    
+    for t in online_targets:
+        if hasattr(t, 'track_id'):
+            tid = int(t.track_id)
+            tlbr = t.tlbr
+            # STrack uses start_frame
+            start_frame = getattr(t, 'start_frame', frame_idx)
+        else:
+            # Numpy fallback
+            t_list = t.tolist() if hasattr(t, 'tolist') else t
+            tid = int(t_list[4])
+            tlbr = t_list[:4]
+            start_frame = frame_idx # Assume new if numpy?
+            
+        age = frame_idx - start_frame
+        
+        # Tuned V2: Treat anything < 5 frames as "New" / Unstable
+        if age <= 5:
+            new_tracks.append((t, tlbr, tid))
+        else:
+            stable_tracks.append((t, tlbr, tid))
+            valid_targets.append(t) # Keep stable
+            
+    # 2. Check Overlaps
+    # If a NEW track overlaps a STABLE track > IoU 0.15, KILL IT.
+    killed_count = 0
+    for new_t, new_box, new_tid in new_tracks:
+        is_ghost = False
+        for stable_t, stable_box, stable_tid in stable_tracks:
+            iou = calculate_iou(new_box, stable_box)
+            if iou > 0.15: # Tuned V2: Stricter (0.2 -> 0.15)
+                is_ghost = True
+                if frame_idx % 30 == 0:
+                    print(f"👻 [Ghost] Killed NEW Track {new_tid} (Overlap {iou:.2f} with Stable {stable_tid})")
+                break
+        
+        if not is_ghost:
+            valid_targets.append(new_t)
+        else:
+            killed_count += 1
+            
+    return valid_targets
+
+
+def bytetrack_update_with_stale_guard(tracker, dets, img,
+                                      stale_frames: int,
+                                      hard_frames: int):
+    """
+    Prevent very old LOST tracks from matching again (ID hijack),
+    while still allowing long occlusion recovery up to hard_frames.
+    Works by temporarily removing stale lost tracks from association.
+    """
+
+    # Split lost tracks into "recent" vs "stale"
+    lost_all = getattr(tracker, "lost_stracks", [])
+    recent_lost = []
+    stale_lost = []
+
+    for t in lost_all:
+        age = getattr(t, "time_since_update", None)
+        
+        if age is None:
+             if hasattr(tracker, 'frame_id') and hasattr(t, 'frame_id'):
+                 age = tracker.frame_id - t.frame_id
+        
+        if age is None:
+            recent_lost.append(t)
+            continue
+
+        if age <= stale_frames:
+            recent_lost.append(t)
+        else:
+            stale_lost.append(t)
+
+    tracker.lost_stracks = recent_lost
+    outputs = tracker.update(dets, img=img)
+
+    if stale_lost:
+        tracker.lost_stracks.extend(stale_lost)
+
+    tracker.lost_stracks = [
+        t for t in tracker.lost_stracks
+        if (getattr(t, "time_since_update", 0) <= hard_frames)
+    ]
+
+    return outputs
 
 # --- 1. CONFIGURATION ---
 try:
@@ -249,8 +464,36 @@ class IdentityManager:
         self.color_counter = {}  # {color: count} - track color frequencies
         self.team_colors = []    # [Team A color, Team B color] - two most common
         self.goalkeeper_zone_threshold = 0.15  # Top/bottom 15% of pitch = GK zone 
-        self.locking_mode = 2 # Default to Mode 2 (Consecutive)
+        self.locking_mode = 2 # Default to Mode 2 (Consecutive) for Precision
+        self.jersey_gallery = defaultdict(list) # Phase v26: {jersey_num: [pil_image, ...]}
+        self.track_map = {} # Phase v26: {raw_tid: stable_tid}
+        self.track_boxes = {} # Phase v28: {track_id: [ymin, xmin, ymax, xmax]} (relative)
+        # Phase v27: Bayesian Dirichlet Consensus
+        self.alpha = defaultdict(lambda: defaultdict(lambda: 1.0)) # {track_id: {jersey_num: score}}
+        self.visual_history = defaultdict(list)
+        # Run 20 Attributes
+        self.vote_counts = defaultdict(lambda: defaultdict(float)) # {track_id: {jersey: score}}
+        self.vote_counts = defaultdict(lambda: defaultdict(float)) # {track_id: {jersey: score}}
+        self.locks = {} # {track_id: {jersey: X, locked: True}}
+        self.last_jnr_update = {} # {track_id: frame_idx}
+        self.locked_map = {} # Key: (team, number), Value: track_id -- Strict Uniqueness
+        self.locked_map = {} # Key: (team, number), Value: track_id -- Strict Uniqueness
         
+        # Load existing match kits if available (for Referee Detection)
+        try:
+            with open("output/match_kits.json", "r") as f:
+                 data = json.load(f)
+                 self.team_colors = data.get("players", [])
+                 log(f"📝 [IdentityManager] Loaded existing team colors: {self.team_colors}")
+        except Exception:
+            pass
+
+    def set_track_class(self, track_id, cls_id):
+        self.track_classes[track_id] = cls_id
+
+    def set_track_color(self, track_id, color):
+        self.track_colors[track_id] = color
+
     def set_locking_mode(self, mode):
         self.locking_mode = int(mode)
         log(f"⚙️ [IdentityManager] Locking Mode set to {self.locking_mode}")
@@ -264,7 +507,48 @@ class IdentityManager:
     def touch(self, track_id, frame_idx):
         self.last_seen[track_id] = frame_idx
 
-    def process_detection(self, track_id, detected_number, confidence_str, confidence_val=0.0):
+    def try_lock(self, tid, team, num, score, track_scores):
+        """
+        Attempt to acquire a unique lock on (team, number).
+        Returns True if successful, False if denied.
+        """
+        key = (team, num)
+        
+        # 1. Check if already owned by this track
+        owner = self.locked_map.get(key)
+        if owner == tid:
+            return True
+        
+        # 2. If free, take it
+        if owner is None:
+            self.locked_map[key] = tid
+            return True
+            
+        # 3. Conflict Resolution (Steal if significantly stronger)
+        # Check owner's strength for this number
+        owner_score = self.vote_counts[owner].get(num, 0.0)
+        
+        # Phase 216: DISABLED STEAL - Multiple tracks can claim same jersey
+        # This ensures consistent visualization (e.g., both goalkeepers wear #1)
+        # The STEAL mechanism was causing jersey numbers to disappear from video
+        # when a new track claimed the same number
+        if score > (owner_score + 3.0):
+            log(f"⚔️ [IdentityManager] STEAL: Track {tid} (Score {score:.1f}) takes Jersey #{num} from Track {owner} (Score {owner_score:.1f})")
+            
+            # Phase 216: DO NOT unlock the loser - keep their binding for visualization
+            # self.locks.pop(owner, None)
+            # if self.active_bindings.get(owner) == num:
+            #      del self.active_bindings[owner]
+            
+            # Transfer lock ownership (for future conflict resolution)
+            self.locked_map[key] = tid
+            return True
+            
+        # Denied
+        # log(f"🔒 [IdentityManager] DENIED: Track {tid} wanted #{num} (Score {score:.1f}) but held by {owner} (Score {owner_score:.1f})")
+        return False
+
+    def process_detection(self, track_id, detected_number, confidence_str, confidence_val=0.0, detected_color=None):
         if track_id in self.active_bindings: return
 
         # Confidence Scoring
@@ -275,37 +559,119 @@ class IdentityManager:
             if str(confidence_str) == "high": score = 0.9
             elif str(confidence_str) == "medium": score = 0.6
             elif str(confidence_str) == "low": score = 0.3
+            
+            # Phase v26: Use VLM color to refine track color if confident
+            if detected_color and score >= 0.7:
+                self.set_track_color(track_id, detected_color)
         
         # --- MODE 1: Instant Lock on High Conf ---
         if self.locking_mode == 1:
-            if score >= 0.65: # LOWERED to 65% per user request
+            if score >= 0.15: # Aggressively LOWERED to 15% per user request (was 0.65)
                 log(f"🔒 [IdentityManager] MODE 1 LOCK: Track {track_id} -> Jersey #{detected_number}")
                 self._lock_identity(track_id, detected_number)
             return
 
-        # --- MODE 2: Consecutive High Conf (Replacement for Bayesian) ---
+        # --- MODE 2: Strict Voting & Locking (Run 20) ---
         if self.locking_mode == 2:
-            if score >= 0.65: # LOWERED to 65% per user request
-                last_num, count = self.consecutive_counter.get(track_id, (None, 0))
-                if detected_number == last_num:
-                    count += 1
-                else:
-                    count = 1
+            # 1. Update Vote Counts (if confident)
+            # User Request: Lower threshold to 0.50, but require 5 votes
+            if score >= 0.50: 
+                self.vote_counts[track_id][detected_number] += score
+                # Track vote count (tally)
+                if not hasattr(self, "vote_tallies"): self.vote_tallies = defaultdict(lambda: defaultdict(int))
+                self.vote_tallies[track_id][detected_number] += 1
                 
-                self.consecutive_counter[track_id] = (detected_number, count)
-                
-                if count >= 2:
-                    log(f"🔒 [IdentityManager] MODE 2 LOCK: Track {track_id} -> Jersey #{detected_number}")
-                    self._lock_identity(track_id, detected_number)
+            # 2. Check for Lock Condition
+            votes = self.vote_counts[track_id]
+            if not votes: return
+
+            # Find top 2 candidates
+            sorted_candidates = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+            best_num, best_score = sorted_candidates[0]
+            second_score = sorted_candidates[1][1] if len(sorted_candidates) > 1 else 0.0
+            
+            # Get tally
+            if not hasattr(self, "vote_tallies"): self.vote_tallies = defaultdict(lambda: defaultdict(int))
+            best_tally = self.vote_tallies[track_id][best_num]
+            
+            # --- Phase 221: AGGRESSIVE SOFT REGISTRATION ---
+            # Register jersey in registry after minimal observations
+            # This allows StatsEngine to recognize it as a valid player faster
+            if best_score >= 1.5 and best_num not in self.jersey_registry:
+                team = self.track_colors.get(track_id, "Unknown")
+                self.jersey_registry[best_num] = {"track_id": track_id, "team": team, "soft": True}
+                log(f"📝 [IdentityManager] Soft-registered Jersey #{best_num} for Track {track_id} (Score: {best_score:.1f})")
+            
+            # Lock Rule (User Request V6):
+            # Score >= 0.50 (Filter)
+            # 3 Votes required (Faster locking)
+            # Keep margin check for safety (>= 1.0)
+            if best_tally >= 3 and (best_score - second_score) >= 1.0:
+                 if track_id not in self.locks:
+                     # Check Global Uniqueness Logic
+                     team = self.track_colors.get(track_id, "Unknown")
+                     if self.try_lock(track_id, team, best_num, best_score, self.vote_counts):
+                         log(f"🔒 [IdentityManager] LOCKED Track {track_id} -> Jersey #{best_num} (Votes: {best_tally}, Score: {best_score:.1f}, Margin: {best_score-second_score:.1f})")
+                         self._lock_identity(track_id, best_num)
+                         self.locks[track_id] = {"jersey": best_num, "locked": True}
+            
+            # 3. Unlocking / Hysteresis (Only if locked)
+            # User instruction: "never change unless you have overwhelming evidence"
+            # Logic: If locked to A, but B is winning by HUGE margin (e.g. +8.0), maybe switch?
+            # For now, stick to "Once Locked, Stay Locked" as per QA instruction ("don't unlock at all during QA").
             return
 
-    def _lock_identity(self, track_id, jersey_num):
+        # --- MODE 3: Bayesian Dirichlet Consensus (Legacy) ---
+        if self.locking_mode == 3:
+            # Update Dirichlet parameters with weighted evidence
+            # We treat confidence as a weight for the observation
+            self.alpha[track_id][detected_number] += score
+            
+            # Calculate total evidence and expected probability
+            track_alphas = self.alpha[track_id]
+            total_evidence = sum(track_alphas.values())
+            
+            if total_evidence > 2.5: # Minimum evidence required (approx 3 strong detections)
+                best_number = max(track_alphas, key=track_alphas.get)
+                expected_prob = track_alphas[best_number] / total_evidence
+                
+                if expected_prob > 0.7: # Confidence threshold for winner
+                    log(f"🔒 [IdentityManager] MODE 3 LOCK: Track {track_id} -> Jersey #{best_number} (Prob: {expected_prob:.2f}, Evidence: {total_evidence:.1f})")
+                    self._lock_identity(track_id, best_number)
+            return
+
+    def _lock_identity(self, track_id, jersey_num, reference_crop=None):
         if jersey_num not in self.jersey_registry:
             self.jersey_registry[jersey_num] = f"Player_Jersey_{jersey_num}"
             log(f"🆕 [IdentityManager] NEW PLAYER CREATED: Jersey #{jersey_num} (Track {track_id})")
         else:
              log(f"🔄 [IdentityManager] WELCOME BACK: Track {track_id} re-linked to Jersey #{jersey_num}")
         self.active_bindings[track_id] = jersey_num
+
+        # Phase v26: Safer gallery entry (only if locked OR extremely high conf)
+        if reference_crop is not None:
+            # Phase v27: Handle Temporal Sequences (Pick middle frame for gallery)
+            if isinstance(reference_crop, list):
+                if len(reference_crop) > 0:
+                    mid_idx = len(reference_crop) // 2
+                    reference_crop = reference_crop[mid_idx]
+                else:
+                    reference_crop = None
+            
+            if reference_crop is not None:
+                # Only add to gallery if we have consensus or very high single-shot confidence
+                is_locked = jersey_num in self.jersey_registry
+                if is_locked or len(self.jersey_gallery[str(jersey_num)]) == 0:
+                    if len(self.jersey_gallery[str(jersey_num)]) < 3:
+                        # FINAL SAFETY CHECK (Phase v27.1)
+                        if isinstance(reference_crop, np.ndarray) and reference_crop.ndim == 3:
+                            # Store as PIL for Qwen direct usage
+                            rgb = cv2.cvtColor(reference_crop, cv2.COLOR_BGR2RGB)
+                            pil_img = Image.fromarray(rgb)
+                            self.jersey_gallery[str(jersey_num)].append(pil_img)
+                            log(f"🖼️ [IdentityManager] Added reference crop to Gallery for #{jersey_num}")
+                        else:
+                            log(f"⚠️ [IdentityManager] Rejected reference crop for #{jersey_num} (Invalid Type/Shape: {type(reference_crop)})")
 
     def get_track_color(self, track_id):
         return self.track_colors.get(track_id, "Unknown")
@@ -320,27 +686,172 @@ class IdentityManager:
 
         # CHECK: Do we already know this player?
         if player_key in self.master_registry:
+            # We know this jersey number exists.
             original_id, original_color = self.master_registry[player_key]
-
-            # If the tracker assigned a NEW ID to a known player
+            
+            # Use User Rule: "Do NOT use jersey number as the ID key for stitching unless LOCKED"
+            # Actually, User said: "player_id = track_id always"
+            # So we NEVER merge. We just acknowledge the jersey attribute.
+            
             if current_track_id != original_id:
-                log(f"🔄 [Re-ID] Correction: Track {current_track_id} -> {original_id} (Jersey #{jersey_number})")
-                # Inherit the ORIGINAL color (more reliable)
-                self.set_track_color(current_track_id, original_color)
-                return original_id # FORCE the old ID
+                # Just log, don't merge.
+                pass
+                
         else:
-            # First time seeing this jersey. Register it with color.
+            # First time seeing this jersey. Register it.
             self.master_registry[player_key] = (current_track_id, team_color)
-            # FIX: Populate player_colors so StatsEngine knows the team
+            # Make sure track_map points to self
+            self.track_map[current_track_id] = current_track_id
+            
             self.player_colors[player_key] = team_color
             
-            # Also register in color_registry for color-based Re-ID
+            # Also register in color_registry
             color_key = f"{team_color}_{current_track_id}"
             self.color_registry[color_key] = jersey_number
             log(f"📝 [IdentityManager] Registered Jersey #{jersey_number} to Track {current_track_id} ({team_color})")
 
+        # STRICT: Always return the tracker's ID
         return current_track_id
     
+    
+    def get_resolved_id(self, track_id):
+        """
+        Recursively resolve the track ID to its persistent root ID.
+        NOTE: This returns TRACK IDs only, not jersey numbers.
+        Jersey numbers are looked up separately in visualization and stats.
+        """
+        current = track_id
+        visited = set()
+        while current in self.track_map:
+            if current in visited: break
+            visited.add(current)
+            mapped = self.track_map[current]
+            if mapped == current: break
+            current = mapped
+        
+        # Phase 216: REMOVED jersey number return - that was causing duplicate IDs
+        # Jersey numbers should only be used in visualization, not in frame data
+        return current
+
+
+    def validate_visual_consistency(self, track_id, jersey_num, crop, classifier):
+        """
+        Check if the current crop matches the visual history of the track.
+        Returns: True (consistent), False (inconsistent/rejected)
+        """
+        # 1. Retrieve history
+        if track_id not in self.visual_history:
+             return True, 1.0 # No history yet, assume consistent
+
+        history = self.visual_history[track_id]
+        if not history:
+             return True, 1.0
+
+    # --- Run 20 Helpers ---
+    def suppress_conflicts(self, active_tracks, frame_idx):
+        """
+        Run 20.1: Enforce 1-to-1 mapping between Jersey Number and Active Track.
+        """
+        if not active_tracks: return
+        
+        jersey_map = defaultdict(list)
+        for t in active_tracks:
+            tid = t.track_id
+            # Resolve to root ID to catch "Ghost -> Real" duplicates
+            root_id = self.get_resolved_id(tid)
+            jnum = self.active_bindings.get(root_id)
+            
+            if jnum is not None:
+                jersey_map[jnum].append(t)
+                
+        for jnum, tracks in jersey_map.items():
+            if len(tracks) > 1:
+                self.resolve_collision(tracks, jnum)
+
+    def resolve_collision(self, tracks, jnum):
+        """
+        Resolve Identity Collision: Locked > Active > Confidence
+        """
+        # Sort tracks by strength: [Locked, TrackID(Older=Smaller)]
+        # Use root_id to check lock status
+        ranked = sorted(tracks, key=lambda t: (
+            self.is_locked(self.get_resolved_id(t.track_id)),  # 1. Locked wins (Root)
+            -(t.track_id) # 2. Smaller ID (Older) wins 
+        ), reverse=True)
+        
+        winner = ranked[0]
+        losers = ranked[1:]
+        
+        for l in losers:
+            l_id = l.track_id
+            log(f"⚔️ [Conflict] Jersey #{jnum}: Track {winner.track_id} beats Track {l_id}. Suppressing {l_id}.")
+            
+            # Action: Break the link!
+            # 1. If direct binding (unlikely if collision via root), remove it.
+            if l_id in self.active_bindings:
+                del self.active_bindings[l_id]
+                self.locks.pop(l_id, None)
+            
+            # 2. If mapped (Ghost -> Real), remove the mapping
+            if l_id in self.track_map and self.track_map[l_id] != l_id:
+                old_root = self.track_map[l_id]
+                # Reset mapping to self
+                self.track_map[l_id] = l_id 
+                log(f"   -> Unmapped Track {l_id} from {old_root}")
+
+    def is_locked(self, track_id):
+        return track_id in self.locks
+
+    def should_update_jnr(self, track_id, frame_idx, cadence=5):
+        """Throttle JNR updates per track."""
+        last = self.last_jnr_update.get(track_id, -999)
+        if frame_idx - last >= cadence:
+            return True
+        return False
+        
+    def record_jnr_update(self, track_id, frame_idx):
+        self.last_jnr_update[track_id] = frame_idx
+        
+        # 2. Compare against reference crop (first one)
+        # For now, we trust the locking mechanism more than visual re-check to avoid over-rejection
+        # This is a placeholder for a more advanced visual consistency check (e.g. cosine similarity)
+        return True, 1.0
+
+
+
+    def resolve_by_visual(self, current_track_id, crop, classifier, team_color="Unknown"):
+        """
+        Hybrid ReID Tier 3: Visual Appearance Match (SigLIP).
+        Called when new track appears (no jersey number yet).
+        """
+        if classifier is None or crop is None or crop.size == 0:
+            return current_track_id
+            
+        # 1. Query the Visual Gallery
+        match_tid, score = classifier.query_identity(crop, threshold=0.85)
+        
+        if match_tid is not None and match_tid != current_track_id:
+            # 2. Check if matched track is "Lost" (not currently active in this frame)
+            # (Simplification: If match_tid is in active_bindings, ensure it's not THIS track)
+            
+            # 3. Retrieve Jersey Info for the matched track
+            jersey_num = self.active_bindings.get(match_tid)
+            if jersey_num:
+                # 4. Color Sanity Check (if provided)
+                if team_color != "Unknown":
+                    orig_color = self.track_colors.get(match_tid, "Unknown")
+                    if orig_color != "Unknown" and orig_color != team_color:
+                        log(f"⚠️ [Visual Re-ID] REJECTED {match_tid} (Score {score:.2f}) due to color: {team_color} vs {orig_color}")
+                        return current_track_id
+                        
+                log(f"👁️ [Visual Re-ID] Track {current_track_id} -> {match_tid} (Jersey #{jersey_num}, Score {score:.2f})")
+                
+                # MERGE LOGIC
+                self.track_map[current_track_id] = match_tid
+                return match_tid
+                
+        return current_track_id
+
     def resolve_by_color(self, current_track_id, team_color):
         """
         Phase 113: Color-Based Re-ID for Turn-Around Persistence
@@ -399,6 +910,16 @@ class IdentityManager:
             return "Referee"
         
         # Default = Player (cls_id == 2 or unknown)
+        
+        # Phase v33: Implicit Referee Detection via Color Outlier
+        # If a "Player" has a stable color that matches NEITHER team, call them Referee.
+        if len(self.team_colors) >= 2:
+            color = self.track_colors.get(track_id, "Unknown")
+            if color != "Unknown" and color not in self.team_colors:
+                 # Check against GK colors to be safe (optional, but good)
+                 # For now, just assume distinct color = Referee/Staff
+                 return "Referee"
+
         return "Player"
 
     def get_jersey_num_color(self, jersey_num):
@@ -410,6 +931,41 @@ class IdentityManager:
         if not colors: return "Unknown"
         return Counter(colors).most_common(1)[0][0]
 
+    def finalize_bindings(self):
+        """
+        Phase v27.2: Bayesian Tracklet Consolidation (Refined)
+        Retroactively link tracklets that didn't reach the lock threshold.
+        """
+        log("🔍 [IdentityManager] Starting Bayesian Tracklet Consolidation...")
+        consolidated_count = 0
+        
+        # We iterate over all tracks that have some Dirichlet evidence
+        for tid in list(self.alpha.keys()):
+            # If this track is already bound, skip it
+            if tid in self.active_bindings:
+                continue
+                
+            # Find the number with the most evidence
+            track_alphas = self.alpha[tid]
+            if not track_alphas:
+                continue
+                
+            best_number = max(track_alphas, key=track_alphas.get)
+            evidence = track_alphas[best_number]
+            
+            # Threshold: 
+            # 1. Evidence > 0.5 AND jersey was confirmed/locked by another track
+            # 2. OR Evidence > 1.0 (Cold Start Fix - allow new players to appear)
+            if (evidence > 0.5 and best_number in self.jersey_registry) or (evidence > 1.0):
+                log(f"🔄 [Finalize] Consolidating Track {tid} -> Jersey #{best_number} (Evidence: {evidence:.1f})")
+                self.active_bindings[tid] = best_number
+                
+                # Mapping Fix: Ensure track_map points to the Jersey Number for propagation
+                self.track_map[tid] = best_number
+                consolidated_count += 1
+                
+        log(f"✅ [Finalize] Consolidated {consolidated_count} fragmented tracklets.")
+
 # --- 6. SUPER-RESOLUTION & SIGNAL MAXIMIZATION ---
 def get_upsampler(model_path="models/EDSR_x4.pb"):
     sr = cv2.dnn_superres.DnnSuperResImpl_create()
@@ -420,15 +976,16 @@ def get_upsampler(model_path="models/EDSR_x4.pb"):
 # Torso Crop: Top 50% (Legs removed) - Fallback when no pose
 def _torso_crop(img, xyxy):
     Himg, Wimg = img.shape[:2]
+    # Phase v26.9: Safe Body with 10% Padding (Prevents edge artifacts)
+    Himg, Wimg = img.shape[:2]
     x1, y1, x2, y2 = map(int, xyxy)
     H = y2 - y1; W = x2 - x1
     if H <= 0 or W <= 0: return None
-    # 15% to 65% height (safe torso)
-    yA = y1 + int(0.15 * H); yB = y1 + int(0.65 * H)
-    xA = x1 + int(0.10 * W); xB = x1 + int(0.90 * W)
-    yA = max(0, yA); yB = min(Himg, yB)
-    xA = max(0, xA); xB = min(Wimg, xB)
-    return img[yA:yB, xA:xB]
+    
+    pad_h = int(0.10 * H); pad_w = int(0.10 * W)
+    yA = max(0, y1 - pad_h); yB = min(Himg, y2 + pad_h)
+    xA = max(0, x1 - pad_w); xB = min(Wimg, x2 + pad_w)
+    return img[int(yA):int(yB), int(xA):int(xB)]
 
 def calculate_laplacian_variance(img):
     return cv2.Laplacian(img, cv2.CV_64F).var()
@@ -509,208 +1066,6 @@ def pose_torso_crop(img, keypoints, xyxy_fallback):
     except Exception:
         return _torso_crop(img, xyxy_fallback)
 
-# --- 7. JNR SERVICE (Real Qwen) ---
-class JNRService:
-    def __init__(self):
-        # Determine Model Path
-        model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
-        if CONFIG["env"].get("JNR_WEIGHTS"):
-            model_path = CONFIG["env"]["JNR_WEIGHTS"]
-            log(f"Initializing Real JNRService from Custom Weights: {model_path}")
-        else:
-            log(f"Initializing Real JNRService (Base Model): {model_path}")
-
-        self.processor = AutoProcessor.from_pretrained(model_path)
-        # Fix padding warning for decoder-only architecture
-        self.processor.tokenizer.padding_side = 'left'
-        
-        # Load Model
-        max_mem = {0: "60GB"} 
-        try:
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_path,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                max_memory=max_mem,
-            )
-        except Exception as e:
-            log(f"FP16 Load Failed: {e}. Fallback to 4-bit...")
-            from transformers import BitsAndBytesConfig
-            qc = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16)
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                "Qwen/Qwen2.5-VL-3B-Instruct",
-                quantization_config=qc,
-                device_map="auto",
-            )
-            
-        # Init SuperRes (EDSR x4) - DISABLED for speed (Phase 130)
-        self.sr = None
-        log("Super-Resolution DISABLED (Phase 130 - Speed).")
-        
-        # Init PaddleOCR as fast pre-verifier - Phase 115
-        # DISABLED per user request (Phase 116) - causing multiple IDs
-        self.ocr = None
-        self.ocr_enabled = False
-        log("PaddleOCR DISABLED (Phase 116).")
-
-    def predict_batch(self, images, reference_crops=None):
-        """
-        Predict jersey numbers with optional In-Context Learning.
-        
-        Args:
-            images: List of BGR crops to identify
-            reference_crops: Dict of {jersey_num: pil_image} for ICL context
-        """
-        results = []
-        if not images: return []
-        
-        # 1. Pre-process: Upscale with EDSR
-        processed_imgs = []
-        upscaled_bgrs = []  # Keep BGR for OCR
-        for img_bgr in images:
-            if self.sr:
-                try: upscaled = self.sr.upsample(img_bgr)
-                except: upscaled = cv2.resize(img_bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-            else:
-                # OPTIMIZATION v25: Reduce upscale from 4x to 2x for faster JNR
-                upscaled = cv2.resize(img_bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-            
-            upscaled_bgrs.append(upscaled)
-            img_rgb = cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB)
-            processed_imgs.append(Image.fromarray(img_rgb))
-        
-        # 1.5 Phase 115: PaddleOCR Fast Pre-Verification
-        # If OCR is confident, skip Qwen for that image
-        ocr_results = [None] * len(images)  # Pre-fill with None
-        needs_qwen = list(range(len(images)))  # Indices that need Qwen
-        
-        if self.ocr_enabled and self.ocr is not None:
-            new_needs_qwen = []
-            for idx, upscaled in enumerate(upscaled_bgrs):
-                try:
-                    ocr_out = self.ocr.ocr(upscaled)
-                    number, conf = self._extract_ocr_number(ocr_out)
-                    if number is not None and conf >= 0.85:
-                        ocr_results[idx] = {"number": number, "confidence": conf, "source": "ocr"}
-                        log(f"[OCR] Fast-path: #{number} (conf: {conf:.2f})")
-                    else:
-                        new_needs_qwen.append(idx)
-                except:
-                    new_needs_qwen.append(idx)
-            needs_qwen = new_needs_qwen
-
-        # 2. Build ICL Context (if references provided)
-        icl_context = []
-        if reference_crops and len(reference_crops) > 0:
-            # Take up to 3 reference examples
-            for jersey_num, ref_img in list(reference_crops.items())[:3]:
-                if ref_img is not None:
-                    # Convert BGR to PIL
-                    ref_rgb = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB)
-                    ref_pil = Image.fromarray(ref_rgb)
-                    icl_context.append({"type": "image", "image": ref_pil})
-                    icl_context.append({"type": "text", "text": f"This player wears jersey #{jersey_num}."})
-
-        # 3. Construct batch messages with ICL
-        messages_list = []
-        for pil_img in processed_imgs:
-            content = []
-            
-            # Add ICL examples first
-            if icl_context:
-                content.append({"type": "text", "text": "Here are examples of jerseys from this match:"})
-                content.extend(icl_context)
-                content.append({"type": "text", "text": "Now identify this new player:"})
-            
-            # Add query image
-            content.append({"type": "image", "image": pil_img})
-            content.append({"type": "text", "text": """Identify the jersey number on this football player.
-CRITICAL: Read EACH digit carefully:
-- '4' has a CLOSED pointed top and horizontal line, '6' has OPEN curved top
-- '2' has a curved top and flat bottom, '6' has curved tail
-- '24' ends with '4' (closed shape), '26' ends with '6' (curved tail)
-- '6' has a curved tail, '0' is closed oval, '10' is TWO digits
-- '1' is a single stroke, '7' has a horizontal top
-Return JSON: {'number': int|null, 'confidence': float, 'visibility': str}.
-Look at the ACTUAL digit shapes, not what you expect to see."""})
-            
-            messages_list.append([{"role": "user", "content": content}])
-        
-        # 4. Prepare inputs
-        texts = [self.processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in messages_list]
-        image_inputs, video_inputs = process_vision_info(messages_list)
-        
-        # 5. Batch Tokenization
-        inputs = self.processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
-        inputs = inputs.to(self.model.device)
-        
-        # 6. Generate
-        with torch.no_grad():
-            generated_ids = self.model.generate(**inputs, max_new_tokens=64)
-            
-        # 7. Decode
-        generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-        output_texts = self.processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True)
-        
-        for text in output_texts:
-            results.append(self._parse_json(text))
-            
-        return results
-
-    def _parse_json(self, output_text):
-        try:
-            clean_text = output_text.strip()
-            if clean_text.startswith("```json"): clean_text = clean_text[7:]
-            if clean_text.endswith("```"): clean_text = clean_text[:-3]
-            data = json.loads(clean_text)
-            return {"number": data.get("number"), "confidence": data.get("confidence", 0.0), "visibility": data.get("visibility")}
-        except:
-             return {"number": None, "confidence": 0.0, "visibility": "error"}
-    
-    def _extract_ocr_number(self, result):
-        """Extract jersey number from PaddleOCR result with robust parsing."""
-        try:
-            if not result or len(result) == 0:
-                return None, 0.0
-            
-            best_number = None
-            best_conf = 0.0
-            
-            for page in result:
-                if page is None:
-                    continue
-                for line in page:
-                    try:
-                        # Handle different output formats
-                        if isinstance(line, dict):
-                            text = str(line.get('text', ''))
-                            conf = float(line.get('score', 0.0))
-                        elif isinstance(line, (list, tuple)) and len(line) >= 2:
-                            text_data = line[1] if len(line) > 1 else line[0]
-                            if isinstance(text_data, (list, tuple)) and len(text_data) >= 2:
-                                text = str(text_data[0])
-                                conf = float(text_data[1])
-                            elif isinstance(text_data, dict):
-                                text = str(text_data.get('text', ''))
-                                conf = float(text_data.get('score', 0.0))
-                            else:
-                                continue
-                        else:
-                            continue
-                        
-                        # Extract digits only
-                        digits = ''.join(c for c in text if c.isdigit())
-                        if digits and len(digits) <= 2:
-                            number = int(digits)
-                            if 1 <= number <= 99 and conf > best_conf:
-                                best_number = number
-                                best_conf = conf
-                    except:
-                        continue
-            
-            return best_number, best_conf
-        except:
-            return None, 0.0
 
 # --- 7.1 SmolVLM2 Service (Lightweight Alternative to Qwen) - Phase 193 Original ---
 class SmolVLM2Service:
@@ -748,13 +1103,7 @@ class SmolVLM2Service:
         self.temperature = 1.0
         
         # Phase 194 "Better Prompt" (Restored for stability)
-        self.prompt = """Look at this football player's jersey number.
-Count each digit you can see on the back or front:
-- If you see digits '1' and '0' together, the number is 10
-- If you see digits '2' and '4' together, the number is 24
-- If only a single digit is visible, give that digit
-- Be careful: '6' has a curved tail, '9' is inverted '6', '4' has closed top
-Reply with ONLY the jersey number (1-99), nothing else."""
+        self.prompt = "Identify the two-digit or single-digit printed jersey number on the player's kit. Reply ONLY with the integer value (0-99). Do not write sentences."
         
         log("SmolVLM2Service Phase 193+ (Aggressive High-Res) initialized.")
     
@@ -822,6 +1171,11 @@ Reply with ONLY the jersey number (1-99), nothing else."""
         
         for idx, img_bgr in enumerate(images):
             track_id = track_ids[idx] if idx < len(track_ids) else idx
+            
+            # FIX: Handle Temporal Sequence (List of crops)
+            if isinstance(img_bgr, list):
+                if not img_bgr: continue
+                img_bgr = img_bgr[-1] # Take the most recent frame
             
             if img_bgr is None or img_bgr.size == 0:
                 results.append({"number": None, "confidence": 0.0, "visibility": "invalid_crop"})
@@ -927,25 +1281,60 @@ class Visualizer:
             
             if tid is None: continue
             
-            # Color based on class
-            if cls == 1:  # Goalkeeper
+            # --- Visualizer Filter (Run 18) ---
+            # Only draw CONFIRMED tracks (not candidate/lost ghosts)
+            # frame_data usually contains all 'online_targets' which should be Tracked
+            # But let's be safe: if 'state' is in box and not 1 (Tracked), skip?
+            # Pipeline usually only exports tracked, but let's assume all here.
+            # ----------------------------------
+            
+            # Phase 125/v26: Handle Persistent Remapping & Jersey Display
+            # STRICT MODE: Track ID is Source of Truth
+            stable_id = tid 
+            
+            # Phase 216: Check both locks AND active_bindings for jersey number
+            locked_info = id_manager.locks.get(tid)
+            locked_jersey = locked_info["jersey"] if (locked_info and locked_info.get("locked")) else None
+            
+            # Also check active_bindings (includes soft-registered jerseys)
+            if locked_jersey is None:
+                locked_jersey = id_manager.active_bindings.get(tid)
+            
+            # Get Team Label
+            team_color = id_manager.get_track_color(tid)
+            team_label = team_color if team_color != "Unknown" else ""
+
+            # Resolve Role (handling Implicit Referees)
+            # Pass y2 as approximation of foot position for GK zone check
+            role = id_manager.get_role(tid, y_pos=y2, frame_height=img.shape[0])
+            
+            # Color based on Role
+            if role == "Goalkeeper":
                 color = (255, 165, 0)  # Orange
-            elif cls == 3:  # Referee
+            elif role == "Referee":
                 color = (0, 0, 0)  # Black
+                team_label = "" # Suppress Team Label for Referee
             else:  # Player
-                color = (0, 255, 0)  # Green
+                # Visual Team Coding
+                if team_color == "Red": color = (0, 0, 255) # Red
+                elif team_color == "White": color = (200, 200, 200) # White/Grey
+                else: color = (128, 255, 0)  # Lime Green (Unknown)
             
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
             
-            # Label: Class | ID | Jersey
-            cls_name = cls_names.get(cls, f"C{cls}")
-            label = f"{cls_name}|ID:{tid}"
-            jersey = id_manager.active_bindings.get(tid)
-            if jersey:
-                label += f"|#{jersey}"
-                cv2.rectangle(img, (x1, y1-20), (x2, y1), (0, 0, 255), -1)
+            # Label Construction: T{tid} {team} #{jersey/cs}
+            # User Request: "T{track_id} always, #{jersey} only if locked"
+            
+            if locked_jersey is not None:
+                # Locked or bound
+                label = f"T{tid} {team_label} #{locked_jersey}"
+                # Background for locked
+                cv2.rectangle(img, (x1, y1-20), (x2, y1), color, -1)
+            else:
+                # Unlocked
+                label = f"T{tid} {team_label} #?"
                 
-            cv2.putText(img, label, (x1, y1-5), self.font, 0.5, (255, 255, 255), 1)
+            cv2.putText(img, label, (x1, y1-5), self.font, 0.6, (255, 255, 255), 2)
             
         return img
 
@@ -1146,9 +1535,15 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="output", help="Output directory")
     parser.add_argument("--no_video_output", action="store_true", help="Skip video output generation")
     parser.add_argument("--max_frames", type=int, help="Limit number of frames to process")
-    parser.add_argument("--locking_mode", type=int, choices=[1, 2], default=2, help="Locking mode: 1=Instant, 2=Consecutive High Conf")
-    parser.add_argument("--jnr_stride", type=int, help="JNR processing stride (frames)")
+    parser.add_argument("--locking_mode", type=int, choices=[1, 2, 3], default=2, help="Locking mode: 1=Instant, 2=Consecutive High Conf, 3=Bayesian Dirichlet")
+    parser.add_argument("--jnr_stride", type=int, default=30, help="Stride for JNR (frames)")
     parser.add_argument("--vid_stride", type=int, default=1, help="Video frame stride (skip frames). Default=1 (process all). 2=half speed/2x faster.")
+    parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "sam2", "botsort"], help="Tracking backend (Legacy Arg)") 
+    parser.add_argument("--tracker", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Strict Tracker Selector")
+    parser.add_argument("--enable_reid", type=int, default=0, help="Enable ReID (0/1)")
+    parser.add_argument("--audit_rejections", type=int, default=0, help="Enable Rejection Audit (0/1)")
+    parser.add_argument("--resize_h", type=int, default=0, help="Resize height (0 to disable)")
+    parser.add_argument("--sam2_model", type=str, default="large", choices=["large", "base", "small", "tiny"], help="SAM2 model variant") # Phase v29
     args = parser.parse_args()
     
     # Determine video path
@@ -1193,19 +1588,45 @@ if __name__ == "__main__":
     log(f"Starting Phase 85 Pipeline on {video_path}...")
     os.makedirs(output_dir, exist_ok=True)
     
+    # Phase v27: Temporal Buffer
+    track_history = defaultdict(lambda: deque(maxlen=5)) 
+    # Phase 216: Temporal Crop Buffer for JNR (stores best crops per track)
+    jnr_crop_buffer = defaultdict(lambda: deque(maxlen=10))  # Store up to 10 recent torso crops per track 
     # Init Components
     id_manager = IdentityManager()
     # Phase 196 Revert: Switch back to Qwen (JNRService) as requested
+    # Update: Switching to SmolVLM2Service to resolve    # Phase 200: Hybrid JNR (ResNet + Qwen Verification)
+
+    # Phase 20: JNR Integration (Hybrid Queue)
+    logging.info("🔄 [JNR] Initializing JNR Service...")
     jnr_service = JNRService()
-    # jnr_service = SmolVLM2Service()  # Original Qwen-based
-    # jnr_service = SmolVLM2Service()  # Lighter SmolVLM2-2.2B with preprocessing
+
+
+
+
+    # ReID Component (SigLIP)
+    siglip_classifier = None
+    if args.enable_reid:
+        log("🚀 [SigLIP] initializing for ReID...")
+        from vision.color_classifier import SigLIPTeamClassifier
+        siglip_classifier = SigLIPTeamClassifier()
+    else:
+        log("💤 [SigLIP] ReID DISABLED (Lazy Load)")
+    
+    # Phase v29: Initialize SAM2 Tracker
+    sam2_tracker = None
+    sam2_tid_to_cls = {}
+    sam2_gen = None
+    if args.tracking_mode == "sam2":
+        sam2_tracker = SAM2Tracker(model_type=args.sam2_model)
+        sam2_tracker.init_video(video_path)
+    
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
     kit_coordinator = KitCoordinator()  # Phase 168
     pitch_manager = PitchManager(model_path="/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_field_keypoint.pt", device=0)
     camera = Camera(pitch_manager.H_default)
     
-    # Tracking
     player_model = YOLO("/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_player_detect.pt")
     ball_model = YOLO("/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_ball_latest.pt")
     loader = ThreadedVideoReader(video_path)
@@ -1217,11 +1638,49 @@ if __name__ == "__main__":
     width = int(loader.stream.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(loader.stream.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
+    # Tracking Setup (Strict) - MOVED HERE
+    # Ensure args has required tracker config
+    if not hasattr(args, 'track_high_thresh'): args.track_high_thresh = 0.50 # User Request V4: 0.50
+    if not hasattr(args, 'track_low_thresh'): args.track_low_thresh = 0.15 # User Request V4: 0.15
+    if not hasattr(args, 'new_track_thresh'): args.new_track_thresh = 0.90 # User Request V4: 0.90 (Ultra-Strict)
+    if not hasattr(args, 'match_thresh'): args.match_thresh = 0.60 # User Request V4: 0.60 (Loose)
+    if not hasattr(args, 'track_buffer'): args.track_buffer = 240 # User Request V4: 240 (8s)
+    if not hasattr(args, 'proximity_thresh'): args.proximity_thresh = 0.5
+    if not hasattr(args, 'appearance_thresh'): args.appearance_thresh = 0.25
+    # FIX: Force with_reid=False to prevent Ultralytics BoTSORT from loading OSNet
+    # We rely on enable_reid for our Custom SigLIP interaction
+    args.with_reid = False 
+
+    # FIX: Add missing Ultralytics tracker args
+    if not hasattr(args, 'fuse_score'): args.fuse_score = True # User Request: True
+    if not hasattr(args, 'gmc_method'): args.gmc_method = "sparseOptFlow" # or None
+    if not hasattr(args, 'mot20'): args.mot20 = False
+    if not hasattr(args, 'model'): args.model = "osnet_x0_25_msmt17.pt" # Local restored model
+
+    # Configure Tracker
+    tracker = build_tracker(args.tracker, fps, args.enable_reid, args)
+    log(f"🛡️ [Tracker] FINAL = {tracker.__class__.__name__}")
+    if args.tracker == "bytetrack":
+        assert "Byte" in tracker.__class__.__name__ or "BYTE" in tracker.__class__.__name__
+    
+    # Step 5: Resize Control
+    target_width, target_height = width, height
+    if args.resize_h and args.resize_h > 0:
+        ratio = args.resize_h / height
+        target_height = args.resize_h
+        target_width = int(width * ratio)
+        log(f"📏 [Coords] Resize Enabled: {width}x{height} -> {target_width}x{target_height}")
+    else:
+        log(f"📏 [Coords] Native Resolution: {width}x{height} (No Resize)")
+    
+    # Update global proc dims for consistency if used elsewhere
+    PROC_W, PROC_H = target_width, target_height # Although we don't necessarily enforce this on the frame yet unless we resize!
+
     if args.no_video_output:
         writer = None
         log("Video output DISABLED (--no_video_output)")
     else:
-        writer = cv2.VideoWriter(out_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        writer = cv2.VideoWriter(out_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (target_width, target_height))
     
     # OPTIMIZATION v25: Default JNR stride to 3 seconds (was 1s) to reduce Qwen calls
     jnr_stride = args.jnr_stride if args.jnr_stride is not None else int(fps * 3)
@@ -1243,140 +1702,407 @@ if __name__ == "__main__":
             if f is None: break
             n += 1
             
-            # OPTIMIZATION v25: Skip frames based on vid_stride
+            # Step 5: Apply Resize if requested
+            if args.resize_h and args.resize_h > 0:
+                f = cv2.resize(f, (target_width, target_height))
+            
             if args.vid_stride > 1 and n % args.vid_stride != 0:
                 continue
             
             if n % 10 == 0: log(f"Processing Frame {n}...")
             
-            # Track
-            # Track
-            player_res = player_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
-            ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
-            img = player_res.orig_img
-
-            # Pitch Calib (Every 60 frames)
-            if n % 60 == 0:
-                 kps, H_new = pitch_manager.predict(f)
-                 camera.update(H_new)
-            
-            frame_data = {"boxes": []}
-            batch_crops = []
-            batch_ids = []
-            
-            # Process Player Detections (includes goalkeeper, player, referee)
-            # Model classes: 0=ball, 1=goalkeeper, 2=player, 3=referee
-            if hasattr(player_res, "boxes"):
-                for b in player_res.boxes:
-                    cls_id = int(b.cls[0].item())
-                    # Skip ball detections from player model (if any)
-                    if cls_id == 0:
-                        continue
-                    frame_data["boxes"].append({
-                        "xyxy": b.xyxy[0].cpu().numpy().tolist(),
-                        "id": int(b.id[0].item()) if b.id is not None else None,
-                        "conf": float(b.conf[0].item()),
-                        "cls": cls_id  # Use actual class: 1=GK, 2=Player, 3=Referee
-                    })
-
-            # Process Ball Detections
-            if hasattr(ball_res, "boxes"):
-                for b in ball_res.boxes:
-                    conf = float(b.conf[0].item())
-                    # FILTER: Lower confidence for ball to catch distant/small balls
-                    if conf < 0.3:
-                        continue
-                    frame_data["boxes"].append({
-                        "xyxy": b.xyxy[0].cpu().numpy().tolist(),
-                        "id": None, # Balls usually don't track well with ID
-                        "conf": conf,
-                        "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
-                    })
-            
-            # Post-Process for JNR
-            for box_data in frame_data["boxes"]:
-                    # Process GK (1), Player (2) - Skip Referee (3) and Ball (32)
-                    if box_data["id"] is not None and box_data["cls"] in [1, 2]:
-                        tid = box_data["id"]
-                        cls_id = box_data["cls"]
+            try:
+                # Track (Phase v29: Conditional Tracking)
+                if args.tracking_mode == "sam2":
+                    if n == 1:
+                        # Detect players on Frame 0 to seed SAM2
+                        det_res = player_model(f, classes=[1, 2], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                        detections = []
+                        sam2_tid_to_cls.clear()
+                        for i, b in enumerate(det_res.boxes):
+                            tid = i
+                            cls_id = int(b.cls[0].item())
+                            detections.append({'id': tid, 'bbox': b.xyxy[0].cpu().numpy().tolist()})
+                            sam2_tid_to_cls[tid] = cls_id
+                        sam2_tracker.add_player_prompts(0, detections)
+                        sam2_gen = sam2_tracker.propagate(0)
+                        log(f"SAM2 Seeded with {len(detections)} players.")
+                    
+                    try:
+                        # Grab next tracking results from generator
+                        curr_frame_idx, obj_ids, mask_logits = next(sam2_gen)
                         
-                        # Store detection class (Phase 132)
-                        id_manager.set_track_class(tid, cls_id)
+                        # Mock YOLO result for compatibility
+                        # Mock classes moved to top level or reused
                         
-                        # Phase 112: mkoshkina Framework - Torso Crop
-                        crop = _torso_crop(img, box_data["xyxy"])
-                        if crop is not None and crop.size > 0:
-                               # Store Color with voting (Phase 139)
-                               color = color_classifier.predict_with_voting(crop, tid)
-                               id_manager.set_track_color(tid, color)
-                               
-                               # Phase 168: Global Kit Discovery
-                               kit_coordinator.observe(cls_id, color)
-                               
-                               # Skip JNR for Goalkeepers (class 1) - only need color
-                               if cls_id == 1:
-                                   continue
-                               
-                               # OPTIMIZATION: Skip JNR if ID is already locked!
-                               if tid in id_manager.active_bindings:
-                                   continue
-                               
-                               # Capture Best Crop (Largest Area)
-                               current_area = crop.shape[0] * crop.shape[1]
-                               if tid not in best_crops or current_area > (best_crops[tid].shape[0] * best_crops[tid].shape[1]):
-                                   best_crops[tid] = crop.copy()
+                        bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
+                        
+                        bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
+                        
+                        # Phase v30: Periodic Fusion to prevent collapse/drift
+                        FUSION_STRIDE = 30
+                        if n > 1 and n % FUSION_STRIDE == 0:
+                            det_res = player_model(f, classes=[1, 2], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                            det_boxes = det_res.boxes.xyxy.cpu().numpy().tolist()
+                            det_classes = det_res.boxes.cls.cpu().numpy().tolist()
+                            
+                            matches, unmatched_dets, unmatched_tracks = greedy_match(det_boxes, bboxes, iou_threshold=0.3)
+                            
+                            new_prompts = []
+                            # 1. New Tracks (Entering frame)
+                            for det_idx in unmatched_dets:
+                                new_tid = len(sam2_tid_to_cls)
+                                cls_id = int(det_classes[det_idx])
+                                new_prompts.append({'id': new_tid, 'bbox': det_boxes[det_idx]})
+                                sam2_tid_to_cls[new_tid] = cls_id
+                                log(f"[Fusion] Seeded new track ID {new_tid} at Frame {n-1}")
+                                
+                            # 2. Drift Correction (Association confirmed but IoU low)
+                            for det_idx, tid in matches:
+                                iou = calculate_iou(det_boxes[det_idx], bboxes[tid])
+                                if iou < 0.6:
+                                    new_prompts.append({'id': tid, 'bbox': det_boxes[det_idx]})
+                                    log(f"[Fusion] Correcting drift for Track {tid} at Frame {n-1} (IoU={iou:.2f})")
+                            
+                            if new_prompts:
+                                sam2_tracker.add_player_prompts(n - 1, new_prompts)
+                                sam2_gen = sam2_tracker.propagate(n - 1)
+                                # Refresh current frame results with corrected prompts
+                                curr_frame_idx, obj_ids, mask_logits = next(sam2_gen)
+                                bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
 
-                               # Phase 112: Legibility Classifier (mkoshkina)
-                               if not is_legible(crop):
-                                   # Phase 113: Color Re-ID - DISABLED (Phase 118)
-                                   continue
-                               
-                               # JNR Stride based on FPS (Phase 123)
-                               if n % jnr_stride == 0:
-                                   batch_crops.append(crop)
-                                   batch_ids.append(box_data["id"])
-            
-            # JNR Inference with In-Context Learning (Phase 110)
-            if batch_crops:
-                # Build reference crops from locked jerseys
-                reference_crops = {}
-                for jersey_num, (orig_tid, _) in id_manager.master_registry.items():
-                    if orig_tid in best_crops:
-                        reference_crops[jersey_num] = best_crops[orig_tid]
+                        # Phase v30: VRAM Memory Grounding (Periodic SAM2 Reset)
+                        STATE_RESET_INTERVAL = 300
+                        if n > 0 and n % STATE_RESET_INTERVAL == 0:
+                            log(f"♻️ [Memory] Resetting SAM2 state to clear VRAM (Frame {n})")
+                            sam2_tracker.reset()
+                            sam2_tracker.init_video(args.video)
+                            
+                            # Re-detect and seed to maintain continuity
+                            det_res = player_model(f, classes=[1, 2], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                            det_boxes = det_res.boxes.xyxy.cpu().numpy().tolist()
+                            det_classes = det_res.boxes.cls.cpu().numpy().tolist()
+                            
+                            # Matches YOLO boxes with current track positions to persist IDs
+                            matches, unmatched_dets, unmatched_tracks = greedy_match(det_boxes, bboxes, iou_threshold=0.3)
+                            
+                            reseed_prompts = []
+                            for det_idx, tid in matches:
+                                reseed_prompts.append({'id': tid, 'bbox': det_boxes[det_idx]})
+                            
+                            # Any completely new players?
+                            for det_idx in unmatched_dets:
+                                new_tid = len(sam2_tid_to_cls)
+                                sam2_tid_to_cls[new_tid] = int(det_classes[det_idx])
+                                reseed_prompts.append({'id': new_tid, 'bbox': det_boxes[det_idx]})
+                            
+                            if reseed_prompts:
+                                sam2_tracker.add_player_prompts(n - 1, reseed_prompts)
+                                sam2_gen = sam2_tracker.propagate(n - 1)
+                                curr_frame_idx, obj_ids, mask_logits = next(sam2_gen)
+                                bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
+                                log(f"🚀 [Memory] Reseeded {len(reseed_prompts)} tracks post-reset.")
+
+                        mock_boxes = []
+                        for tid, bb in bboxes.items():
+                            c_id = sam2_tid_to_cls.get(tid, 2) # Default to Player
+                            mock_boxes.append(MockBox(bb, tid, 1.0, c_id))
+                        
+                        player_res = MockResults(mock_boxes, f)
+                        ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
+                    except StopIteration:
+                        log("SAM2 Generator stopped unexpectedly.")
+                        # Fallback to standard tracker if SAM2 fails
+                        det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                        det_boxes = det_res.boxes.xyxy.cpu().numpy().tolist() # This needs proper tracking logic, defaulting to skip for now to avoid complexity
+                        player_res = MockResults([], f) 
+                        ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
+                else:
+                    # 1. Detect Players (Original Params)
+                    det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                    
+                    if det_res.boxes is not None and len(det_res.boxes) > 0:
+                        # Ensure CPU for tracker
+                        det_res = det_res.cpu()
+                        
+                        # --- Phase v31: Part-Box Filter (Strict Spawn Suppression) ---
+                        # Filter bad detections BEFORE they hit the tracker
+                        # DETRIMENTAL: Edge filter causes fragmentation. Disabled for Run 4.
+                        # det_res.boxes = filter_detections_strict(det_res.boxes, width, height, n)
+                    
+                    # 2. Update Tracker (Standard)
+                    # 2. Update Tracker (Standard)
+                    if args.tracker == "bytetrack":
+                        # Tune match_thresh to user spec (Run 15 - High Tolearnce)
+                        
+                        # --- Run 15 Param Setup ---
+                        effective_fps = 30 # Default assumption if not calc
+                        if args.vid_stride > 0:
+                             effective_fps = int(round(30 / max(1, args.vid_stride))) 
+                             
+                        stale_seconds = 12
+                        hard_seconds = 60
+                        
+                        stale_frames = int(effective_fps * stale_seconds)
+                        hard_frames_limit = int(effective_fps * hard_seconds)
+                        
+                        if hasattr(tracker, 'args'):
+                            # Run 20 Config (Strict IoU + Rescue + Locking)
+                            tracker.args.match_thresh = 0.65       # User: 0.65
+                            tracker.args.track_high_thresh = 0.45  # User: 0.45
+                            tracker.args.track_low_thresh = 0.08   # User: 0.08
+                            tracker.args.new_track_thresh = 0.85   # User: 0.85
+                            tracker.args.track_buffer = 240
+                        
+                        # ByteTrack generally handles detection objects or numpy arrays
+                        pass
+
+
+                    # Define for compatibility with downstream update call
+                    filtered_boxes_obj = det_res.boxes
+
+                    if filtered_boxes_obj is not None and len(filtered_boxes_obj) > 0:
+                        # Use Stale-Guard Wrapper
+                        if args.tracker == "bytetrack":
+                             online_targets = bytetrack_update_with_stale_guard(
+                                tracker, filtered_boxes_obj, f,
+                                stale_frames=stale_frames,
+                                hard_frames=hard_frames_limit
+                             )
+                        else:
+                             online_targets = tracker.update(filtered_boxes_obj, img=f)
+                    else:
+                        online_targets = []
+                        
+                    # --- Phase v31: Near-Miss Suppression ---
+                    # Filter ghost spawns from the output
+                    online_targets = prevent_ghost_spawns(online_targets, None, n)
+                    
+                    # 3. Package Results (MockBox)
+                    mock_boxes = []
+                    # online_targets is list of STrack usually
+                    for t in online_targets:
+                        # STrack vs BOTrack vs Numpy differences
+                        if hasattr(t, 'tlbr'):
+                            # STrack Object
+                            tlbr = t.tlbr
+                            tid = t.track_id
+                            conf = t.score
+                            cls_id = int(t.cls) if hasattr(t, 'cls') else 2 # Default to player
+                        else:
+                            # Numpy/List Format: [x1, y1, x2, y2, id, conf, cls, ...]
+                            # JerseyBoTSORT returns [x1, y1, x2, y2, id, conf, cls, ind]
+                            t = t.tolist() if hasattr(t, 'tolist') else t
+                            tlbr = t[:4]
+                            tid = int(t[4])
+                            conf = t[5]
+                            cls_id = int(t[6]) if len(t) > 6 else 2
+
+                        # Guard for ghost boxes (Step 6)
+                        x1, y1, x2, y2 = tlbr
+                        if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+                            if n % 60 == 0: log(f"⚠️ [Tracker] Invalid Box ignored: {tlbr} in frame {n}")
+                            continue
+
+                        # MockBox expects xyxy, tid, conf, cls_id
+                        mock_boxes.append(MockBox(tlbr, tid, conf, cls_id))
+                    
+                    player_res = MockResults(mock_boxes, f)
+                    
+                    # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
+                    ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
                 
-                predictions = jnr_service.predict_batch(batch_crops, reference_crops=reference_crops)
-                for idx, pred in enumerate(predictions):
-                    if pred["number"] is not None:
-                        # 1. Resolve Identity (Phase 104)
-                        track_id = batch_ids[idx]
-                        team_color = id_manager.get_track_color(track_id)
-                        stable_id = id_manager.resolve_identity(track_id, pred["number"], team_color)
-                        
-                        log(f"DEBUG: Track {track_id} (Resolved: {stable_id}) => {pred['number']} (Conf: {pred['confidence']})")
-                        id_manager.process_detection(stable_id, pred["number"], "auto", pred["confidence"])
-                        
-                        # 2. CRITICAL: Overwrite the Frame Data immediately
-                        # If we found a stable ID, we must update the current frame so Stats see the right person.
-                        if track_id != stable_id:
-                             for box in frame_data["boxes"]:
-                                 if box["id"] == track_id:
-                                     box["id"] = stable_id
-                                     # Also update color for the new ID just in case
-                                     id_manager.set_track_color(stable_id, team_color)
-                                     break
+                img = player_res.orig_img
 
-            # 3. Final ID Replacement (Track -> Jersey) for Stats & Viz
-            for box in frame_data["boxes"]:
-                tid = box["id"]
-                # Check mapping
-                if tid is not None and tid in id_manager.active_bindings:
-                    box["id"] = id_manager.active_bindings[tid]
+                # Pitch Calib (Every 60 frames)
+                if n % 60 == 0:
+                     kps, H_new = pitch_manager.predict(f)
+                     camera.update(H_new)
+                
+                frame_data = {"boxes": []}
+                batch_crops = []
+                batch_ids = []
+            
+                # Process Player Detections (includes goalkeeper, player, referee)
+                # Model classes: 0=ball, 1=goalkeeper, 2=player, 3=referee
+                if hasattr(player_res, "boxes"):
+                    for b in player_res.boxes:
+                        cls_id = int(b.cls[0].item())
+                        # Skip ball detections from player model (if any)
+                        if cls_id == 0:
+                            continue
+                        frame_data["boxes"].append({
+                            "xyxy": b.xyxy[0].cpu().numpy().tolist(),
+                            "id": int(b.id[0].item()) if b.id is not None else None,
+                            "conf": float(b.conf[0].item()),
+                            "cls": cls_id  # Use actual class: 1=GK, 2=Player, 3=Referee
+                        })
+
+                # Process Ball Detections
+                if hasattr(ball_res, "boxes"):
+                    for b in ball_res.boxes:
+                        conf = float(b.conf[0].item())
+                        # FILTER: Lower confidence for ball to catch distant/small balls
+                        if conf < 0.1:
+                            continue
+                        frame_data["boxes"].append({
+                            "xyxy": b.xyxy[0].cpu().numpy().tolist(),
+                            "id": None, # Balls usually don't track well with ID
+                            "conf": conf,
+                            "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
+                        })
+                
+                # Post-Process for JNR
+                for box_data in frame_data["boxes"]:
+                        # Process GK (1), Player (2) - Skip Referee (3) and Ball (32)
+                        if box_data["id"] is not None and box_data["cls"] in [1, 2]:
+                            tid = box_data["id"]
+                            cls_id = box_data["cls"]
+                            
+                            # Store detection class (Phase 132)
+                            id_manager.set_track_class(tid, cls_id)
+                            
+                            # Phase 112: mkoshkina Framework - Torso Crop
+                            crop = _torso_crop(img, box_data["xyxy"])
+                            if crop is not None and crop.size > 0:
+                                   # Store Color with voting (Phase 139)
+                                   color = color_classifier.predict_with_voting(crop, tid)
+                                   id_manager.set_track_color(tid, color)
+                                   
+                                   # Phase v28: SigLIP Observation
+                                   if siglip_classifier:
+                                       siglip_classifier.add_observation(tid, crop)
+                                   
+                                   # Phase 168: Global Kit Discovery
+                                   kit_coordinator.observe(cls_id, color)
+                                   
+                                   # Skip JNR for Goalkeepers (class 1) - only need color
+                                   if cls_id == 1:
+                                       continue
+                                   
+                                   # OPTIMIZATION: Skip JNR if ID is already locked!
+                                   if tid in id_manager.active_bindings:
+                                       continue
+                                   
+                                   # Capture Best Crop (Largest Area)
+                                   current_area = crop.shape[0] * crop.shape[1]
+                                   if tid not in best_crops or current_area > (best_crops[tid].shape[0] * best_crops[tid].shape[1]):
+                                       best_crops[tid] = crop.copy()
+
+                                   # Phase v27: Update Temporal History
+                                   track_history[tid].append(crop.copy())
+
+                                   # --- 6. Jersey Number Recognition (Run 20: Throttled & Gated) ---
+                                   if n > 1:
+                                       # 1. Cadence Check (Don't spam JNR)
+                                       should_check = id_manager.should_update_jnr(tid, n, cadence=4) # Faster cadence (Phase 216)
+                                       
+                                       if should_check:
+                                            # 2. Quality Gate (Phase 216: RELAXED for low-res video)
+                                            h_crop, w_crop = crop.shape[:2]
+                                            if h_crop >= 40 and w_crop >= 20: # Min Size RELAXED (was 60x30)
+                                               # Blur Check (Variance of Laplacian)
+                                               gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                                               var = cv2.Laplacian(gray, cv2.CV_64F).var()
+                                               if var >= 40: # RELAXED sharpness (was 80)
+                                                   
+                                                   # 3. Torso Crop (Focus on number)
+                                                   # Reduce Y range to upper body (ignore head/legs)
+                                                   # y1 += 0.15 * h, y2 = y1 + 0.75 * h
+                                                   box_h = box_data["xyxy"][3] - box_data["xyxy"][1]
+                                                   x1_raw, y1_raw, x2_raw, y2_raw = box_data["xyxy"]
+                                                   
+                                                   pad_x = int(0.10 * (x2_raw - x1_raw))
+                                                   torso_y1 = int(y1_raw + 0.15 * box_h)
+                                                   torso_y2 = int(y1_raw + 0.75 * box_h)
+                                                   # Safety clamp
+                                                   torso_y1 = max(0, torso_y1)
+                                                   torso_y2 = min(height, torso_y2)
+                                                   torso_x1 = max(0, int(x1_raw) - pad_x)
+                                                   torso_x2 = min(width, int(x2_raw) + pad_x)
+                                                   
+                                                   # Extract Torso
+                                                   torso_crop = safe_crop(f, (torso_x1, torso_y1, torso_x2, torso_y2))
+                                                   
+                                                   if torso_crop is not None:
+                                                       # Phase 216: Temporal Frame Stacking
+                                                       # Store crop with sharpness score
+                                                       gray_torso = cv2.cvtColor(torso_crop, cv2.COLOR_BGR2GRAY)
+                                                       sharpness = cv2.Laplacian(gray_torso, cv2.CV_64F).var()
+                                                       jnr_crop_buffer[tid].append((torso_crop, sharpness, n))
+                                                       
+                                                       # After 3+ crops buffered, select the sharpest and queue (Phase 216)
+                                                       if len(jnr_crop_buffer[tid]) >= 3:
+                                                           best_crop, best_sharp, best_frame = max(jnr_crop_buffer[tid], key=lambda x: x[1])
+                                                           jnr_service.queue_request(tid, best_crop, best_frame)
+                                                           id_manager.record_jnr_update(tid, n)
+                                                           jnr_crop_buffer[tid].clear()  # Reset buffer after sending
+                    
+                                   # JNR Stride based on FPS (Phase 123) - DISABLED in favor of Run 20 Logic
+                                   # if n % jnr_stride == 0:
+                                   #    if not is_legible(crop): ...
+            
+                # --- Poll JNR Results (Run 20) ---
+                predictions = jnr_service.get_results() 
+                if predictions:
+                    for pred in predictions:
+                         track_id = pred["track_id"]
+                         stable_id = track_id
+                         
+                         if pred.get("raw_text"):
+                            log(f"VLM RAW [{track_id}]: {pred['raw_text']}")
+                            
+                         if pred["number"] is not None:
+                            # 1. Resolve Identity
+                            team_color = id_manager.get_track_color(track_id)
+                            stable_id = id_manager.resolve_identity(track_id, pred["number"], team_color)
+                            
+                            log(f"DEBUG: Track {track_id} (Resolved: {stable_id}) => {pred['number']} (Color: {pred.get('color')}, Conf: {pred['confidence']})")
+                            id_manager.process_detection(stable_id, pred["number"], "auto", pred["confidence"], detected_color=pred.get("color"))
+
+                        
+                        # NEW DEBUG LOG (Phase v26.2)
+
+
+                # --- 3. Phase v32.2: GLOBAL ID RESOLUTION LOOP (Every Frame) ---
+                # CRITICAL: This must run ON EVERY FRAME, regardless of JNR stride.
+                # It ensures that even if the tracker spawns a temp ID (e.g. 241), 
+                # we immediately remap it to the known player (e.g. 210) before visualization.
+                for box in frame_data["boxes"]:
+                    raw_id = box["id"]
+                    if raw_id is not None:
+                         resolved_id = id_manager.get_resolved_id(raw_id)
+                         if resolved_id != raw_id:
+                             # log(f"DEBUG: Remapping Frame {n}: {raw_id} -> {resolved_id}")
+                             box["id"] = resolved_id
+                             # Also ensure color is consistent
+                             box["color"] = id_manager.get_track_color(resolved_id)
+                
+                # 4. Dump Frame Data
+                all_frames.append(frame_data)
+
+
+                # 3. Apply Remapping to Stats (HUD already handles visualization)
+                for box in frame_data["boxes"]:
+                    tid = box["id"]
+                    if tid is not None:
+                        # Update the box ID to the stable one for stats tracking downstream
+                        box["id"] = id_manager.get_resolved_id(tid)
+
+            except Exception as e:
+                import traceback
+                log(f"💥 Frame-level Pipeline Error (Frame {n}): {e}")
+                traceback.print_exc()
+                # Continue processing next frame instead of crashing whole loop
+                continue
+    
+            # Run 20.1: Duplicate Suppression (Before Drawing)
+            id_manager.suppress_conflicts(online_targets, n)
 
             # Visualization
             annotated_img = visualizer.draw_hud(img.copy(), frame_data, id_manager)
             if writer:
                 writer.write(annotated_img)
-    
             all_frames.append(frame_data)
 
     except KeyboardInterrupt:
@@ -1389,34 +2115,47 @@ if __name__ == "__main__":
             writer.release()
             log(f"Video saved to {out_video_path}")
         log(f"Tracking finished in {time.time() - start_time:.2f}s.")
+        
+        # DEBUG: Dump raw frame data for metric analysis
+        with open(os.path.join(output_dir, "debug_all_frames.json"), "w") as f:
+            json.dump(all_frames, f)
+        log(f"Dumping debug_all_frames.json ({len(all_frames)} frames)")
+
+    # Phase v27.2: Bayesian Tracklet Consolidation
+    # Perform this BEFORE stats and propagation
+    id_manager.finalize_bindings()
+    
+    # Phase v28: SigLIP Team Clustering Report
+    if siglip_classifier:
+        log("📊 [SigLIP] Generating Team Clustering Report...")
+        try:
+            team_map = siglip_classifier.cluster_teams(n_teams=2)
+            for tid, team_label in team_map.items():
+                jersey = id_manager.active_bindings.get(tid, "??")
+                log(f"  Track {tid} (Jersey #{jersey}) -> Team Cluster {team_label}")
+        except Exception as e:
+            log(f"⚠️ [SigLIP] Clustering report failed: {e}")
+    else:
+        log("📊 [SigLIP] Team Clustering Skipped (ReID Disabled)")
     
     # Save Best Crops - ENABLED for evaluation (Phase 196)
-    crops_dir = os.path.join(output_dir, "crops")
-    os.makedirs(crops_dir, exist_ok=True)
-    for tid, crop in best_crops.items():
-        if crop is not None:
-            cv2.imwrite(os.path.join(crops_dir, f"{tid}.jpg"), crop)
-    log(f"Saved {len(best_crops)} track crops to {crops_dir}/")
+    # crops_dir = os.path.join(output_dir, "crops")
+    # os.makedirs(crops_dir, exist_ok=True)
+    # for tid, crop in best_crops.items():
+    #     if crop is not None:
+    #         # cv2.imwrite(os.path.join(crops_dir, f"{tid}.jpg"), crop)
+    #         pass
+    # log(f"Saved {len(best_crops)} track crops to {crops_dir}/")
     
-    # Phase 170: Retroactive Identity Propagation (Fix for Zero Stats)
-    # Apply final known identities to ALL historical frames to recover stats from before identification.
-    log("Applying Retroactive Identity Propagation...")
-    start_prop = time.time()
-    updates_count = 0
-    
-    # Iterate ALL frames and update IDs based on final accumulated bindings
-    for frame in all_frames:
-        for box in frame["boxes"]:
-            tid = box["id"]
-            if tid is not None:
-                # If this Track ID was eventually bound to a Jersey Number, use it!
-                if tid in id_manager.active_bindings:
-                     new_id = id_manager.active_bindings[tid]
-                     if new_id != tid:
-                         box["id"] = new_id
-                         updates_count += 1
-                         
-    log(f"Propagated {updates_count} identity updates in {time.time() - start_prop:.2f}s")
+    # Phase 170: Retroactive Identity Propagation (DISABLED for Run 21 Strict Mode)
+    # User Rule: "player_id = track_id always". Do not propagate bindings as IDs.
+    # log("Applying Retroactive Identity Propagation (Locked Tracks Only)...")
+    # start_prop = time.time()
+    # updates_count = 0
+    # for frame in all_frames:
+    #     pass 
+    # log(f"Retroactive Propagation SKIPPED (Strict Identity Mode)")
+
 
     # --- 9. STATS GENERATION (Entity Resolution) ---
     stats_adapter = StatsAdapter(camera, pitch_manager) # Pass pitch_manager

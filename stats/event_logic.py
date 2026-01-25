@@ -127,17 +127,21 @@ class AdvancedEventDetector:
                 
                 prev_pos[pid] = world_c
 
-        # Helper: Calculate xG (Existing)
-        def calculate_xg(start_pos, header=False):
-             # ... (Existing logic) ...
-             dx = GOAL_X - start_pos[0]
-             dy = max(0, abs(start_pos[1] - GOAL_CENTER_Y) - GOAL_WIDTH_HALF)
-             dist = math.hypot(GOAL_X - start_pos[0], GOAL_CENTER_Y - start_pos[1])
-             if dist < 0.1: dist = 0.1
-             angle = math.atan2(7.32, dist)
-             xg = 0.75 * math.exp(-0.15 * dist) * (angle * 1.5)
-             if header: xg *= 0.6
-             return min(0.99, max(0.01, xg))
+        # Helper: Calculate xG (Updated to handle both goals)
+        def calculate_xg(start_pos, header=False, under_pressure=False, goal_x=None):
+            # If goal_x not specified, use nearest goal
+            if goal_x is None:
+                dist_to_right = abs(start_pos[0] - GOAL_X)
+                dist_to_left = abs(start_pos[0] - 0.0)
+                goal_x = GOAL_X if dist_to_right < dist_to_left else 0.0
+
+            dist = math.hypot(goal_x - start_pos[0], GOAL_CENTER_Y - start_pos[1])
+            if dist < 0.1: dist = 0.1
+            angle = math.atan2(7.32, dist)
+            xg = 0.75 * math.exp(-0.15 * dist) * (angle * 1.5)
+            if header: xg *= 0.6
+            if under_pressure: xg *= 0.75  # Pressure factor from xg.py
+            return min(0.99, max(0.01, xg))
 
         # 0. Spatial Residency Check (for GK ID)
         # Iterate all player tracks to count frames in box
@@ -201,9 +205,7 @@ class AdvancedEventDetector:
                         stats[opp_id]["challenges_won_total"] += 1
                         stats[opp_id]["tackles"] += 1  # Phase 195: Credit tackle on failed dribble
                         stats[opp_id]["tackles_successful"] += 1
-        
-        print(f"[DEBUG-HEURISTICS] Dribbles detected: {dribble_debug_count}")
-                         
+
         # 2. Passing (Change of Ownership)
         # Segment ownership
         segments = []
@@ -216,15 +218,7 @@ class AdvancedEventDetector:
                     curr = pid
                     start = i
             segments.append({"pid": curr, "start": start, "end": len(ownership)-1})
-        
-        # Phase 189: Debug logging for pass detection
-        non_none_ownership = sum(1 for o in ownership if o is not None)
-        non_none_segments = [s for s in segments if s["pid"] is not None]
-        print(f"[DEBUG-PASS] Ownership: {non_none_ownership}/{len(ownership)} frames with owner")
-        print(f"[DEBUG-PASS] Segments: {len(segments)} total, {len(non_none_segments)} with player")
-        if len(non_none_segments) > 0:
-            print(f"[DEBUG-PASS] Sample segments: {non_none_segments[:5]}")
-            
+
         for i in range(len(segments) - 1):
             seg_a = segments[i]
             seg_b = segments[i+1]
@@ -249,14 +243,7 @@ class AdvancedEventDetector:
             # Verify distance
             start_pos = ball_track[seg_a["end"]]
             end_pos = ball_track[seg_b["start"]]
-            
-            # Phase 191: Debug each segment transition
-            if start_pos is None or end_pos is None:
-                print(f"[DEBUG-PASS] Segment {i}: {p_a}->{p_b} SKIP (ball_pos None: start={start_pos is None}, end={end_pos is None})")
-            else:
-                dist = self.camera.calculate_distance(start_pos, end_pos)
-                print(f"[DEBUG-PASS] Segment {i}: {p_a}->{p_b} dist={dist:.2f}m (need>{DIST_PASS_MIN}m)")
-            
+
             if start_pos and end_pos:
                 dist = self.camera.calculate_distance(start_pos, end_pos)
                 if dist > DIST_PASS_MIN:
@@ -283,17 +270,23 @@ class AdvancedEventDetector:
                             is_complete = True
                     
                     if is_complete:
-                        stats[p_a]["passes_complete"] += 1 
+                        stats[p_a]["passes_complete"] += 1
                         events.append({"type": "pass", "from": p_a, "to": p_b, "frame": seg_a["end"]})
-                    
+
                     # 3. Check Crosses (Side Channel to Box)
                     # Side Channel: |y - 34| > 25 -> y < 9 or y > 59
-                    # Box: x > 88.5 and |y - 34| < 20.15
-                    
-                        is_cross = True
-                        stats[p_a]["crosses"] += 1
+                    # Box: x > 88.5 or x < 16.5, and |y - 34| < 20.15
+                    start_m = self.camera.project_point(start_pos[0], start_pos[1])
+                    end_m = self.camera.project_point(end_pos[0], end_pos[1])
+
+                    in_side_channel = abs(start_m[1] - 34.0) > 25.0
+                    into_box_right = end_m[0] > 88.5 and abs(end_m[1] - 34.0) < 20.15
+                    into_box_left = end_m[0] < 16.5 and abs(end_m[1] - 34.0) < 20.15
+
+                    if in_side_channel and (into_box_right or into_box_left):
+                        stats[p_a]["crosses_total"] += 1
                         if is_complete:
-                             stats[p_a]["crosses_accurate"] += 1
+                            stats[p_a]["crosses_complete"] += 1
                         events.append({"type": "cross", "from": p_a, "to": p_b, "frame": seg_a["end"]})
 
                     # --- ADVANCED STATS (Phase 86) ---
@@ -370,38 +363,55 @@ class AdvancedEventDetector:
                 speed_mps = dist_m / (2.0 / FPS) # 2 frames @ 25fps = 0.08s
                 
                 # Shot Threshold: Phase 195 lowered to 8 m/s
-                if speed_mps > SHOT_SPEED_THRESHOLD and m2[0] > m1[0]: # Moving towards Right Goal
-                    # Check if inside goal coordinates at X=105
+                # Fix: Detect shots toward BOTH goals (not just right)
+                moving_right = m2[0] > m1[0]
+                moving_left = m2[0] < m1[0]
+
+                if speed_mps > SHOT_SPEED_THRESHOLD and (moving_right or moving_left):
+                    # Determine target goal based on direction
+                    if moving_right:
+                        goal_x = 105.0  # Right goal
+                        goal_center_y = 34.0
+                    else:
+                        goal_x = 0.0    # Left goal
+                        goal_center_y = 34.0
+
+                    # Check if inside goal coordinates
                     # Simple linear projection
                     if abs(m2[0] - m1[0]) > 0.1:
                         slope = (m2[1] - m1[1]) / (m2[0] - m1[0])
-                        y_at_goal = m2[1] + slope * (105.0 - m2[0])
-                        
+                        y_at_goal = m2[1] + slope * (goal_x - m2[0])
+
                         if 30.34 < y_at_goal < 37.66:
                             # Potential Shot on Target
                             # Attribute to last possessor
                             # Find who had ball last
-                            shooter = ownership[i] or ownership[i-5] # Look back
+                            shooter = ownership[i] if i < len(ownership) else None
+                            if not shooter and i >= 5:
+                                shooter = ownership[i-5]  # Look back
                             if shooter:
                                 # Debounce: Don't count same shot multiple times
-                                # (Omitted for brevity, assuming minimal false positives or dedupe later)
                                 # Check if already counted in last 10 frames?
                                 recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < 10]
                                 if not recent:
-                                    xg = calculate_xg(m1)
+                                    # Check if under pressure
+                                    under_pressure = self._is_opponent_near(i, shooter, player_tracks, dist_m=3.0) is not None
+                                    xg = calculate_xg(m1, goal_x=goal_x, under_pressure=under_pressure)
                                     stats[shooter]["shots_on_target"] += 1
-                                    stats[shooter]["xg_foot_opponent_present"] += xg # Accumulate xG
-                                    # Shots categorization
-                                    # shot_dist = self.camera.calculate_distance(ball_pos, (105, 34)) 
-                                    # FIX: Use m2 (meters) directly
-                                    shot_dist = math.hypot(m2[0] - 105, m2[1] - 34)
+                                    # Categorize xG by pressure
+                                    if under_pressure:
+                                        stats[shooter]["xg_foot_opponent_present"] += xg
+                                    else:
+                                        stats[shooter]["xg_foot_no_opponent"] += xg
+                                    # Shots categorization - use distance to target goal
+                                    shot_dist = math.hypot(m2[0] - goal_x, m2[1] - goal_center_y)
                                     if shot_dist <= 5:
                                         stats[shooter]["close_range_shots"] += 1
                                     elif shot_dist <= 16:
                                         stats[shooter]["mid_range_shots"] += 1
                                     else:
                                         stats[shooter]["long_range_shots"] += 1
-                                        
+
                                     # Assign xA to previous passer
                                     if hasattr(self, 'last_pass_info') and self.last_pass_info:
                                         # Check if pass was recent (within 5 seconds?)
@@ -410,45 +420,38 @@ class AdvancedEventDetector:
                                             assister = self.last_pass_info["player"]
                                             stats[assister]["expected_assists"] += xg
                                             self.last_pass_info["xg_assigned"] = True
-                                    
+
                                     events.append({
-                                        "type": "shot", 
-                                        "player": shooter, 
-                                        "frame": i, 
+                                        "type": "shot",
+                                        "player": shooter,
+                                        "frame": i,
                                         "xg": round(xg, 2),
-                                        "speed": round(speed_mps, 1)
+                                        "speed": round(speed_mps, 1),
+                                        "direction": "right" if moving_right else "left"
                                     })
-                                    
+
                                     # --- BLOCKED SHOT LOGIC ---
                                     # Check if any opponent is on the shot vector (Ball -> Goal)
-                                    # Raycast: Line B -> Goal. Opponent O distance to Line < 0.5m?
-                                    # And O is between B and Goal.
-                                    # Simplified: check Opponent Proximity < 1m?
-                                    # Better: Iterate opponents in frame i.
-                                    # Calculate distance to line segment.
                                     blocked = False
-                                    goal_target = (105, 34) # Rough center
                                     for opp_id in player_tracks[i].get("ids", []):
                                          if opp_id == shooter: continue
-                                         # Need opp position. Expensive to look up every track.
-                                         # Skipping strictly for speed unless required. 
-                                         # User requested "Blocked shots by opponent".
-                                         pass 
-                                    
-                                    # --- GOAL DETECTION (Phase 85) ---
+                                         pass
 
-                                    # Check if ball continues INTO net (X > 105.5 for buffer)
+                                    # --- GOAL DETECTION (Phase 85) ---
+                                    # Check if ball continues INTO net
                                     # Look ahead 10 frames
                                     goal_confirmed = False
                                     for k in range(i, min(i+10, len(ball_track))):
                                         if ball_track[k]:
                                             mk = self.camera.project_point(ball_track[k][0], ball_track[k][1])
-                                            # Goal Line X=105. Net depth ~2m -> X in [105, 107]
-                                            # Y in Post range
-                                            if mk[0] > 105.0 and (30.34 < mk[1] < 37.66):
+                                            # Check correct goal based on shot direction
+                                            if moving_right and mk[0] > 105.0 and (30.34 < mk[1] < 37.66):
                                                 goal_confirmed = True
                                                 break
-                                    
+                                            elif moving_left and mk[0] < 0.0 and (30.34 < mk[1] < 37.66):
+                                                goal_confirmed = True
+                                                break
+
                                     if goal_confirmed:
                                         stats[shooter]["goals"] += 1
                                         stats[shooter]["goals_total"] += 1 # Sync name
@@ -474,8 +477,8 @@ class AdvancedEventDetector:
                 dist_m = math.hypot(m2[0]-m1[0], m2[1]-m1[1])
                 speed_mps = dist_m / (2.0 / FPS)
                 
-                # If Shot Incoming (>15 m/s towards goal)
-                if speed_mps > 15.0 and (m2[0] < 5.0 or m2[0] > 100.0): # Near Goal Ends
+                # If Shot Incoming (using same threshold as shot detection)
+                if speed_mps > SHOT_SPEED_THRESHOLD and (m2[0] < 5.0 or m2[0] > 100.0): # Near Goal Ends
                      # Check next few frames for "Intervention"
                      # Intervention = Speed drop OR Direction change
                      # AND GK is close (<1m)
