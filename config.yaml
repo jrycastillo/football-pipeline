@@ -27,10 +27,11 @@ heuristics:
   DET_CONF: 0.10
   DET_IOU: 0.50
   DET_IMG_SIZE: 832
-  VID_STRIDE: 1
+  VID_STRIDE: 3
   
   # JNR
   JNR_IMG_SIZE: 160
+  JNR_STRIDE: 5 # Run recognition every 5th processed frame
   JNR_GATE: 0.35
   
   # Tracking

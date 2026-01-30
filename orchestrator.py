@@ -241,29 +241,41 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
 
 # Polling Logic
 def fetch_pending_videos():
-    """Fetch list of pending videos from ScoutBridge API."""
+    """Fetch list of pending videos from ScoutBridge API (all pages)."""
     print(f"[poll] Fetching from {SBG_LIST_URL}...")
     headers = {
         "Authorization": f"Bearer {SBG_TOKEN}",
         "Content-Type": "application/json"
     }
+    
+    all_items = []
+    page = 1
+    
     try:
-        resp = requests.get(SBG_LIST_URL, headers=headers, timeout=10)
-        health.record_api_call(success=(resp.status_code == 200))
-        if resp.status_code == 200:
+        while True:
+            resp = requests.get(f"{SBG_LIST_URL}?page={page}", headers=headers, timeout=10)
+            health.record_api_call(success=(resp.status_code == 200))
+            
+            if resp.status_code != 200:
+                print(f"[poll] Error fetching videos: {resp.status_code} - {resp.text}")
+                break
+                
             data = resp.json()
             items = data.get("items", [])
-
-            # No user filter - process all pending videos
-            print(f"[poll] Found {len(items)} pending videos.")
-            return items
-        else:
-            print(f"[poll] Error fetching videos: {resp.status_code} - {resp.text}")
-            return []
+            all_items.extend(items)
+            
+            total_pages = data.get("pages", 1)
+            if page >= total_pages:
+                break
+            page += 1
+        
+        print(f"[poll] Found {len(all_items)} pending videos (across {page} page(s)).")
+        return all_items
+        
     except Exception as e:
         print(f"[poll] Exception fetching videos: {e}")
         health.record_api_call(success=False)
-        return []
+        return all_items  # Return whatever we got so far
 
 
 def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", sam2_model="large", make_video=False):

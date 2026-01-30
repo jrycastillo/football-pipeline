@@ -122,7 +122,12 @@ from vision.color_classifier import TeamColorClassifier, KitCoordinator  # Phase
 from ultralytics import YOLO
 from vision.resnet_recognition import ResNetRecognizerV2 as JNRService # ResNet32 only
 from PIL import Image
-from vision.sam2_tracker import SAM2Tracker # Phase v29
+# SAM2 is optional - only import if available (disabled in orchestrator for speed)
+try:
+    from vision.sam2_tracker import SAM2Tracker # Phase v29
+except ImportError:
+    SAM2Tracker = None
+    logging.warning("⚠️ SAM2Tracker not available (sam2 package not installed)")
 from vision.track_utils import greedy_match, calculate_iou # Phase v30
 
 def is_near_feet(ball_box, player_boxes):
