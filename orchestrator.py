@@ -12,6 +12,11 @@ import argparse
 import sys
 import subprocess
 from pymysql.cursors import DictCursor
+from dotenv import load_dotenv
+
+# Load .env file (if exists)
+load_dotenv()
+from utils.health_monitor import get_health_monitor
 
 # Load Config
 with open("config.yaml", "r") as f:
@@ -21,7 +26,9 @@ with open("config.yaml", "r") as f:
 MYSQL_HOST = os.getenv("MYSQL_HOST", CONFIG["env"]["MYSQL_HOST"])
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", CONFIG["env"]["MYSQL_PORT"]))
 MYSQL_USER = os.getenv("MYSQL_USER", CONFIG["env"]["MYSQL_USER"])
-MYSQL_PASS = os.getenv("MYSQL_PASSWORD", "***REMOVED_SECRET***") # Hardcoded fallback from legacy
+MYSQL_PASS = os.getenv("MYSQL_PASSWORD")  # Required: Set via environment variable
+if not MYSQL_PASS:
+    print("[WARNING] MYSQL_PASSWORD not set. Database operations will fail.")
 MYSQL_DB = os.getenv("MYSQL_DB", CONFIG["env"]["MYSQL_DB"])
 ANALYSIS_TABLE = os.getenv("TABLE_NAME", CONFIG["env"]["TABLE_NAME"])
 
@@ -31,6 +38,9 @@ SBG_TOKEN = os.getenv("SBG_TOKEN", CONFIG["env"]["SBG_TOKEN"])
 
 # Global flag for DB connection
 NO_DB = False
+
+# Initialize health monitor
+health = get_health_monitor()
 
 # Database Helpers
 def _conn():
@@ -95,8 +105,10 @@ def upsert_status_row(matches_video_id, user_id, source_url, status, task_id,
                 print(f"[db] ✅ SUCCESS: Stats dumped for {matches_video_id} (status={status})")
             else:
                 print(f"[db] ✅ Status updated for {matches_video_id}: {status}")
+            health.record_db_query(success=True)
     except Exception as e:
         print(f"[db] ❌ FAILED to upsert: {e}")
+        health.record_db_query(success=False)
 
 def is_video_processed(matches_video_id, source_url):
     if NO_DB: return False
@@ -106,10 +118,12 @@ def is_video_processed(matches_video_id, source_url):
             sql = f"SELECT status FROM {ANALYSIS_TABLE} WHERE unique_id=%s LIMIT 1"
             cur.execute(sql, (unique_id,))
             row = cur.fetchone()
+            health.record_db_query(success=True)
             if row and row["status"] in ("finished", "running", "failed"):
                 return True
     except Exception as e:
         print(f"[db] Error checking status: {e}")
+        health.record_db_query(success=False)
     return False
 
 def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None, 
@@ -127,36 +141,15 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
     filename = os.path.basename(video_path.split("?")[0]) or "video.mp4"
 
     # 1. Download/Streaming Hybrid Logic
-    # 1. Download/Streaming Hybrid Logic
+    # USER REQUEST: Always download to temp for reliable processing
     if video_path.startswith("http"):
-        print(f"[pipeline] Attempting to stream: {video_path[:50]}...")
-        
-        # Force download for large matches to ensure full processing (User Request)
-        if "2e5f877b" in video_path or "01c073e5" in video_path or "d02a2634" in video_path:
-             print("[pipeline] Force-downloading large match for stability.")
-             use_streaming = False
-        else:
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                success_count = 0
-                for _ in range(3):
-                    ret, _ = cap.read()
-                    if ret: success_count += 1
-                cap.release()
-                if success_count >= 2:
-                    print(f"[pipeline] Streaming verified.")
-                    local_video_path = video_path
-                else:
-                    use_streaming = False
-            else:
-                use_streaming = False
+        print(f"[pipeline] Downloading to temp (streaming disabled): {video_path[:60]}...")
+        use_streaming = False  # Always download
 
         if not use_streaming:
-            print(f"[pipeline] Streaming failed/unstable. Downloading to temp...")
             temp_dir = tempfile.mkdtemp(prefix="pf_")
             temp_video_path = os.path.join(temp_dir, filename)
             try:
-                print(f"[pipeline] FULL URL: {video_path}")
                 resp = requests.get(video_path, stream=True, timeout=300)
                 resp.raise_for_status()
                 with open(temp_video_path, 'wb') as f:
@@ -171,6 +164,7 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
                 return False
 
     # 2. Initial status update (In Progress) - Use 'running' (7 chars) instead of 'in_progress' (11 chars)
+    health.record_video_start(video_id, user_id)
     if not no_db:
         print(f"[pipeline] Setting status 'running' for {video_id} (Task {task_id})...")
         upsert_status_row(video_id, user_id, spaces_url or video_path, "running", task_id)
@@ -213,17 +207,23 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
         if os.path.exists(stats_path):
             with open(stats_path, 'r') as f:
                 stats_data = json.load(f)
-            
+
+            # Extract frame count if available
+            frames_processed = stats_data.get('metadata', {}).get('total_frames', 0)
+            health.record_video_complete(video_id, frames_processed)
+
             if not no_db:
                 print(f"[pipeline] Updating DB with stats for {video_id}...")
                 upsert_status_row(video_id, user_id, spaces_url or video_path, "finished", task_id, analysis={"stats": stats_data})
             return True
         else:
             print(f"[pipeline] Missing player_stats.json in {output_dir}")
+            health.record_video_failure(video_id, "Missing output file")
             return False
 
     except Exception as e:
         print(f"[pipeline] Error: {e}")
+        health.record_video_failure(video_id, str(e))
         if not no_db:
             upsert_status_row(video_id, user_id, spaces_url or video_path, "failed", task_id, error=str(e))
         return False
@@ -233,8 +233,11 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             print(f"[pipeline] Cleaning up temp file...")
             try:
                 os.remove(temp_video_path)
-                os.rmdir(os.path.dirname(temp_video_path))
-            except: pass
+                temp_dir = os.path.dirname(temp_video_path)
+                if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                    os.rmdir(temp_dir)
+            except OSError as e:
+                print(f"[pipeline] Warning: Could not remove temp files: {e}")
 
 # Polling Logic
 def fetch_pending_videos():
@@ -246,22 +249,20 @@ def fetch_pending_videos():
     }
     try:
         resp = requests.get(SBG_LIST_URL, headers=headers, timeout=10)
+        health.record_api_call(success=(resp.status_code == 200))
         if resp.status_code == 200:
             data = resp.json()
             items = data.get("items", [])
-            
-            # --- PRIORITY FILTER (User Request) ---
-            TARGET_USER = "d02a2634"
-            # Filter by matching user ID in file path e.g. matches_upload/{USER_ID}/...
-            filtered = [x for x in items if TARGET_USER in x.get("fileLocation", "")]
-            
-            print(f"[poll] Found {len(items)} total. Filtered {len(filtered)} for user {TARGET_USER} (by path match).")
-            return filtered
+
+            # No user filter - process all pending videos
+            print(f"[poll] Found {len(items)} pending videos.")
+            return items
         else:
             print(f"[poll] Error fetching videos: {resp.status_code} - {resp.text}")
             return []
     except Exception as e:
         print(f"[poll] Exception fetching videos: {e}")
+        health.record_api_call(success=False)
         return []
 
 
@@ -345,9 +346,10 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
     print(f"[poll] Size filter: {min_size_mb}MB - {max_size_mb}MB")
     
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers)
-    
+
     processed_count = 0
     processed_ids = set()
+    futures = []  # Track submitted futures for error handling
     
     while True:
         try:
@@ -385,9 +387,9 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                 print(f"[poll] Submitting {video_id} ({file_size_mb:.1f}MB) to worker pool...")
 
                 # FULL RUN (No Limit)
-                limit_frames = None 
-                
-                executor.submit(
+                limit_frames = None
+
+                future = executor.submit(
                     process_spaces_video,
                     video, save_local=True, no_db=NO_DB,
                     locking_mode=locking_mode,
@@ -396,7 +398,8 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                     make_video=make_video,
                     max_frames=limit_frames
                 )
-                
+                futures.append(future)
+
                 processed_ids.add(video_id)
                 processed_count += 1
                 submitted_in_this_cycle += 1
@@ -404,7 +407,8 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                 # Check max limit
                 if max_videos and processed_count >= max_videos:
                     print(f"[poll] Reached max_videos limit ({max_videos}). Stopping submissions.")
-                    executor.shutdown(wait=False) # We act as a daemon mostly, but returning exits main loop
+                    print(f"[poll] Waiting for {len(futures)} running tasks to complete...")
+                    executor.shutdown(wait=True)  # Wait for all tasks to complete
                     return
             
             if submitted_in_this_cycle == 0:
@@ -412,13 +416,31 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
             else:
                  print(f"[poll] Submitted {submitted_in_this_cycle} new jobs.")
 
+            # Clean up completed futures and check for errors
+            completed_futures = [f for f in futures if f.done()]
+            for future in completed_futures:
+                try:
+                    future.result()  # Re-raise any exceptions from worker
+                except Exception as e:
+                    print(f"[poll] Worker task failed with error: {e}")
+                    traceback.print_exc()
+                    health.record_error("worker_task_failure", str(e))
+            futures = [f for f in futures if not f.done()]  # Keep only running futures
+
+            # Print health summary every 10 cycles
+            if processed_count % 10 == 0 and processed_count > 0:
+                health.print_summary()
+                health.save_snapshot()
+
             # Wait before next poll
+            print(f"[poll] Active workers: {len([f for f in futures if not f.done()])}")
             print(f"[poll] Cycle complete. Waiting {poll_interval}s...")
             time.sleep(poll_interval)
             
         except KeyboardInterrupt:
-            print("[poll] Interrupted by user. Stopping.")
-            executor.shutdown(wait=False)
+            print("[poll] Interrupted by user. Stopping...")
+            print(f"[poll] Waiting for {len([f for f in futures if not f.done()])} running tasks to complete...")
+            executor.shutdown(wait=True)  # Wait for graceful shutdown
             break
         except Exception as e:
             print(f"[poll] Error in polling loop: {e}")

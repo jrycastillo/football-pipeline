@@ -19,15 +19,15 @@ HSV_COLOR_RANGES = {
     "Maroon": [(0, 10, 50, 255, 20, 100), (170, 180, 50, 255, 20, 100)],
     "Red": [(0, 10, 60, 255, 40, 255), (170, 180, 60, 255, 40, 255)],
     "Orange": [(10, 20, 80, 255, 60, 255)],
-    "Gold": [(20, 30, 40, 255, 50, 255)],
+    "Gold": [(20, 25, 40, 255, 50, 255)],  # Fixed: H[20-25] to avoid overlap with Yellow
     "Yellow": [(25, 35, 60, 255, 40, 255)], # Narrowed to make room for Gold/Lime
     "Lime": [(35, 55, 40, 255, 40, 255)], # The requested "Light Green"
     "Green": [(55, 85, 40, 255, 20, 255)], # Shifted up
     "Teal": [(80, 95, 40, 255, 30, 150)],
     "Cyan": [(85, 105, 50, 255, 40, 255)],
-    "Blue": [(100, 140, 50, 255, 40, 255)],
+    "Blue": [(100, 140, 50, 255, 81, 255)],  # Fixed: V[81-255] to separate from Navy
     "Navy": [(105, 145, 40, 255, 20, 80)],
-    "Purple": [(140, 160, 40, 255, 40, 255)],
+    "Purple": [(140, 150, 40, 255, 40, 255)],  # Fixed: H[140-150] to avoid overlap with Pink
     "Pink": [(150, 170, 30, 255, 80, 255)],
     "White": [(0, 180, 0, 50, 180, 255)],
     "Silver": [(0, 180, 0, 30, 120, 180)],
@@ -144,14 +144,14 @@ class TeamColorClassifier:
         # 3. Last Resort: Closest Hue
         if h < 10 or h > 170: return "Red"
         if h < 20: return "Orange"
-        if h < 30: return "Gold"
-        if h < 40: return "Yellow"
+        if h < 25: return "Gold"  # Fixed: Match Gold range [20-25]
+        if h < 35: return "Yellow"  # Fixed: Match Yellow range [25-35]
         if h < 55: return "Lime"
         if h < 85: return "Green"
         if h < 95: return "Teal"
         if h < 105: return "Cyan"
         if h < 145: return "Blue"
-        if h < 165: return "Purple"
+        if h < 150: return "Purple"  # Fixed: Match Purple range [140-150]
         return "Pink"
     
     def predict(self, crop, track_id=None):

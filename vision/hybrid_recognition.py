@@ -6,6 +6,8 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from vision.resnet_recognition import ResNetRecognizer
 from collections import defaultdict
 
+from utils.device_utils import is_cuda_available
+
 class HybridJNRService:
     """
     Hybrid Jersey Number Recognition Service (Phase 200).
@@ -29,8 +31,8 @@ class HybridJNRService:
             self.vl_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.vl_model_path,
                 torch_dtype=torch.float16,
-                device_map="cuda",
-                _attn_implementation="flash_attention_2" if torch.cuda.is_available() else "eager"
+                device_map="auto",
+                _attn_implementation="flash_attention_2" if is_cuda_available() else "eager"
             )
             self.vl_processor = AutoProcessor.from_pretrained(self.vl_model_path)
             self.has_verifier = True

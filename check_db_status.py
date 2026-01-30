@@ -1,37 +1,44 @@
-import pymysql
-import json
+#!/usr/bin/env python3
+import os, pymysql
+from pymysql.cursors import DictCursor
 
-MYSQL_HOST = "db-mysql-sgp1-18289-do-user-18922201-0.f.db.ondigitalocean.com"
-MYSQL_PORT = 25060
-MYSQL_USER = "scoutbridge"
-MYSQL_PASS = "***REMOVED_SECRET***"
-MYSQL_DB = "footballgallery"
-TABLE_NAME = "MatchesVideoAnalysis_test"
+conn = pymysql.connect(
+    host="db-mysql-sgp1-18289-do-user-18922201-0.f.db.ondigitalocean.com",
+    port=25060, user="scoutbridge", password="***REMOVED_SECRET***",
+    database="footballgallery", cursorclass=DictCursor
+)
 
-def check_stats():
-    conn = pymysql.connect(
-        host=MYSQL_HOST, port=MYSQL_PORT, user=MYSQL_USER, password=MYSQL_PASS, database=MYSQL_DB,
-        cursorclass=pymysql.cursors.DictCursor
-    )
-    with conn.cursor() as cursor:
-        sql = f"SELECT id, analysis, updated_at FROM {TABLE_NAME} WHERE status='finished' ORDER BY updated_at DESC LIMIT 5"
-        cursor.execute(sql)
-        results = cursor.fetchall()
-        
-        print("--- LAST 5 FINISHED VIDEOS ---")
-        for row in results:
-            analysis = row['analysis']
-            if isinstance(analysis, str):
-                analysis = json.loads(analysis)
-            
-            stats = analysis.get("stats", {})
-            
-            # Count players in stats
-            num_players = len(stats) if isinstance(stats, dict) else len(stats) # Handle list or dict
-            
-            print(f"ID: {row['id']} | Time: {row['updated_at']} | Stats Entries: {num_players}")
-            if num_players > 0:
-                print(f"  > Sample: {str(stats)[:100]}...")
+print("=" * 80)
+print("DATABASE STATUS")
+print("=" * 80)
 
-if __name__ == "__main__":
-    check_stats()
+with conn.cursor() as cur:
+    # Running
+    cur.execute("SELECT COUNT(*) as c FROM MatchesVideoAnalysis_test WHERE status='running'")
+    running = cur.fetchone()['c']
+    print(f"\n🔄 Running: {running}")
+    
+    # Finished
+    cur.execute("SELECT COUNT(*) as c FROM MatchesVideoAnalysis_test WHERE status='finished'")
+    finished = cur.fetchone()['c']
+    print(f"✅ Finished: {finished}")
+    
+    # Failed
+    cur.execute("SELECT COUNT(*) as c FROM MatchesVideoAnalysis_test WHERE status='failed'")
+    failed = cur.fetchone()['c']
+    print(f"❌ Failed: {failed}")
+    
+    # Recent activity
+    cur.execute("""
+        SELECT id, status, created_at, updated_at 
+        FROM MatchesVideoAnalysis_test 
+        WHERE updated_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        ORDER BY updated_at DESC LIMIT 10
+    """)
+    recent = cur.fetchall()
+    print(f"\n⏰ Updated in last hour: {len(recent)}")
+    for r in recent:
+        print(f"   • ID {r['id']:5} | {r['status']:10} | Updated: {r['updated_at']}")
+
+conn.close()
+print("\n" + "=" * 80)

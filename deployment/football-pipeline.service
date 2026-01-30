@@ -1,0 +1,50 @@
+[Unit]
+Description=Football Analysis Pipeline - Video Processing Service
+After=network.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/football
+Environment="PATH=/home/ubuntu/football/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+# Load environment variables from .env file
+EnvironmentFile=/home/ubuntu/football/.env
+
+# Main command - polling mode with 3 parallel workers
+ExecStart=/home/ubuntu/football/venv/bin/python orchestrator.py \
+    --poll \
+    --poll_interval 60 \
+    --parallel 3 \
+    --locking_mode 2 \
+    --tracking_mode bytetrack
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=append:/home/ubuntu/football/logs/pipeline.log
+StandardError=append:/home/ubuntu/football/logs/pipeline-error.log
+SyslogIdentifier=football-pipeline
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=300
+
+# Security (optional - adjust as needed)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

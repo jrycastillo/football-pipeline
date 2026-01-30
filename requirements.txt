@@ -1,0 +1,16 @@
+torch
+torchvision
+ultralytics
+transformers
+accelerate
+opencv-python
+pillow
+scikit-learn
+pyyaml
+scipy
+numba
+tqdm
+pandas
+matplotlib
+seaborn
+requests

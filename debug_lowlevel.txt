@@ -1,2 +1,0 @@
-Entered collate_fn
-Entered collate_fn

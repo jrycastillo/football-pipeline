@@ -15,8 +15,9 @@ import sys
 from vision.resnet_recognition import ResNetRecognizerV2 as JNRService
 
 # FORCE HF CACHE to Local Directory to avoid Permission Errors
-os.environ["HF_HOME"] = "/home/ubuntu/football/hf_cache"
+# os.environ["HF_HOME"] = "/home/ubuntu/football/hf_cache" # Removed hardcoded path
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+from utils.device_utils import get_device, empty_cache
 
 import yaml
 import time
@@ -73,10 +74,11 @@ class ByteTrackTracker(BYTETracker):
 # START MOCK CLASSES (For explicit control)
 class MockBox:
     def __init__(self, xyxy, tid, conf, cls_id):
-        self.xyxy = [torch.tensor(xyxy, device="cuda")]
-        self.id = [torch.tensor([tid], device="cuda")]
-        self.conf = [torch.tensor([conf], device="cuda")]
-        self.cls = [torch.tensor([cls_id], device="cuda")]
+        d = get_device()
+        self.xyxy = [torch.tensor(xyxy, dtype=torch.float32).to(d)]
+        self.id = [torch.tensor([tid], dtype=torch.float32).to(d)]
+        self.conf = [torch.tensor([conf], dtype=torch.float32).to(d)]
+        self.cls = [torch.tensor([cls_id], dtype=torch.float32).to(d)]
 
 class MockResults:
     def __init__(self, boxes, img):
@@ -123,7 +125,38 @@ from PIL import Image
 from vision.sam2_tracker import SAM2Tracker # Phase v29
 from vision.track_utils import greedy_match, calculate_iou # Phase v30
 
-# --- Phase v31: Spawn Suppression Helpers ---
+def is_near_feet(ball_box, player_boxes):
+    """
+    Check if ball is near player feet using Distance Heuristic.
+    ball_box: [x1, y1, x2, y2]
+    player_boxes: list of [x1, y1, x2, y2]
+    """
+    bx1, by1, bx2, by2 = ball_box
+    b_cx = (bx1 + bx2) / 2
+    b_cy = (by1 + by2) / 2
+    
+    for pbox in player_boxes:
+        px1, py1, px2, py2 = pbox
+        p_w = px2 - px1
+        p_h = py2 - py1
+        
+        # Player Anchor: Bottom Center
+        p_anchor_x = (px1 + px2) / 2
+        p_anchor_y = py2
+        
+        # Distance from Ball Center to Player Anchor
+        dist = math.sqrt((b_cx - p_anchor_x)**2 + (b_cy - p_anchor_y)**2)
+        
+        # Dynamic Threshold: 
+        # Radius = Max(90% of Width, 25% of Height)
+        # This creates a semi-circle zone around the feet
+        thresh = max(p_w * 0.9, p_h * 0.25)
+        
+        if dist < thresh:
+             return True
+            
+    return False
+
 def filter_detections_strict(boxes_obj, width, height, frame_idx):
     """
     Remove detections that are:
@@ -275,7 +308,7 @@ try:
 except FileNotFoundError:
     log("Warning: config.yaml not found, using defaults.")
     CONFIG = {
-        "env": {"DET_WEIGHTS": "models/detect.pt", "JNR_WEIGHTS": None, "BALL_MODEL_PATH": None},
+        "env": {"DET_WEIGHTS": "models/yolo_player.pt", "JNR_WEIGHTS": None, "BALL_MODEL_PATH": None},
         "heuristics": {"FPS": 25, "DET_CONF": 0.10, "DET_IOU": 0.50, "DET_IMG_SIZE": 832, "VID_STRIDE": 1, "MAX_TRACK_FRAMES": None, "STORE_IMAGES": 1, "STORE_IMAGES_UP_TO": 1500},
         "classes": {"ball": 0, "goalkeeper": 1, "player": 2, "referee": 3}
     }
@@ -427,7 +460,9 @@ def get_jersey_color(crop):
         h_val = centers[best_idx][0]
         s = centers[best_idx][1]
         v = centers[best_idx][2]
-    except:
+    except Exception as e:
+        # Fallback to median if K-means fails
+        log(f"Warning: K-means color clustering failed: {e}")
         h_val = np.median(filtered[:, 0])
         s = np.median(filtered[:, 1])
         v = np.median(filtered[:, 2])
@@ -461,8 +496,9 @@ class IdentityManager:
         self.color_registry = {} # {color_key: jersey_num} - Phase 113
         self.player_last_pos = {} 
         # Phase 128: Smart Role Detection
-        self.color_counter = {}  # {color: count} - track color frequencies
-        self.team_colors = []    # [Team A color, Team B color] - two most common
+        self.color_counter = {}  # {color: count} - track PLAYER color frequencies only
+        self.team_colors = []    # [Team A color, Team B color] - two most common player colors
+        self.goalkeeper_colors = {}  # {track_id: color} - GK colors stored separately
         self.goalkeeper_zone_threshold = 0.15  # Top/bottom 15% of pitch = GK zone 
         self.locking_mode = 2 # Default to Mode 2 (Consecutive) for Precision
         self.jersey_gallery = defaultdict(list) # Phase v26: {jersey_num: [pil_image, ...]}
@@ -473,20 +509,11 @@ class IdentityManager:
         self.visual_history = defaultdict(list)
         # Run 20 Attributes
         self.vote_counts = defaultdict(lambda: defaultdict(float)) # {track_id: {jersey: score}}
-        self.vote_counts = defaultdict(lambda: defaultdict(float)) # {track_id: {jersey: score}}
         self.locks = {} # {track_id: {jersey: X, locked: True}}
         self.last_jnr_update = {} # {track_id: frame_idx}
         self.locked_map = {} # Key: (team, number), Value: track_id -- Strict Uniqueness
-        self.locked_map = {} # Key: (team, number), Value: track_id -- Strict Uniqueness
         
-        # Load existing match kits if available (for Referee Detection)
-        try:
-            with open("output/match_kits.json", "r") as f:
-                 data = json.load(f)
-                 self.team_colors = data.get("players", [])
-                 log(f"📝 [IdentityManager] Loaded existing team colors: {self.team_colors}")
-        except Exception:
-            pass
+        # Team colors will be auto-detected during processing (Phase 128)
 
     def set_track_class(self, track_id, cls_id):
         self.track_classes[track_id] = cls_id
@@ -708,7 +735,7 @@ class IdentityManager:
             # Also register in color_registry
             color_key = f"{team_color}_{current_track_id}"
             self.color_registry[color_key] = jersey_number
-            log(f"📝 [IdentityManager] Registered Jersey #{jersey_number} to Track {current_track_id} ({team_color})")
+            log(f"📝 [IdentityManager] Registered Jersey #{jersey_number} to Track {current_track_id} ({self.get_team_label(current_track_id)})")
 
         # STRICT: Always return the tracker's ID
         return current_track_id
@@ -871,10 +898,26 @@ class IdentityManager:
         
         return current_track_id
 
-    def set_track_color(self, track_id, color):
+    def set_track_color(self, track_id, color, cls_id=None):
+        """Set track color with role-based logic.
+        - Referee (cls_id=3): Skip color assignment entirely
+        - Goalkeeper (cls_id=1): Store in goalkeeper_colors, don't count for team detection
+        - Player (cls_id=2): Store and count for team detection
+        """
+        # Skip color for Referee
+        if cls_id == 3:
+            return
+        
         if track_id not in self.track_colors or self.track_colors[track_id] == "Unknown":
             self.track_colors[track_id] = color
-            # Phase 128: Count color frequency
+            
+            # Goalkeeper: Store separately, don't count for team colors
+            if cls_id == 1:
+                if color != "Unknown":
+                    self.goalkeeper_colors[track_id] = color
+                return
+            
+            # Player: Count color frequency for team detection
             if color != "Unknown":
                 self.color_counter[color] = self.color_counter.get(color, 0) + 1
     
@@ -892,17 +935,53 @@ class IdentityManager:
         self.team_colors = [sorted_colors[0][0], sorted_colors[1][0]]
         log(f"🏟️ [Team Detection] Team A: {self.team_colors[0]}, Team B: {self.team_colors[1]}")
 
+    def get_team_label(self, track_id):
+        """Get team label for a track (Team A, Team B, Goalkeeper, or Unknown).
+        - Players with Team A color -> 'Team A'
+        - Players with Team B color -> 'Team B'
+        - Goalkeepers -> 'GK' + their actual color
+        - Others -> raw color
+        """
+        cls_id = self.track_classes.get(track_id)
+        color = self.track_colors.get(track_id, "Unknown")
+        
+        # Goalkeeper: Return GK + color
+        if cls_id == 1:
+            gk_color = self.goalkeeper_colors.get(track_id, color)
+            return f"GK ({gk_color})"
+        
+        # Referee: Should not have color, but fallback
+        if cls_id == 3:
+            return "Referee"
+        
+        # Player: Map to Team A or Team B
+        if len(self.team_colors) >= 2:
+            if color == self.team_colors[0]:
+                return "Team A"
+            elif color == self.team_colors[1]:
+                return "Team B"
+        
+        # Fallback: return raw color
+        return color
+
     def set_track_class(self, track_id, cls_id):
         """Store detection class for a track (only set once)."""
         if track_id not in self.track_classes:
             self.track_classes[track_id] = cls_id
 
-    def get_role(self, track_id, y_pos=None, frame_height=None):
+    def get_role(self, track_id, y_pos=None, frame_height=None, x_pos=None, frame_width=None):
         """
         Role assignment based on model detection class (Phase 132).
         Model classes: 1=Goalkeeper, 2=Player, 3=Referee
+        
+        Refined Logic (V2):
+        - If explicit Model Class 1 -> Goalkeeper
+        - If explicit Model Class 3 -> Referee
+        - If Class 2 (Player) but Color Outlier:
+            - If near edges (Goal Area) -> Goalkeeper
+            - Else -> Referee
         """
-        # Use model detection class directly
+        # Use model detection class directly if explicit
         cls_id = self.track_classes.get(track_id)
         if cls_id == 1:
             return "Goalkeeper"
@@ -912,13 +991,23 @@ class IdentityManager:
         # Default = Player (cls_id == 2 or unknown)
         
         # Phase v33: Implicit Referee Detection via Color Outlier
-        # If a "Player" has a stable color that matches NEITHER team, call them Referee.
+        # If a "Player" has a stable color that matches NEITHER team, call them Referee OR Goalkeeper.
         if len(self.team_colors) >= 2:
             color = self.track_colors.get(track_id, "Unknown")
             if color != "Unknown" and color not in self.team_colors:
-                 # Check against GK colors to be safe (optional, but good)
-                 # For now, just assume distinct color = Referee/Staff
-                 return "Referee"
+                 # It's an outlier (GK or Ref). Use Position Heuristic.
+                 if x_pos is not None and frame_width is not None:
+                     # Goal Zone Heuristic: Left 15% or Right 15% -> Likely GK
+                     is_near_edge = (x_pos < frame_width * 0.15) or (x_pos > frame_width * 0.85)
+                     if is_near_edge:
+                         return "Goalkeeper"
+                     else:
+                         # Midfield Outliers: Revert to "Player" (Unknown) instead of Referee
+                         # to avoid weird shadow/lighting false positives
+                         return "Player"
+                 
+                 # Fallback if no position info
+                 return "Player"
 
         return "Player"
 
@@ -1214,6 +1303,7 @@ class SmolVLM2Service:
                 ).to(self.model.device)
                 
                 with torch.no_grad():
+                    empty_cache()
                     generated_ids = self.model.generate(
                         **inputs,
                         max_new_tokens=10,
@@ -1251,8 +1341,8 @@ class SmolVLM2Service:
                 num = int(digits)
                 if 1 <= num <= 99:
                     return num
-            except:
-                pass
+            except ValueError:
+                pass  # Not a valid integer
         return None
 
 # --- 7.5. VISUALIZER ---
@@ -1305,8 +1395,9 @@ class Visualizer:
             team_label = team_color if team_color != "Unknown" else ""
 
             # Resolve Role (handling Implicit Referees)
-            # Pass y2 as approximation of foot position for GK zone check
-            role = id_manager.get_role(tid, y_pos=y2, frame_height=img.shape[0])
+            # Pass y2 as approximation of foot position for GK zone check (updated to use CX for X-Zone)
+            cx = (x1 + x2) // 2
+            role = id_manager.get_role(tid, y_pos=y2, frame_height=img.shape[0], x_pos=cx, frame_width=img.shape[1])
             
             # Color based on Role
             if role == "Goalkeeper":
@@ -1547,7 +1638,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Determine video path
-    video_path = args.video or os.environ.get("PIPELINE_VIDEO") or "/home/ubuntu/football/121364_0.mp4"
+    video_path = args.video or os.environ.get("PIPELINE_VIDEO") or CONFIG.get('env', {}).get('SRC_VIDEO') or "/home/ubuntu/football/121364_0.mp4"
     output_dir = args.output_dir or os.environ.get("PIPELINE_OUTPUT") or "output"
     
     # Handle URL streaming/downloads
@@ -1599,7 +1690,9 @@ if __name__ == "__main__":
 
     # Phase 20: JNR Integration (Hybrid Queue)
     logging.info("🔄 [JNR] Initializing JNR Service...")
-    jnr_service = JNRService()
+    # Clean hardcoded paths
+    jnr_weights = CONFIG['env']['JNR_WEIGHTS'] if CONFIG['env']['JNR_WEIGHTS'] else "models/resnet34_rgb_jnr.pt"
+    jnr_service = JNRService(weights_path=jnr_weights)
 
 
 
@@ -1624,11 +1717,11 @@ if __name__ == "__main__":
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
     kit_coordinator = KitCoordinator()  # Phase 168
-    pitch_manager = PitchManager(model_path="/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_field_keypoint.pt", device=0)
+    pitch_manager = PitchManager(model_path=CONFIG['env']['POSE_WEIGHTS'], device=get_device().type)
     camera = Camera(pitch_manager.H_default)
     
-    player_model = YOLO("/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_player_detect.pt")
-    ball_model = YOLO("/home/ubuntu/videoforprocessing_link/football_analysis_v2/data/models/best_ball_latest.pt")
+    player_model = YOLO(CONFIG['env']['DET_WEIGHTS'])
+    ball_model = YOLO(CONFIG['env']['BALL_MODEL_PATH'])
     loader = ThreadedVideoReader(video_path)
     time.sleep(1.0)
     
@@ -1910,7 +2003,7 @@ if __name__ == "__main__":
                     player_res = MockResults(mock_boxes, f)
                     
                     # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
-                    ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
+                    ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=get_device().type)[0]
                 
                 img = player_res.orig_img
 
@@ -1943,7 +2036,7 @@ if __name__ == "__main__":
                     for b in ball_res.boxes:
                         conf = float(b.conf[0].item())
                         # FILTER: Lower confidence for ball to catch distant/small balls
-                        if conf < 0.1:
+                        if conf < 0.3:
                             continue
                         frame_data["boxes"].append({
                             "xyxy": b.xyxy[0].cpu().numpy().tolist(),
@@ -1951,6 +2044,21 @@ if __name__ == "__main__":
                             "conf": conf,
                             "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
                         })
+                        
+                # FILTER: Remove balls near feet (false positives)
+                # 1. Collect all player boxes from this frame
+                current_player_boxes = [b["xyxy"] for b in frame_data["boxes"] if b["cls"] in [1, 2]]
+                
+                # 2. Filter balls
+                filtered_boxes = []
+                for box_data in frame_data["boxes"]:
+                     if box_data["cls"] == 32: # Ball
+                         if is_near_feet(box_data["xyxy"], current_player_boxes):
+                             # log(f"Dropped ball near feet: {box_data['xyxy']}")
+                             continue
+                     filtered_boxes.append(box_data)
+                
+                frame_data["boxes"] = filtered_boxes
                 
                 # Post-Process for JNR
                 for box_data in frame_data["boxes"]:
@@ -1967,7 +2075,7 @@ if __name__ == "__main__":
                             if crop is not None and crop.size > 0:
                                    # Store Color with voting (Phase 139)
                                    color = color_classifier.predict_with_voting(crop, tid)
-                                   id_manager.set_track_color(tid, color)
+                                   id_manager.set_track_color(tid, color, cls_id=cls_id)
                                    
                                    # Phase v28: SigLIP Observation
                                    if siglip_classifier:
@@ -1998,13 +2106,14 @@ if __name__ == "__main__":
                                        should_check = id_manager.should_update_jnr(tid, n, cadence=4) # Faster cadence (Phase 216)
                                        
                                        if should_check:
-                                            # 2. Quality Gate (Phase 216: RELAXED for low-res video)
+                                            # 2. Quality Gate (Phase 216: RELAXED for Super-Res)
                                             h_crop, w_crop = crop.shape[:2]
-                                            if h_crop >= 40 and w_crop >= 20: # Min Size RELAXED (was 60x30)
+                                            # Allow tiny crops since we now have 4x Super-Res
+                                            if h_crop >= 20 and w_crop >= 10: 
                                                # Blur Check (Variance of Laplacian)
                                                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                                                var = cv2.Laplacian(gray, cv2.CV_64F).var()
-                                               if var >= 40: # RELAXED sharpness (was 80)
+                                               if var >= 20: # Very relaxed sharpness (SR will fix blur)
                                                    
                                                    # 3. Torso Crop (Focus on number)
                                                    # Reduce Y range to upper body (ignore head/legs)
