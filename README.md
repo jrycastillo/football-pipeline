@@ -49,15 +49,34 @@ nano .env  # Add your database password and API token
 
 ### 2. Download Models
 
-```bash
-# Contact team for model access, then place in models/ directory:
-# - models/yolo_player.pt
-# - models/yolo_ball.pt
-# - models/yolo_pitch.pt
-# - models/resnet34_rgb_jnr.pt
+Download required models from Google Drive:
+
+📦 **[Models (Google Drive)](https://drive.google.com/drive/folders/1-AbCdEfGhIjKlMnOpQrStUvWxYz123?usp=sharing)**
+
+Place the downloaded files in the `models/` directory:
+```
+models/
+├── yolo_player.pt       # Player/GK/Referee detection
+├── yolo_ball.pt         # Ball detection
+├── yolo_pitch.pt        # Pitch keypoint detection
+├── resnet34_rgb_jnr.pt  # Jersey number recognition
+└── ESPCN_x4.pb          # Super-resolution (optional)
 ```
 
-### 3. Process Your First Video
+### 3. Test Videos (Optional)
+
+Sample videos for testing:
+
+🎬 **[Test Videos (Google Drive)](https://drive.google.com/drive/folders/1-XyZaBcDeFgHiJkLmNoPqRsTuVwXyZ?usp=sharing)**
+
+```
+test_videos/
+├── clipped_ikorudo_tornadoes.mp4  # 5-min sample match
+├── sample_match_1080p.mp4         # Full HD test
+└── short_clip_30s.webm            # Quick test clip
+```
+
+### 4. Process Your First Video
 
 ```bash
 # Single video analysis
