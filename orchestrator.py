@@ -126,8 +126,8 @@ def is_video_processed(matches_video_id, source_url):
         health.record_db_query(success=False)
     return False
 
-def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None, 
-                 locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", sam2_model="large", make_video=False, task_id=0):
+def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None,
+                 locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", make_video=False, task_id=0):
     """
     Unified metadata-aware pipeline wrapper.
     Delegates to pipeline_consolidated.py and handles DB updates.
@@ -188,13 +188,10 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             cmd.extend(["--vid_stride", str(vid_stride)])
         if tracking_mode:
             cmd.extend(["--tracking_mode", tracking_mode])
-        # SAM2 DISABLED for speed (User Request 2026-01-22)
-        # if sam2_model:
-        #     cmd.extend(["--sam2_model", sam2_model])
             
         print(f"[pipeline] Executing Core: {' '.join(cmd)}")
-        # Increased timeout to 8 hours for H100 full matches (was 4hr, caused timeout)
-        result = subprocess.run(cmd, env=os.environ, timeout=28800)
+        # Increased timeout to 24 hours for H100 full matches
+        result = subprocess.run(cmd, env=os.environ, timeout=86400)
         
         if result.returncode != 0:
             print(f"[pipeline] Core failed with code {result.returncode}")
@@ -278,7 +275,7 @@ def fetch_pending_videos():
         return all_items  # Return whatever we got so far
 
 
-def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", sam2_model="large", make_video=False):
+def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None, locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", make_video=False):
     """
     Process a single video from SPACES using the unified run_pipeline wrapper.
     """
@@ -327,7 +324,6 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         jnr_stride=jnr_stride,
         vid_stride=vid_stride,
         tracking_mode=tracking_mode,
-        sam2_model=sam2_model,
         make_video=make_video,
         task_id=task_id
     )
@@ -341,7 +337,7 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
 import concurrent.futures
 
 def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_size_mb=float('inf'), 
-                       locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, parallel_workers=1):
+                       locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, parallel_workers=1, max_frames=None):
     """
     Continuously poll for pending videos and process them.
     
@@ -398,8 +394,8 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                 # Submit to worker pool
                 print(f"[poll] Submitting {video_id} ({file_size_mb:.1f}MB) to worker pool...")
 
-                # FULL RUN (No Limit)
-                limit_frames = None
+                # Frame Limit (Debug Override)
+                limit_frames = max_frames
 
                 future = executor.submit(
                     process_spaces_video,
@@ -483,8 +479,7 @@ def main():
     parser.add_argument("--locking_mode", type=int, choices=[1, 2, 3], default=2, help="Internal pipeline locking mode")
     parser.add_argument("--jnr_stride", type=int, help="Internal pipeline JNR stride (frames)")
     parser.add_argument("--vid_stride", type=int, help="Internal pipeline VIDEO stride (skip frames)")
-    parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "sam2", "botsort"], help="Tracking backend")
-    parser.add_argument("--sam2_model", type=str, default="large", choices=["large", "base", "small", "tiny"], help="SAM2 model variant")
+    parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend")
     
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent pipelines (default 1)")
     
@@ -526,7 +521,6 @@ def main():
                 jnr_stride=args.jnr_stride,
                 vid_stride=args.vid_stride,
                 tracking_mode=args.tracking_mode,
-                sam2_model=args.sam2_model,
                 make_video=args.make_video
             )
             if success:
@@ -553,7 +547,8 @@ def main():
             jnr_stride=args.jnr_stride,
             vid_stride=args.vid_stride,
             make_video=args.make_video,
-            parallel_workers=args.parallel
+            parallel_workers=args.parallel,
+            max_frames=args.max_frames
         )
     else:
         # Show help if no mode specified

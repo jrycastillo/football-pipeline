@@ -86,6 +86,29 @@ class StatsEngine:
                  if b["id"] is not None:
                      id_frame_counts[b["id"]] += 1
 
+        # Phase 216 Fix: Remap frame counts to jersey numbers
+        if id_manager:
+            track_to_jersey = {}
+            if hasattr(id_manager, 'active_bindings'):
+                track_to_jersey.update(id_manager.active_bindings)
+            if hasattr(id_manager, 'jersey_registry'):
+                for jersey_num, info in id_manager.jersey_registry.items():
+                    if isinstance(info, dict) and 'track_id' in info:
+                        tid = info['track_id']
+                        if tid not in track_to_jersey:
+                            track_to_jersey[tid] = jersey_num
+            
+            # Aggregate frame counts for mapped entities
+            for tid, count in list(id_frame_counts.items()):
+                if tid in track_to_jersey:
+                    jnum = track_to_jersey[tid]
+                    # Add to jersey count
+                    id_frame_counts[jnum] += count
+                    # Note: We don't remove the track ID count, as raw_stats might still have it? 
+                    # Actually raw_stats was remapped destructivelyish (remapped_stats).
+                    # But it's safer to keep both or ensure keys match.
+
+
         for id_key in all_ids:
             if id_key is None: continue
             
@@ -337,6 +360,7 @@ class StatsEngine:
     def _cluster_teams(self, id_manager):
         """
         Force-assign every player to Team A or Team B based on Jersey Color.
+        Merges similar colors and assigns Unknown players to nearest team.
         """
         # 1. Collect all color samples
         color_samples = [] # (r, g, b, pid)
@@ -344,19 +368,58 @@ class StatsEngine:
         # Current implementation of `get_jersey_color` returns STRING.
         # If we only have strings, we just group by string.
         # "Red" -> Team A, "White" -> Team B.
-        
-        # But `IdentityManager.player_colors` stores what? 
+
+        # But `IdentityManager.player_colors` stores what?
         # Check `vision/identity_manager.py`. line 10: "Maps Jersey Number -> Detected Color (e.g. 'Red')"
         # So we have strings.
-        
+
+        # Build jersey -> cls_id mapping to filter goalkeepers
+        jersey_classes = {}
+        if hasattr(id_manager, 'track_classes') and hasattr(id_manager, 'active_bindings'):
+            for track_id, jersey_num in id_manager.active_bindings.items():
+                cls_id = id_manager.track_classes.get(track_id)
+                if cls_id is not None:
+                    jersey_classes[jersey_num] = cls_id
+
         teams = defaultdict(list)
         for jersey, color in id_manager.player_colors.items():
+            # Exclude goalkeepers (cls_id=1) from team clustering
+            # Only use field players (cls_id=2) for team color determination
+            cls_id = jersey_classes.get(jersey)
+            if cls_id == 1:
+                print(f"[Team] Skipping GK #{jersey} (color: {color}) from team clustering")
+                continue
             teams[color].append(jersey)
-            
+
+        # === FIX #1: Merge similar colors ===
+        # Colors like "Green" and "Lime" should be treated as the same team
+        # NOTE: Cyan is kept separate as it's a common team color (not merged to Blue)
+        color_merge_map = {
+            "lime": "green",
+            "teal": "green",
+            "navy": "blue",
+            "maroon": "red",
+            "pink": "red",
+            "silver": "white",
+            "gray": "white",
+            "gold": "yellow"
+        }
+
+        merged_teams = defaultdict(list)
+        for color, jerseys in teams.items():
+            if color == "Unknown":
+                merged_teams["Unknown"].extend(jerseys)
+            else:
+                merged_color = color_merge_map.get(color.lower(), color.lower())
+                merged_teams[merged_color.capitalize()].extend(jerseys)
+        teams = dict(merged_teams)
+
+        print(f"[Team] After merging similar colors: {dict((k, len(v)) for k, v in teams.items())}")
+
         # If we have mainly 2 colors, great.
         # If we have "Unknown", "Blue", "Red", "White"... we need to merge.
         # Heuristic: Top 2 most frequent colors are the teams.
-        
+
         counts = {c: len(ids) for c, ids in teams.items() if c != "Unknown"}
         if len(counts) >= 2:
             top_2 = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:2]
@@ -365,6 +428,9 @@ class StatsEngine:
             
             # Update Identity Manager with EXPLICIT Team Names (The Color Itself)
             self.team_map = {}
+            team_a_jerseys = [int(j) for j in teams[team_a_color]]
+            team_b_jerseys = [int(j) for j in teams[team_b_color]]
+
             for j in teams[team_a_color]: self.team_map[str(j)] = team_a_color.capitalize() # "Red"
             for j in teams[team_b_color]: self.team_map[str(j)] = team_b_color.capitalize() # "White"
 
@@ -391,6 +457,146 @@ class StatsEngine:
 
             # Helper for the rest
             self.primary_teams = {team_a_color.capitalize(), team_b_color.capitalize()}
+
+            # === FIX #2: Force-assign Unknown players to nearest team ===
+            # Calculate team averages (needed for both Unknown and GK assignment)
+            avg_a = sum(team_a_jerseys) / len(team_a_jerseys) if team_a_jerseys else 15
+            avg_b = sum(team_b_jerseys) / len(team_b_jerseys) if team_b_jerseys else 25
+
+            print(f"[Team] Debug: 'Unknown' in teams = {'Unknown' in teams}")
+            print(f"[Team] Debug: team_a_jerseys = {team_a_jerseys}")
+            print(f"[Team] Debug: team_b_jerseys = {team_b_jerseys}")
+            print(f"[Team] Team {team_a_color} avg jersey: {avg_a:.1f}")
+            print(f"[Team] Team {team_b_color} avg jersey: {avg_b:.1f}")
+
+            # FIX V5.2: Allow Unknown assignment even if one team has few/no players
+            # Changed from 'and' to 'or' - only need at least ONE team to have players
+            if "Unknown" in teams and (team_a_jerseys or team_b_jerseys):
+                print(f"[Team] Starting Unknown player assignment for {len(teams['Unknown'])} players")
+
+                for unknown_jersey in teams["Unknown"]:
+                    try:
+                        jersey_num = int(unknown_jersey)
+
+                        # Handle case where one team might be empty
+                        if team_a_jerseys and team_b_jerseys:
+                            # Both teams exist - assign to closer team
+                            dist_a = abs(jersey_num - avg_a)
+                            dist_b = abs(jersey_num - avg_b)
+                            if dist_a < dist_b:
+                                assigned_team = team_a_color.capitalize()
+                                confidence = "high" if dist_a < 10 else "medium"
+                            else:
+                                assigned_team = team_b_color.capitalize()
+                                confidence = "high" if dist_b < 10 else "medium"
+                        elif team_a_jerseys:
+                            # Only team A exists - assign all Unknown to team B
+                            assigned_team = team_b_color.capitalize()
+                            confidence = "medium"
+                        else:
+                            # Only team B exists - assign all Unknown to team A
+                            assigned_team = team_a_color.capitalize()
+                            confidence = "medium"
+
+                        self.team_map[str(unknown_jersey)] = assigned_team
+                        print(f"[Team] Assigned Unknown #{unknown_jersey} → {assigned_team} ({confidence} confidence)")
+
+                    except (ValueError, TypeError):
+                        print(f"[Team] Warning: Could not parse jersey number for Unknown player: {unknown_jersey}")
+            else:
+                if "Unknown" in teams:
+                    print(f"[Team] Warning: Unknown assignment skipped - team_a_jerseys={bool(team_a_jerseys)}, team_b_jerseys={bool(team_b_jerseys)}")
+                else:
+                    print(f"[Team] No Unknown players to assign")
+
+            # === FIX #3: Assign Goalkeepers to Teams ===
+            # GKs were excluded from team clustering, now assign them based on jersey number proximity
+            gk_jerseys = [j for j, cls_id in jersey_classes.items() if cls_id == 1]
+            if gk_jerseys and team_a_jerseys and team_b_jerseys:
+                print(f"[Team] Assigning {len(gk_jerseys)} goalkeeper(s) to teams")
+                for gk_jersey in gk_jerseys:
+                    try:
+                        jersey_num = int(gk_jersey)
+                        dist_a = abs(jersey_num - avg_a)
+                        dist_b = abs(jersey_num - avg_b)
+
+                        # Assign GK to closer team by jersey number
+                        if dist_a < dist_b:
+                            assigned_team = team_a_color.capitalize()
+                        else:
+                            assigned_team = team_b_color.capitalize()
+
+                        self.team_map[str(gk_jersey)] = assigned_team
+                        gk_color = id_manager.player_colors.get(gk_jersey, "Unknown")
+                        print(f"[Team] Assigned GK #{gk_jersey} (color: {gk_color}) → {assigned_team}")
+
+                    except (ValueError, TypeError):
+                        print(f"[Team] Warning: Could not parse GK jersey number: {gk_jersey}")
+
             # Default others to closest? Or Unknown.
+        elif len(counts) == 1:
+            # === SPECIAL CASE: Only 1 color detected ===
+            # This means one team has clear colors, the other team is mostly Unknown
+            # Assign all Unknown players to the opposite team
+            print(f"[Team] Warning: Only 1 team color detected: {list(counts.keys())[0]}")
+
+            team_a_color = list(counts.keys())[0]
+            team_a_jerseys = [int(j) for j in teams[team_a_color]]
+
+            # Build team_map for known team
+            self.team_map = {}
+            for j in teams[team_a_color]:
+                self.team_map[str(j)] = team_a_color.capitalize()
+
+            # Infer Team B color using common football kit pairings
+            # This helps provide a meaningful team name instead of "TeamB"
+            common_pairings = {
+                "red": ["blue", "white", "cyan", "yellow"],
+                "blue": ["red", "white", "yellow", "cyan"],
+                "green": ["white", "red", "yellow"],
+                "white": ["red", "blue", "green", "black"],
+                "black": ["white", "red", "yellow"],
+                "yellow": ["blue", "red", "black", "white"]
+            }
+
+            # Try to infer opposing team color
+            team_a_lower = team_a_color.lower()
+            if team_a_lower in common_pairings:
+                # Use the most common pairing (first in list)
+                team_b_color = common_pairings[team_a_lower][0].capitalize()
+                print(f"[Team] Inferred opposing team color: {team_b_color} (common pairing with {team_a_color})")
+            else:
+                # Fallback to generic name
+                team_b_color = "TeamB"
+                print(f"[Team] Using generic team name: {team_b_color}")
+
+            # Assign ALL Unknown players to Team B
+            if "Unknown" in teams:
+                print(f"[Team] Assigning {len(teams['Unknown'])} Unknown players to {team_b_color}")
+                for unknown_jersey in teams["Unknown"]:
+                    self.team_map[str(unknown_jersey)] = team_b_color
+
+            # Assign Goalkeepers (single-team case)
+            gk_jerseys = [j for j, cls_id in jersey_classes.items() if cls_id == 1]
+            if gk_jerseys:
+                print(f"[Team] Assigning {len(gk_jerseys)} goalkeeper(s) in single-team scenario")
+                avg_a = sum(team_a_jerseys) / len(team_a_jerseys) if team_a_jerseys else 15
+                for gk_jersey in gk_jerseys:
+                    try:
+                        jersey_num = int(gk_jersey)
+                        # If GK jersey is close to Team A average, assign to Team A, else Team B
+                        if abs(jersey_num - avg_a) < 10:
+                            assigned_team = team_a_color.capitalize()
+                        else:
+                            assigned_team = team_b_color
+
+                        self.team_map[str(gk_jersey)] = assigned_team
+                        gk_color = id_manager.player_colors.get(gk_jersey, "Unknown")
+                        print(f"[Team] Assigned GK #{gk_jersey} (color: {gk_color}) → {assigned_team}")
+                    except (ValueError, TypeError):
+                        print(f"[Team] Warning: Could not parse GK jersey number: {gk_jersey}")
+
+            self.primary_teams = {team_a_color.capitalize(), team_b_color}
+            print(f"[Team] Final teams: {team_a_color} ({len(team_a_jerseys)} players), {team_b_color} ({len(teams.get('Unknown', []))} players)")
         else:
             self.team_map = {}

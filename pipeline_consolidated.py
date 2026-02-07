@@ -122,13 +122,7 @@ from vision.color_classifier import TeamColorClassifier, KitCoordinator  # Phase
 from ultralytics import YOLO
 from vision.resnet_recognition import ResNetRecognizerV2 as JNRService # ResNet32 only
 from PIL import Image
-# SAM2 is optional - only import if available (disabled in orchestrator for speed)
-try:
-    from vision.sam2_tracker import SAM2Tracker # Phase v29
-except ImportError:
-    SAM2Tracker = None
-    logging.warning("⚠️ SAM2Tracker not available (sam2 package not installed)")
-from vision.track_utils import greedy_match, calculate_iou # Phase v30
+from vision.track_utils import calculate_iou
 
 def is_near_feet(ball_box, player_boxes):
     """
@@ -1634,12 +1628,11 @@ if __name__ == "__main__":
     parser.add_argument("--locking_mode", type=int, choices=[1, 2, 3], default=2, help="Locking mode: 1=Instant, 2=Consecutive High Conf, 3=Bayesian Dirichlet")
     parser.add_argument("--jnr_stride", type=int, default=30, help="Stride for JNR (frames)")
     parser.add_argument("--vid_stride", type=int, default=1, help="Video frame stride (skip frames). Default=1 (process all). 2=half speed/2x faster.")
-    parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "sam2", "botsort"], help="Tracking backend (Legacy Arg)") 
+    parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend (Legacy Arg)") 
     parser.add_argument("--tracker", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Strict Tracker Selector")
     parser.add_argument("--enable_reid", type=int, default=0, help="Enable ReID (0/1)")
     parser.add_argument("--audit_rejections", type=int, default=0, help="Enable Rejection Audit (0/1)")
     parser.add_argument("--resize_h", type=int, default=0, help="Resize height (0 to disable)")
-    parser.add_argument("--sam2_model", type=str, default="large", choices=["large", "base", "small", "tiny"], help="SAM2 model variant") # Phase v29
     args = parser.parse_args()
     
     # Determine video path
@@ -1710,14 +1703,6 @@ if __name__ == "__main__":
         siglip_classifier = SigLIPTeamClassifier()
     else:
         log("💤 [SigLIP] ReID DISABLED (Lazy Load)")
-    
-    # Phase v29: Initialize SAM2 Tracker
-    sam2_tracker = None
-    sam2_tid_to_cls = {}
-    sam2_gen = None
-    if args.tracking_mode == "sam2":
-        sam2_tracker = SAM2Tracker(model_type=args.sam2_model)
-        sam2_tracker.init_video(video_path)
     
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
@@ -1810,205 +1795,99 @@ if __name__ == "__main__":
             if n % 10 == 0: log(f"Processing Frame {n}...")
             
             try:
-                # Track (Phase v29: Conditional Tracking)
-                if args.tracking_mode == "sam2":
-                    if n == 1:
-                        # Detect players on Frame 0 to seed SAM2
-                        det_res = player_model(f, classes=[1, 2], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
-                        detections = []
-                        sam2_tid_to_cls.clear()
-                        for i, b in enumerate(det_res.boxes):
-                            tid = i
-                            cls_id = int(b.cls[0].item())
-                            detections.append({'id': tid, 'bbox': b.xyxy[0].cpu().numpy().tolist()})
-                            sam2_tid_to_cls[tid] = cls_id
-                        sam2_tracker.add_player_prompts(0, detections)
-                        sam2_gen = sam2_tracker.propagate(0)
-                        log(f"SAM2 Seeded with {len(detections)} players.")
+                # 1. Detect Players (Original Params)
+                det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
                     
-                    try:
-                        # Grab next tracking results from generator
-                        curr_frame_idx, obj_ids, mask_logits = next(sam2_gen)
+                if det_res.boxes is not None and len(det_res.boxes) > 0:
+                    # Ensure CPU for tracker
+                    det_res = det_res.cpu()
                         
-                        # Mock YOLO result for compatibility
-                        # Mock classes moved to top level or reused
-                        
-                        bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
-                        
-                        bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
-                        
-                        # Phase v30: Periodic Fusion to prevent collapse/drift
-                        FUSION_STRIDE = 30
-                        if n > 1 and n % FUSION_STRIDE == 0:
-                            det_res = player_model(f, classes=[1, 2], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
-                            det_boxes = det_res.boxes.xyxy.cpu().numpy().tolist()
-                            det_classes = det_res.boxes.cls.cpu().numpy().tolist()
-                            
-                            matches, unmatched_dets, unmatched_tracks = greedy_match(det_boxes, bboxes, iou_threshold=0.3)
-                            
-                            new_prompts = []
-                            # 1. New Tracks (Entering frame)
-                            for det_idx in unmatched_dets:
-                                new_tid = len(sam2_tid_to_cls)
-                                cls_id = int(det_classes[det_idx])
-                                new_prompts.append({'id': new_tid, 'bbox': det_boxes[det_idx]})
-                                sam2_tid_to_cls[new_tid] = cls_id
-                                log(f"[Fusion] Seeded new track ID {new_tid} at Frame {n-1}")
-                                
-                            # 2. Drift Correction (Association confirmed but IoU low)
-                            for det_idx, tid in matches:
-                                iou = calculate_iou(det_boxes[det_idx], bboxes[tid])
-                                if iou < 0.6:
-                                    new_prompts.append({'id': tid, 'bbox': det_boxes[det_idx]})
-                                    log(f"[Fusion] Correcting drift for Track {tid} at Frame {n-1} (IoU={iou:.2f})")
-                            
-                            if new_prompts:
-                                sam2_tracker.add_player_prompts(n - 1, new_prompts)
-                                sam2_gen = sam2_tracker.propagate(n - 1)
-                                # Refresh current frame results with corrected prompts
-                                curr_frame_idx, obj_ids, mask_logits = next(sam2_gen)
-                                bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
-
-                        # Phase v30: VRAM Memory Grounding (Periodic SAM2 Reset)
-                        STATE_RESET_INTERVAL = 300
-                        if n > 0 and n % STATE_RESET_INTERVAL == 0:
-                            log(f"♻️ [Memory] Resetting SAM2 state to clear VRAM (Frame {n})")
-                            sam2_tracker.reset()
-                            sam2_tracker.init_video(args.video)
-                            
-                            # Re-detect and seed to maintain continuity
-                            det_res = player_model(f, classes=[1, 2], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
-                            det_boxes = det_res.boxes.xyxy.cpu().numpy().tolist()
-                            det_classes = det_res.boxes.cls.cpu().numpy().tolist()
-                            
-                            # Matches YOLO boxes with current track positions to persist IDs
-                            matches, unmatched_dets, unmatched_tracks = greedy_match(det_boxes, bboxes, iou_threshold=0.3)
-                            
-                            reseed_prompts = []
-                            for det_idx, tid in matches:
-                                reseed_prompts.append({'id': tid, 'bbox': det_boxes[det_idx]})
-                            
-                            # Any completely new players?
-                            for det_idx in unmatched_dets:
-                                new_tid = len(sam2_tid_to_cls)
-                                sam2_tid_to_cls[new_tid] = int(det_classes[det_idx])
-                                reseed_prompts.append({'id': new_tid, 'bbox': det_boxes[det_idx]})
-                            
-                            if reseed_prompts:
-                                sam2_tracker.add_player_prompts(n - 1, reseed_prompts)
-                                sam2_gen = sam2_tracker.propagate(n - 1)
-                                curr_frame_idx, obj_ids, mask_logits = next(sam2_gen)
-                                bboxes = sam2_tracker.get_bboxes_from_masks(obj_ids, mask_logits)
-                                log(f"🚀 [Memory] Reseeded {len(reseed_prompts)} tracks post-reset.")
-
-                        mock_boxes = []
-                        for tid, bb in bboxes.items():
-                            c_id = sam2_tid_to_cls.get(tid, 2) # Default to Player
-                            mock_boxes.append(MockBox(bb, tid, 1.0, c_id))
-                        
-                        player_res = MockResults(mock_boxes, f)
-                        ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
-                    except StopIteration:
-                        log("SAM2 Generator stopped unexpectedly.")
-                        # Fallback to standard tracker if SAM2 fails
-                        det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
-                        det_boxes = det_res.boxes.xyxy.cpu().numpy().tolist() # This needs proper tracking logic, defaulting to skip for now to avoid complexity
-                        player_res = MockResults([], f) 
-                        ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=0)[0]
-                else:
-                    # 1. Detect Players (Original Params)
-                    det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                    # --- Phase v31: Part-Box Filter (Strict Spawn Suppression) ---
+                    # Filter bad detections BEFORE they hit the tracker
+                    # DETRIMENTAL: Edge filter causes fragmentation. Disabled for Run 4.
+                    # det_res.boxes = filter_detections_strict(det_res.boxes, width, height, n)
                     
-                    if det_res.boxes is not None and len(det_res.boxes) > 0:
-                        # Ensure CPU for tracker
-                        det_res = det_res.cpu()
+                # 2. Update Tracker (Standard)
+                # 2. Update Tracker (Standard)
+                if args.tracker == "bytetrack":
+                    # Tune match_thresh to user spec (Run 15 - High Tolearnce)
                         
-                        # --- Phase v31: Part-Box Filter (Strict Spawn Suppression) ---
-                        # Filter bad detections BEFORE they hit the tracker
-                        # DETRIMENTAL: Edge filter causes fragmentation. Disabled for Run 4.
-                        # det_res.boxes = filter_detections_strict(det_res.boxes, width, height, n)
-                    
-                    # 2. Update Tracker (Standard)
-                    # 2. Update Tracker (Standard)
-                    if args.tracker == "bytetrack":
-                        # Tune match_thresh to user spec (Run 15 - High Tolearnce)
-                        
-                        # --- Run 15 Param Setup ---
-                        effective_fps = 30 # Default assumption if not calc
-                        if args.vid_stride > 0:
-                             effective_fps = int(round(30 / max(1, args.vid_stride))) 
+                    # --- Run 15 Param Setup ---
+                    effective_fps = 30 # Default assumption if not calc
+                    if args.vid_stride > 0:
+                         effective_fps = int(round(30 / max(1, args.vid_stride))) 
                              
-                        stale_seconds = 12
-                        hard_seconds = 60
+                    stale_seconds = 12
+                    hard_seconds = 60
                         
-                        stale_frames = int(effective_fps * stale_seconds)
-                        hard_frames_limit = int(effective_fps * hard_seconds)
+                    stale_frames = int(effective_fps * stale_seconds)
+                    hard_frames_limit = int(effective_fps * hard_seconds)
                         
-                        if hasattr(tracker, 'args'):
-                            # Run 20 Config (Strict IoU + Rescue + Locking)
-                            tracker.args.match_thresh = 0.65       # User: 0.65
-                            tracker.args.track_high_thresh = 0.45  # User: 0.45
-                            tracker.args.track_low_thresh = 0.08   # User: 0.08
-                            tracker.args.new_track_thresh = 0.85   # User: 0.85
-                            tracker.args.track_buffer = 240
+                    if hasattr(tracker, 'args'):
+                        # Run 20 Config (Strict IoU + Rescue + Locking)
+                        tracker.args.match_thresh = 0.65       # User: 0.65
+                        tracker.args.track_high_thresh = 0.45  # User: 0.45
+                        tracker.args.track_low_thresh = 0.08   # User: 0.08
+                        tracker.args.new_track_thresh = 0.85   # User: 0.85
+                        tracker.args.track_buffer = 240
                         
-                        # ByteTrack generally handles detection objects or numpy arrays
-                        pass
+                    # ByteTrack generally handles detection objects or numpy arrays
+                    pass
 
 
-                    # Define for compatibility with downstream update call
-                    filtered_boxes_obj = det_res.boxes
+                # Define for compatibility with downstream update call
+                filtered_boxes_obj = det_res.boxes
 
-                    if filtered_boxes_obj is not None and len(filtered_boxes_obj) > 0:
-                        # Use Stale-Guard Wrapper
-                        if args.tracker == "bytetrack":
-                             online_targets = bytetrack_update_with_stale_guard(
-                                tracker, filtered_boxes_obj, f,
-                                stale_frames=stale_frames,
-                                hard_frames=hard_frames_limit
-                             )
-                        else:
-                             online_targets = tracker.update(filtered_boxes_obj, img=f)
+                if filtered_boxes_obj is not None and len(filtered_boxes_obj) > 0:
+                    # Use Stale-Guard Wrapper
+                    if args.tracker == "bytetrack":
+                         online_targets = bytetrack_update_with_stale_guard(
+                            tracker, filtered_boxes_obj, f,
+                            stale_frames=stale_frames,
+                            hard_frames=hard_frames_limit
+                         )
                     else:
-                        online_targets = []
+                         online_targets = tracker.update(filtered_boxes_obj, img=f)
+                else:
+                    online_targets = []
                         
-                    # --- Phase v31: Near-Miss Suppression ---
-                    # Filter ghost spawns from the output
-                    online_targets = prevent_ghost_spawns(online_targets, None, n)
+                # --- Phase v31: Near-Miss Suppression ---
+                # Filter ghost spawns from the output
+                online_targets = prevent_ghost_spawns(online_targets, None, n)
                     
-                    # 3. Package Results (MockBox)
-                    mock_boxes = []
-                    # online_targets is list of STrack usually
-                    for t in online_targets:
-                        # STrack vs BOTrack vs Numpy differences
-                        if hasattr(t, 'tlbr'):
-                            # STrack Object
-                            tlbr = t.tlbr
-                            tid = t.track_id
-                            conf = t.score
-                            cls_id = int(t.cls) if hasattr(t, 'cls') else 2 # Default to player
-                        else:
-                            # Numpy/List Format: [x1, y1, x2, y2, id, conf, cls, ...]
-                            # JerseyBoTSORT returns [x1, y1, x2, y2, id, conf, cls, ind]
-                            t = t.tolist() if hasattr(t, 'tolist') else t
-                            tlbr = t[:4]
-                            tid = int(t[4])
-                            conf = t[5]
-                            cls_id = int(t[6]) if len(t) > 6 else 2
+                # 3. Package Results (MockBox)
+                mock_boxes = []
+                # online_targets is list of STrack usually
+                for t in online_targets:
+                    # STrack vs BOTrack vs Numpy differences
+                    if hasattr(t, 'tlbr'):
+                        # STrack Object
+                        tlbr = t.tlbr
+                        tid = t.track_id
+                        conf = t.score
+                        cls_id = int(t.cls) if hasattr(t, 'cls') else 2 # Default to player
+                    else:
+                        # Numpy/List Format: [x1, y1, x2, y2, id, conf, cls, ...]
+                        # JerseyBoTSORT returns [x1, y1, x2, y2, id, conf, cls, ind]
+                        t = t.tolist() if hasattr(t, 'tolist') else t
+                        tlbr = t[:4]
+                        tid = int(t[4])
+                        conf = t[5]
+                        cls_id = int(t[6]) if len(t) > 6 else 2
 
-                        # Guard for ghost boxes (Step 6)
-                        x1, y1, x2, y2 = tlbr
-                        if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
-                            if n % 60 == 0: log(f"⚠️ [Tracker] Invalid Box ignored: {tlbr} in frame {n}")
-                            continue
+                    # Guard for ghost boxes (Step 6)
+                    x1, y1, x2, y2 = tlbr
+                    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+                        if n % 60 == 0: log(f"⚠️ [Tracker] Invalid Box ignored: {tlbr} in frame {n}")
+                        continue
 
-                        # MockBox expects xyxy, tid, conf, cls_id
-                        mock_boxes.append(MockBox(tlbr, tid, conf, cls_id))
+                    # MockBox expects xyxy, tid, conf, cls_id
+                    mock_boxes.append(MockBox(tlbr, tid, conf, cls_id))
                     
-                    player_res = MockResults(mock_boxes, f)
+                player_res = MockResults(mock_boxes, f)
                     
-                    # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
-                    ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=get_device().type)[0]
+                # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
+                ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=get_device().type)[0]
                 
                 img = player_res.orig_img
 
@@ -2302,21 +2181,10 @@ if __name__ == "__main__":
     log(f"Match Kits saved to match_kits.json: {kits}")
     
     # Phase 169: Color Reconciliation
-    # Enforce only discovered colors in player_stats
-    valid_colors = set(kits["goalkeepers"] + kits["players"])
-    log(f"Reconciling colors against valid set: {valid_colors}")
-    
-    reconciled_count = 0
-    for pid, pdata in player_stats.items():
-        original_color = pdata.get("team", "Unknown")
-        if original_color not in valid_colors:
-            pdata["team"] = "Unknown"
-            reconciled_count += 1
-            
-    if reconciled_count > 0:
-        with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
-            json.dump(player_stats, f, indent=2)
-        log(f"Reconciled {reconciled_count} players to 'Unknown' color.")
+    # DISABLED: Team clustering now handles color assignment correctly (Fix V4)
+    # The reconciliation was too strict and overwrote the Unknown assignment logic
+    # Keeping match_kits.json for reference but not enforcing it
+    log(f"Color Reconciliation DISABLED - Team clustering handles assignment correctly")
     
     # Run Entity Resolution Script
     # DISABLED per user request (Phase 116) - not needed anymore
