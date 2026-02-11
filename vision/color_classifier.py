@@ -35,6 +35,21 @@ HSV_COLOR_RANGES = {
     "Gray": [(0, 180, 0, 40, 40, 150)],
 }
 
+# Collapse 17 granular HSV labels to 8 football-relevant colors.
+# This prevents team clustering from fragmenting similar colors
+# (e.g. Blue/Navy/Cyan all become "Blue").
+_FOOTBALL_MERGE = {
+    "Maroon": "Red", "Pink": "Red",
+    "Navy": "Blue", "Cyan": "Blue", "Teal": "Blue",
+    "Lime": "Green",
+    "Gold": "Yellow",
+    "Silver": "White", "Gray": "White",
+}
+
+def _football_color(color_name):
+    """Map a granular HSV color name to a football-relevant color."""
+    return _FOOTBALL_MERGE.get(color_name, color_name)
+
 
 class TeamColorClassifier:
     """HSV-based color classifier with K-means clustering and wide tolerance."""
@@ -133,26 +148,26 @@ class TeamColorClassifier:
             for r in ranges:
                 # 6-param tuple: (h_min, h_max, s_min, s_max, v_min, v_max)
                 if (r[0] <= h <= r[1]) and (r[2] <= s <= r[3]) and (r[4] <= v <= r[5]):
-                    return color_name
+                    return _football_color(color_name)
         
         # 2. Heuristic Fallbacks for very desaturated 
         if s < 30:
             if v > 180: return "White"
             if v < 60:  return "Black"
-            return "Gray"
+            return "White"  # Gray -> White for football
             
         # 3. Last Resort: Closest Hue
         if h < 10 or h > 170: return "Red"
         if h < 20: return "Orange"
-        if h < 25: return "Gold"  # Fixed: Match Gold range [20-25]
-        if h < 35: return "Yellow"  # Fixed: Match Yellow range [25-35]
-        if h < 55: return "Lime"
+        if h < 25: return "Yellow"    # Gold -> Yellow
+        if h < 35: return "Yellow"
+        if h < 55: return "Green"     # Lime -> Green
         if h < 85: return "Green"
-        if h < 95: return "Teal"
-        if h < 105: return "Cyan"
+        if h < 95: return "Blue"      # Teal -> Blue
+        if h < 105: return "Blue"     # Cyan -> Blue
         if h < 145: return "Blue"
-        if h < 150: return "Purple"  # Fixed: Match Purple range [140-150]
-        return "Pink"
+        if h < 150: return "Purple"
+        return "Red"                  # Pink -> Red
     
     def predict(self, crop, track_id=None):
         """Predict jersey color from image crop using HSV analysis."""

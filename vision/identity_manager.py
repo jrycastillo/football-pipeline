@@ -1,5 +1,5 @@
 import time
-from collections import defaultdict
+from collections import defaultdict, Counter
 from .visualization import get_jersey_color
 
 class IdentityManager:
@@ -12,6 +12,9 @@ class IdentityManager:
         
         # Maps Track ID -> Detected Color (Fallback for Unknowns)
         self.track_colors = {}
+        
+        # Color history per track for majority voting at lock time
+        self.track_color_history = {}  # {track_id: [color1, color2, ...]}
         
         # Maps Current YOLO Track ID -> Jersey Number
         self.active_bindings = {}
@@ -109,6 +112,11 @@ class IdentityManager:
              detected_color = get_jersey_color(crop) # "Red", "White", "Unknown"
              if detected_color != "Unknown":
                  self.track_colors[track_id] = detected_color
+                 # Accumulate color history for majority voting at lock time
+                 if track_id not in self.track_color_history:
+                     self.track_color_history[track_id] = []
+                 if len(self.track_color_history[track_id]) < 50:
+                     self.track_color_history[track_id].append(detected_color)
              
              # Capture Sample for K-Means (Center 50%)
              try:
@@ -175,6 +183,31 @@ class IdentityManager:
             if winner == detected_number:
                 self._lock_identity(track_id, detected_number, crop=crop)
 
+    def _get_majority_color(self, track_id, crop=None):
+        """
+        Get the most reliable color for a track using majority vote.
+        Uses accumulated color observations from track_color_history.
+        Falls back to single-frame detection if no history available.
+        """
+        # Try majority vote from accumulated history
+        if track_id in self.track_color_history and len(self.track_color_history[track_id]) >= 2:
+            counter = Counter(self.track_color_history[track_id])
+            majority_color = counter.most_common(1)[0][0]
+            total = len(self.track_color_history[track_id])
+            top_count = counter.most_common(1)[0][1]
+            print(f"   [IdentityManager] Color majority vote: {majority_color} ({top_count}/{total} votes) | All: {dict(counter)}")
+            return majority_color
+        
+        # Fallback: single frame detection
+        if crop is not None and crop.size > 0:
+            return get_jersey_color(crop)
+        
+        # Fallback: last known track color
+        if track_id in self.track_colors:
+            return self.track_colors[track_id]
+        
+        return "Unknown"
+
     def _lock_identity(self, track_id, jersey_num, crop=None):
         """
         The 'Bind' Event. Links temporary Track ID to permanent Jersey ID.
@@ -183,18 +216,17 @@ class IdentityManager:
             self.jersey_registry[jersey_num] = f"Player_Jersey_{jersey_num}"
             print(f"🆕 [IdentityManager] NEW PLAYER CREATED: Jersey #{jersey_num}")
             
-            # Detect Color
-            if crop is not None:
-                color = get_jersey_color(crop)
-                self.player_colors[jersey_num] = color
-                print(f"   [IdentityManager] Assigned Color: {color}")
-            else:
-                self.player_colors[jersey_num] = "Unknown"
+            # Detect Color using majority vote from accumulated observations
+            color = self._get_majority_color(track_id, crop)
+            self.player_colors[jersey_num] = color
+            print(f"   [IdentityManager] Assigned Color: {color} (via {'majority vote' if track_id in self.track_color_history and len(self.track_color_history[track_id]) > 1 else 'single frame'})")
         else:
              print(f"🔄 [IdentityManager] WELCOME BACK: Track {track_id} re-linked to Jersey #{jersey_num}")
-             # Optionally update color if unknown?
-             if self.player_colors.get(jersey_num) == "Unknown" and crop is not None:
-                 self.player_colors[jersey_num] = get_jersey_color(crop)
+             # Update color if unknown using majority vote
+             if self.player_colors.get(jersey_num) == "Unknown":
+                 color = self._get_majority_color(track_id, crop)
+                 if color != "Unknown":
+                     self.player_colors[jersey_num] = color
 
         # Step B: Bind the current track to this Jersey
         self.active_bindings[track_id] = jersey_num
