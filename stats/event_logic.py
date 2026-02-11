@@ -183,28 +183,34 @@ class AdvancedEventDetector:
                  s["dominant_class"] = 2 # Default Player
 
         # 1. Possession & Dribbling
+        # FIX: Debounce dribble detection - only count once per 1-second episode
         dribble_debug_count = 0
+        last_dribble_frame = {}  # pid -> last frame counted as dribble
         for t, pid in enumerate(ownership):
             if pid is not None:
                 stats[pid]["touch_frames"] += 1
-                
+
                 # Check Dribble (Opponent within range)
                 opp_id = self._is_opponent_near(t, pid, player_tracks, dist_m=DIST_DRIBBLE_OPP)
                 if opp_id is not None:
-                    stats[pid]["dribbles"] += 1
-                    dribble_debug_count += 1
-                    
-                    # Credit Challenge to Opponent (Phase 85)
-                    stats[opp_id]["challenges_total"] += 1
-                    
-                    # Check Success (Retain for 1.5s)
-                    if self._retains_possession(t, pid, ownership, duration_s=TIME_DRIBBLE_RETAIN):
-                         stats[pid]["dribbles_successful"] += 1
-                    else:
-                        # Dribble Failed -> Challenge Won by Opponent
-                        stats[opp_id]["challenges_won_total"] += 1
-                        stats[opp_id]["tackles"] += 1  # Phase 195: Credit tackle on failed dribble
-                        stats[opp_id]["tackles_successful"] += 1
+                    # Debounce: Only count one dribble per 1-second window per player
+                    last_frame = last_dribble_frame.get(pid, -999)
+                    if t - last_frame > FPS:  # 1 second gap required between dribble events
+                        last_dribble_frame[pid] = t
+                        stats[pid]["dribbles"] += 1
+                        dribble_debug_count += 1
+
+                        # Credit Challenge to Opponent (Phase 85)
+                        stats[opp_id]["challenges_total"] += 1
+
+                        # Check Success (Retain for 1.5s)
+                        if self._retains_possession(t, pid, ownership, duration_s=TIME_DRIBBLE_RETAIN):
+                             stats[pid]["dribbles_successful"] += 1
+                        else:
+                            # Dribble Failed -> Challenge Won by Opponent
+                            stats[opp_id]["challenges_won_total"] += 1
+                            stats[opp_id]["tackles"] += 1  # Phase 195: Credit tackle on failed dribble
+                            stats[opp_id]["tackles_successful"] += 1
 
         # 2. Passing (Change of Ownership)
         # Segment ownership
@@ -219,15 +225,24 @@ class AdvancedEventDetector:
                     start = i
             segments.append({"pid": curr, "start": start, "end": len(ownership)-1})
 
-        for i in range(len(segments) - 1):
-            seg_a = segments[i]
-            seg_b = segments[i+1]
-            
+        # FIX: Filter out None segments so passes through gaps (A → None → B) are counted
+        # Previously: A → None → B was skipped because both A→None and None→B had a None endpoint
+        # Now: We compare non-None segments directly with a max gap check
+        non_none_segments = [s for s in segments if s["pid"] is not None]
+
+        for i in range(len(non_none_segments) - 1):
+            seg_a = non_none_segments[i]
+            seg_b = non_none_segments[i+1]
+
             p_a = seg_a["pid"]
             p_b = seg_b["pid"]
-            
-            if p_a is None or p_b is None: continue # Ball lost or gained from nowhere
+
             if p_a == p_b: continue
+
+            # Max gap check: Don't count as pass if gap > 3 seconds (ball out of play)
+            gap_frames = seg_b["start"] - seg_a["end"]
+            if gap_frames > FPS * 3:
+                continue
             
             # Pass Attempt A -> B (Endpoint Logic)
             # Old Logic: Required A and B to be adjacent in segments.
@@ -389,6 +404,9 @@ class AdvancedEventDetector:
                             shooter = ownership[i] if i < len(ownership) else None
                             if not shooter and i >= 5:
                                 shooter = ownership[i-5]  # Look back
+                            # FIX: Skip if shooter is a GK (cls_id=1) - goal kicks/punts shouldn't count as shots
+                            if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
+                                shooter = None
                             if shooter:
                                 # Debounce: Don't count same shot multiple times
                                 # Check if already counted in last 10 frames?
@@ -460,13 +478,11 @@ class AdvancedEventDetector:
                                     # print(f"SHOT! Player {shooter} | Speed {speed_mps:.1f} m/s | xG {xg:.2f}")
 
         # 6. GK Save Detection (Post-Hoc Analysis of Trajectories)
-        # Look for Ball near Goal -> High Speed -> Sudden Stop/Deflection near "GK"
-        # We need to know WHO IS GK first.
-        # Heuristic: Player with most 'frames_in_box' (>90%) is GK (per team?)
-        # Let's find candidate GKs from stats
+        # FIX: Use YOLO dominant_class (cls_id=1) instead of frames_in_box heuristic
+        # This prevents field players (strikers/defenders in the box) from getting save stats
         possible_gks = []
         for pid, s in stats.items():
-             if s["frames_in_box"] > 500: # Minimum frames
+             if s.get("dominant_class") == 1:  # Only actual GKs (YOLO class 1)
                  possible_gks.append(pid)
         
         # Iterate high-speed ball segments again

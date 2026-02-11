@@ -284,17 +284,18 @@ class StatsEngine:
                     "played_offside": 0, # Gap
                     
                     # Categorization (Passes)
-                    "foot_passes_open_play_total": 0, # Model Gap
-                    "hand_passes_total": 0, # Model Gap
+                    # FIX: Wire foot_passes_open_play to actual pass counts (all detected passes are open play)
+                    "foot_passes_open_play_total": p_total,
+                    "hand_passes_total": 0, # Model Gap - requires hand contact detection
                     "short_passes_total": s.get("short_passes", 0),
                     "medium_passes_total": s.get("medium_passes", 0),
                     "long_passes_total": s.get("long_passes", 0),
-                    "accurate_foot_passes_open_play_total": 0,
+                    "accurate_foot_passes_open_play_total": p_comp,
                     "hand_passes_accurate_total": 0,
                     "short_passes_accurate_total": s.get("short_passes_accurate", 0),
                     "medium_passes_accurate_total": s.get("medium_passes_accurate", 0),
-                    # "long_passes_accurate_total" is "accurate_long_passes_total" (Existing)
-                    "accurate_long_passes_total": s["accurate_long_passes"],    
+                    # FIX: Key mismatch - event_logic uses "long_passes_accurate" not "accurate_long_passes"
+                    "accurate_long_passes_total": s.get("long_passes_accurate", 0),    
 
                     # Categorization (Shots)
                     "close_range_shots_total": s.get("close_range_shots", 0),
