@@ -399,11 +399,14 @@ class StatsEngine:
             "lime": "green",
             "teal": "green",
             "navy": "blue",
+            "cyan": "blue",
             "maroon": "red",
             "pink": "red",
+            "orange": "red", # Often GK or vibrant kit
             "silver": "white",
             "gray": "white",
-            "gold": "yellow"
+            "gold": "yellow",
+            "purple": "blue" # Mapping purple to blue bucket for now
         }
 
         merged_teams = defaultdict(list)
