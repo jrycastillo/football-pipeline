@@ -10,9 +10,15 @@ try:
         CONFIG = yaml.safe_load(f)
     HEURISTICS = CONFIG.get("heuristics", {})
     FPS = HEURISTICS.get("FPS", 25)
+    VID_STRIDE = HEURISTICS.get("VID_STRIDE", 1)
 except:
     HEURISTICS = {}
     FPS = 25
+    VID_STRIDE = 1
+
+# Effective FPS accounts for frame skipping: with VID_STRIDE=3 at 25fps,
+# each entry in all_frames/ball_track is 3/25=0.12s apart, not 1/25=0.04s
+EFF_FPS = FPS / VID_STRIDE
 
 # Constants (Meters) - Phase 190/195: Relaxed thresholds
 DIST_TOUCH = 5.0  # Increased for better possession detection
@@ -70,7 +76,7 @@ class AdvancedEventDetector:
             if smoothed[i] is not None:
                 last = smoothed[i]
                 gap = 0
-            elif last is not None and gap < 15:  # Phase 190: Increased from 5 to 15 for better smoothing
+            elif last is not None and gap < int(0.6 * EFF_FPS):  # ~0.6 seconds of gap fill
                 smoothed[i] = last
                 gap += 1
         return smoothed
@@ -195,7 +201,7 @@ class AdvancedEventDetector:
                 if opp_id is not None:
                     # Debounce: Only count one dribble per 1-second window per player
                     last_frame = last_dribble_frame.get(pid, -999)
-                    if t - last_frame > FPS:  # 1 second gap required between dribble events
+                    if t - last_frame > EFF_FPS:  # 1 second gap required between dribble events
                         last_dribble_frame[pid] = t
                         stats[pid]["dribbles"] += 1
                         dribble_debug_count += 1
@@ -241,7 +247,7 @@ class AdvancedEventDetector:
 
             # Max gap check: Don't count as pass if gap > 3 seconds (ball out of play)
             gap_frames = seg_b["start"] - seg_a["end"]
-            if gap_frames > FPS * 3:
+            if gap_frames > EFF_FPS * 3:
                 continue
             
             # Pass Attempt A -> B (Endpoint Logic)
@@ -375,8 +381,8 @@ class AdvancedEventDetector:
                 m2 = self.camera.project_point(p2[0], p2[1])
                 
                 dist_m = math.hypot(m2[0]-m1[0], m2[1]-m1[1])
-                speed_mps = dist_m / (2.0 / FPS) # 2 frames @ 25fps = 0.08s
-                
+                speed_mps = dist_m / (2.0 / EFF_FPS)  # 2 processed frames apart
+
                 # Shot Threshold: Phase 195 lowered to 8 m/s
                 # Fix: Detect shots toward BOTH goals (not just right)
                 moving_right = m2[0] > m1[0]
@@ -408,9 +414,9 @@ class AdvancedEventDetector:
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
                                 shooter = None
                             if shooter:
-                                # Debounce: Don't count same shot multiple times
-                                # Check if already counted in last 10 frames?
-                                recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < 10]
+                                # Debounce: Don't count same shot multiple times (~1 second window)
+                                shot_debounce = max(10, int(EFF_FPS))
+                                recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < shot_debounce]
                                 if not recent:
                                     # Check if under pressure
                                     under_pressure = self._is_opponent_near(i, shooter, player_tracks, dist_m=3.0) is not None
@@ -457,9 +463,10 @@ class AdvancedEventDetector:
 
                                     # --- GOAL DETECTION (Phase 85) ---
                                     # Check if ball continues INTO net
-                                    # Look ahead 10 frames
+                                    # Look ahead ~2 seconds (enough for ball to reach goal from 16m at 8m/s)
+                                    goal_lookahead = max(10, int(2.0 * EFF_FPS))
                                     goal_confirmed = False
-                                    for k in range(i, min(i+10, len(ball_track))):
+                                    for k in range(i, min(i + goal_lookahead, len(ball_track))):
                                         if ball_track[k]:
                                             mk = self.camera.project_point(ball_track[k][0], ball_track[k][1])
                                             # Check correct goal based on shot direction
@@ -491,8 +498,8 @@ class AdvancedEventDetector:
                 m1 = self.camera.project_point(ball_track[i-2][0], ball_track[i-2][1])
                 m2 = self.camera.project_point(ball_track[i][0], ball_track[i][1])
                 dist_m = math.hypot(m2[0]-m1[0], m2[1]-m1[1])
-                speed_mps = dist_m / (2.0 / FPS)
-                
+                speed_mps = dist_m / (2.0 / EFF_FPS)
+
                 # If Shot Incoming (using same threshold as shot detection)
                 if speed_mps > SHOT_SPEED_THRESHOLD and (m2[0] < 5.0 or m2[0] > 100.0): # Near Goal Ends
                      # Check next few frames for "Intervention"
@@ -527,12 +534,13 @@ class AdvancedEventDetector:
                                      # If direction flipped (Shot X+ -> Save X-)
                                      # or Speed Death
                                      dist_next = math.hypot(m_next[0]-m2[0], m_next[1]-m2[1])
-                                     speed_next = dist_next / (3.0 / FPS)
+                                     speed_next = dist_next / (3.0 / EFF_FPS)
                                      
                                      if speed_next < 5.0 or (np.sign(v_next_x) != np.sign(m2[0]-m1[0])):
                                           # SAVE DETECTED!
-                                          # Use a debounce to avoid multi-counting same save
-                                          recent_saves = [e for e in events if e["type"] == "save" and abs(e["frame"] - i) < 20]
+                                          # Use a debounce to avoid multi-counting same save (~1 second)
+                                          save_debounce = max(20, int(EFF_FPS))
+                                          recent_saves = [e for e in events if e["type"] == "save" and abs(e["frame"] - i) < save_debounce]
                                           if not recent_saves:
                                                stats[gk_id]["shots_saved_total"] += 1
                                                events.append({"type": "save", "player": gk_id, "frame": i})
@@ -744,7 +752,7 @@ class AdvancedEventDetector:
         return False
         
     def _retains_possession(self, start_frame, pid, ownership, duration_s=2.0):
-        frames = int(duration_s * FPS)
+        frames = int(duration_s * EFF_FPS)
         end_frame = min(len(ownership), start_frame + frames)
         
         # Check if pid owns majority of frames in window

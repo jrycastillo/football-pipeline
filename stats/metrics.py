@@ -1,6 +1,6 @@
 from collections import defaultdict
 import math
-from .event_logic import AdvancedEventDetector
+from .event_logic import AdvancedEventDetector, EFF_FPS
 
 class StatsEngine:
     def __init__(self):
@@ -20,14 +20,37 @@ class StatsEngine:
         ball_track = ball_tracker.interpolate(len(all_frames))
         
         balls_found = sum(1 for b in ball_track if b is not None)
-        print(f"[StatsEngine] Found/Interpolated ball in {balls_found}/{len(all_frames)} frames.")
+        ball_pct = (balls_found / len(all_frames) * 100) if all_frames else 0
+        print(f"[StatsEngine] Ball track: {balls_found}/{len(all_frames)} frames ({ball_pct:.1f}%)")
+        if ball_pct < 30:
+            print(f"[StatsEngine] WARNING: Low ball detection rate ({ball_pct:.1f}%). "
+                  f"Pass/shot stats will be unreliable. Check ball model quality.")
 
         if id_manager:
-            self._cluster_teams(id_manager)
+            # Build player_id -> dominant YOLO class from frame data
+            # This is needed because id_manager.track_classes doesn't exist
+            class_counts_per_id = defaultdict(lambda: defaultdict(int))
+            for f in all_frames:
+                for b in f["boxes"]:
+                    pid = b.get("id")
+                    cls = b.get("cls", 2)
+                    if pid is not None:
+                        class_counts_per_id[pid][cls] += 1
+
+            # Determine dominant class per player ID
+            player_dominant_classes = {}
+            for pid, cls_counts in class_counts_per_id.items():
+                dominant_cls = max(cls_counts.items(), key=lambda x: x[1])[0]
+                player_dominant_classes[pid] = dominant_cls
+
+            self._cluster_teams(id_manager, player_dominant_classes)
 
         # 1. Map Possession
         ownership = self.detector.calculate_ownership(player_tracks, ball_track)
-        
+        owned_frames = sum(1 for o in ownership if o is not None)
+        own_pct = (owned_frames / len(ownership) * 100) if ownership else 0
+        print(f"[StatsEngine] Ownership: {owned_frames}/{len(ownership)} frames ({own_pct:.1f}%) assigned to players")
+
         # 2. Detect Events & Get Stats
         team_map_ref = self.team_map if hasattr(self, "team_map") else None
         events, raw_stats = self.detector.analyze(ownership, player_tracks, ball_track, team_map=team_map_ref)
@@ -134,8 +157,8 @@ class StatsEngine:
             if isinstance(id_key, str) and id_key.isdigit(): # Handle stringified ints
                  total_frames = id_frame_counts.get(int(id_key), 0) + id_frame_counts.get(id_key, 0)
             
-            minutes_played = (total_frames / 25.0) / 60.0 # Just for reference
-            seconds_played = (total_frames / 25.0)
+            minutes_played = (total_frames / EFF_FPS) / 60.0
+            seconds_played = (total_frames / EFF_FPS)
             
             # Strict Filter: < 3.0 Seconds -> DELETE (Task 3)
             # User request: "Delete ANY player object that has total_time_on_pitch < 3.0 seconds."
@@ -210,8 +233,7 @@ class StatsEngine:
             s = raw_stats.get(id_key, defaultdict(int)) 
             
             # Derived Metrics
-            fps_val = 25.0
-            time_on_ball = round(s["touch_frames"] / fps_val, 2)
+            time_on_ball = round(s["touch_frames"] / EFF_FPS, 2)
             
             p_total = s["passes_total"]
             p_comp = s["passes_complete"]
@@ -358,29 +380,22 @@ class StatsEngine:
             
         return formatted_stats, events
 
-    def _cluster_teams(self, id_manager):
+    def _cluster_teams(self, id_manager, player_dominant_classes=None):
         """
         Force-assign every player to Team A or Team B based on Jersey Color.
         Merges similar colors and assigns Unknown players to nearest team.
+
+        player_dominant_classes: dict {player_id -> dominant YOLO class} built from all_frames
         """
-        # 1. Collect all color samples
-        color_samples = [] # (r, g, b, pid)
-        # IdentityManager stores player_colors as strings usually ("red", "white") or raw tuples?
-        # Current implementation of `get_jersey_color` returns STRING.
-        # If we only have strings, we just group by string.
-        # "Red" -> Team A, "White" -> Team B.
-
-        # But `IdentityManager.player_colors` stores what?
-        # Check `vision/identity_manager.py`. line 10: "Maps Jersey Number -> Detected Color (e.g. 'Red')"
-        # So we have strings.
-
         # Build jersey -> cls_id mapping to filter goalkeepers
+        # Uses dominant class from actual frame data (not id_manager.track_classes which doesn't exist)
         jersey_classes = {}
-        if hasattr(id_manager, 'track_classes') and hasattr(id_manager, 'active_bindings'):
-            for track_id, jersey_num in id_manager.active_bindings.items():
-                cls_id = id_manager.track_classes.get(track_id)
-                if cls_id is not None:
-                    jersey_classes[jersey_num] = cls_id
+        if player_dominant_classes:
+            for pid, cls_id in player_dominant_classes.items():
+                jersey_classes[pid] = cls_id
+            gk_count = sum(1 for c in jersey_classes.values() if c == 1)
+            print(f"[Team] Found {gk_count} goalkeeper(s) from YOLO class detection: "
+                  f"{[pid for pid, c in jersey_classes.items() if c == 1]}")
 
         teams = defaultdict(list)
         for jersey, color in id_manager.player_colors.items():
@@ -515,7 +530,9 @@ class StatsEngine:
 
             # === FIX #3: Assign Goalkeepers to Teams ===
             # GKs were excluded from team clustering, now assign them based on jersey number proximity
-            gk_jerseys = [j for j, cls_id in jersey_classes.items() if cls_id == 1]
+            # Only include GKs that have jersey numbers (in player_colors), not raw track IDs
+            gk_jerseys = [j for j, cls_id in jersey_classes.items()
+                          if cls_id == 1 and j in id_manager.player_colors]
             if gk_jerseys and team_a_jerseys and team_b_jerseys:
                 print(f"[Team] Assigning {len(gk_jerseys)} goalkeeper(s) to teams")
                 for gk_jersey in gk_jerseys:
@@ -581,7 +598,8 @@ class StatsEngine:
                     self.team_map[str(unknown_jersey)] = team_b_color
 
             # Assign Goalkeepers (single-team case)
-            gk_jerseys = [j for j, cls_id in jersey_classes.items() if cls_id == 1]
+            gk_jerseys = [j for j, cls_id in jersey_classes.items()
+                          if cls_id == 1 and j in id_manager.player_colors]
             if gk_jerseys:
                 print(f"[Team] Assigning {len(gk_jerseys)} goalkeeper(s) in single-team scenario")
                 avg_a = sum(team_a_jerseys) / len(team_a_jerseys) if team_a_jerseys else 15
