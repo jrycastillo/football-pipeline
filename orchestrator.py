@@ -37,7 +37,7 @@ SBG_LIST_URL = f"{SBG_BASE}/v2/files/list/video/for-match-analysis"
 SBG_TOKEN = os.getenv("SBG_TOKEN", CONFIG["env"]["SBG_TOKEN"])
 
 # Global flag for DB connection
-NO_DB = False
+NO_DB = os.getenv("NO_DB", "0") == "1"
 
 # Initialize health monitor
 health = get_health_monitor()
@@ -337,7 +337,7 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
 import concurrent.futures
 
 def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_size_mb=float('inf'), 
-                       locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, parallel_workers=1, max_frames=None):
+                       locking_mode=2, jnr_stride=None, vid_stride=None, make_video=False, parallel_workers=1, max_frames=None, video_ids_filter=None):
     """
     Continuously poll for pending videos and process them.
     
@@ -352,6 +352,8 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
     """
     print(f"[poll] Starting polling loop (interval={poll_interval}s, workers={parallel_workers})...")
     print(f"[poll] Size filter: {min_size_mb}MB - {max_size_mb}MB")
+    if video_ids_filter:
+        print(f"[poll] Video ID filter: {video_ids_filter}")
     
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers)
 
@@ -377,6 +379,10 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                 
                 # Skip already processed (local cache)
                 if video_id in processed_ids:
+                    continue
+                
+                # Skip if not in whitelist (when --video_ids is used)
+                if video_ids_filter and video_id not in video_ids_filter:
                     continue
                 
                 # Skip if outside size range
@@ -482,6 +488,7 @@ def main():
     parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend")
     
     parser.add_argument("--parallel", type=int, default=1, help="Number of concurrent pipelines (default 1)")
+    parser.add_argument("--video_ids", type=str, help="Comma-separated list of video IDs to process (whitelist filter)")
     
     args = parser.parse_args()
     
@@ -538,6 +545,7 @@ def main():
     elif args.poll:
         # POLLING MODE - Fetch from SPACES and process
         print(f"[main] Starting SPACES polling mode (Parallel Workers: {args.parallel})...")
+        video_ids_filter = set(args.video_ids.split(',')) if args.video_ids else None
         start_polling_loop(
             poll_interval=args.poll_interval,
             max_videos=args.max_videos,
@@ -548,7 +556,8 @@ def main():
             vid_stride=args.vid_stride,
             make_video=args.make_video,
             parallel_workers=args.parallel,
-            max_frames=args.max_frames
+            max_frames=args.max_frames,
+            video_ids_filter=video_ids_filter
         )
     else:
         # Show help if no mode specified

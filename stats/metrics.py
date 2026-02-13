@@ -453,6 +453,48 @@ class StatsEngine:
             for j in teams[team_a_color]: self.team_map[str(j)] = team_a_color.capitalize() # "Red"
             for j in teams[team_b_color]: self.team_map[str(j)] = team_b_color.capitalize() # "White"
 
+            # Pre-compute team jersey averages (needed by FIX #4 tie-break and FIX #2/#3)
+            avg_a = sum(team_a_jerseys) / len(team_a_jerseys) if team_a_jerseys else 15
+            avg_b = sum(team_b_jerseys) / len(team_b_jerseys) if team_b_jerseys else 25
+
+            # === FIX #4: Merge orphan color groups into nearest primary team ===
+            # After picking top-2, any remaining color groups (3rd, 4th, etc.) are
+            # force-assigned to the nearest primary team using HSV hue distance.
+            # This prevents stray GK kit colors or misclassified shades from
+            # appearing as separate teams in the final output.
+            _HSV_HUE_REF = {
+                "red": 0, "orange": 15, "yellow": 30, "gold": 30,
+                "green": 60, "lime": 60, "teal": 75, "cyan": 90,
+                "blue": 120, "navy": 120, "purple": 140, "magenta": 155,
+                "pink": 170, "maroon": 0,
+                "white": -1, "black": -1, "gray": -1, "silver": -1,
+            }
+
+            def _hue_dist(c1, c2):
+                """Circular hue distance (0-90 scale). Achromatic colors get max distance."""
+                h1 = _HSV_HUE_REF.get(c1.lower(), -1)
+                h2 = _HSV_HUE_REF.get(c2.lower(), -1)
+                if h1 < 0 or h2 < 0:
+                    return 180  # achromatic → max distance, let jersey-number fallback decide
+                return min(abs(h1 - h2), 180 - abs(h1 - h2))
+
+            for orphan_color, orphan_jerseys in teams.items():
+                if orphan_color in (team_a_color, team_b_color, "Unknown"):
+                    continue
+                # Compute HSV hue distance to each primary team
+                dist_a = _hue_dist(orphan_color, team_a_color)
+                dist_b = _hue_dist(orphan_color, team_b_color)
+                if dist_a == dist_b:
+                    # Tie-break: assign by jersey number proximity
+                    orphan_avg = sum(int(j) for j in orphan_jerseys) / len(orphan_jerseys) if orphan_jerseys else 0
+                    nearest = team_a_color if abs(orphan_avg - avg_a) < abs(orphan_avg - avg_b) else team_b_color
+                else:
+                    nearest = team_a_color if dist_a < dist_b else team_b_color
+                for j in orphan_jerseys:
+                    self.team_map[str(j)] = nearest.capitalize()
+                print(f"[Team] FIX#4: Merged orphan color '{orphan_color}' ({len(orphan_jerseys)} players) → {nearest} "
+                      f"(hue dist: A={dist_a}, B={dist_b})")
+
             # FIX: Also add track_id -> team mappings via active_bindings reverse lookup
             # This allows team validation to work for both jersey numbers AND track IDs
             if hasattr(id_manager, 'active_bindings'):
@@ -465,12 +507,21 @@ class StatsEngine:
             if hasattr(id_manager, 'track_colors'):
                 for track_id, color in id_manager.track_colors.items():
                     if str(track_id) not in self.team_map:
-                        # Map color to team
+                        # Map color to team — also check orphan colors via merge
                         color_lower = color.lower() if color else ""
-                        if color_lower in [team_a_color.lower(), team_a_color]:
+                        merged_color = color_merge_map.get(color_lower, color_lower)
+                        if merged_color in [team_a_color.lower()]:
                             self.team_map[str(track_id)] = team_a_color.capitalize()
-                        elif color_lower in [team_b_color.lower(), team_b_color]:
+                        elif merged_color in [team_b_color.lower()]:
                             self.team_map[str(track_id)] = team_b_color.capitalize()
+                        else:
+                            # Orphan track color — use hue distance
+                            d_a = _hue_dist(color_lower, team_a_color)
+                            d_b = _hue_dist(color_lower, team_b_color)
+                            if d_a <= d_b:
+                                self.team_map[str(track_id)] = team_a_color.capitalize()
+                            else:
+                                self.team_map[str(track_id)] = team_b_color.capitalize()
 
             print(f"[ReID Fix] team_map now has {len(self.team_map)} entries (jersey + track IDs)")
 
@@ -478,10 +529,6 @@ class StatsEngine:
             self.primary_teams = {team_a_color.capitalize(), team_b_color.capitalize()}
 
             # === FIX #2: Force-assign Unknown players to nearest team ===
-            # Calculate team averages (needed for both Unknown and GK assignment)
-            avg_a = sum(team_a_jerseys) / len(team_a_jerseys) if team_a_jerseys else 15
-            avg_b = sum(team_b_jerseys) / len(team_b_jerseys) if team_b_jerseys else 25
-
             print(f"[Team] Debug: 'Unknown' in teams = {'Unknown' in teams}")
             print(f"[Team] Debug: team_a_jerseys = {team_a_jerseys}")
             print(f"[Team] Debug: team_b_jerseys = {team_b_jerseys}")
