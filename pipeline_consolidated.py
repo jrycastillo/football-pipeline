@@ -1919,8 +1919,9 @@ if __name__ == "__main__":
                 if hasattr(ball_res, "boxes"):
                     for b in ball_res.boxes:
                         conf = float(b.conf[0].item())
-                        # FILTER: Lower confidence for ball to catch distant/small balls
-                        if conf < 0.3:
+                        # FILTER: Low threshold to maximize ball detection (was 0.3, lowered to 0.15)
+                        # Ball model is dedicated so FPs are rare; more detections = better ownership tracking
+                        if conf < 0.15:
                             continue
                         frame_data["boxes"].append({
                             "xyxy": b.xyxy[0].cpu().numpy().tolist(),
@@ -1929,20 +1930,9 @@ if __name__ == "__main__":
                             "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
                         })
                         
-                # FILTER: Remove balls near feet (false positives)
-                # 1. Collect all player boxes from this frame
-                current_player_boxes = [b["xyxy"] for b in frame_data["boxes"] if b["cls"] in [1, 2]]
-                
-                # 2. Filter balls
-                filtered_boxes = []
-                for box_data in frame_data["boxes"]:
-                     if box_data["cls"] == 32: # Ball
-                         if is_near_feet(box_data["xyxy"], current_player_boxes):
-                             # log(f"Dropped ball near feet: {box_data['xyxy']}")
-                             continue
-                     filtered_boxes.append(box_data)
-                
-                frame_data["boxes"] = filtered_boxes
+                # NOTE: is_near_feet filter REMOVED — it was deleting ball detections during
+                # possession (ball at player feet), destroying ownership/pass tracking.
+                # Ball model is trained specifically for balls; confidence threshold handles FPs.
                 
                 # Post-Process for JNR
                 for box_data in frame_data["boxes"]:

@@ -17,7 +17,7 @@ class BallTracker:
     def __init__(self):
         self.tracks = {} # frame_idx -> (x, y)
         self.raw_detections = {} # frame_idx -> box
-        self.max_gap = 25 # Phase 187: Increased from 5 to fill more gaps
+        self.max_gap = 50 # Increased from 25 to fill larger gaps (6s at VID_STRIDE=3)
 
     def update(self, frame_idx, boxes):
         """

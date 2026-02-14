@@ -23,9 +23,9 @@ EFF_FPS = FPS / VID_STRIDE
 # Constants (Meters) - Phase 190/195: Relaxed thresholds
 DIST_TOUCH = 5.0  # Increased for better possession detection
 DIST_DRIBBLE_OPP = 3.0  # Phase 195: Increased from 2.0 to 3.0m for more dribble detection
-DIST_PASS_MIN = 2.0  # Reduced to detect shorter passes
+DIST_PASS_MIN = 1.0  # Reduced to 1m to capture short/lateral passes (was 2.0m)
 TIME_DRIBBLE_RETAIN = 1.5  # Phase 195: Reduced from 2.0s to 1.5s for quicker dribble success
-SHOT_SPEED_THRESHOLD = 8.0  # Phase 195: Reduced from 15 m/s to 8 m/s (29 km/h)
+SHOT_SPEED_THRESHOLD = 12.0  # P2 fix: Raised from 8 to 12 m/s (43 km/h) — 8 m/s catches fast passes
 
 def bbox_center(xyxy):
     x1, y1, x2, y2 = xyxy
@@ -76,7 +76,7 @@ class AdvancedEventDetector:
             if smoothed[i] is not None:
                 last = smoothed[i]
                 gap = 0
-            elif last is not None and gap < int(0.6 * EFF_FPS):  # ~0.6 seconds of gap fill
+            elif last is not None and gap < int(1.5 * EFF_FPS):  # ~1.5 seconds of gap fill (ball often undetected during passes)
                 smoothed[i] = last
                 gap += 1
         return smoothed
@@ -120,9 +120,11 @@ class AdvancedEventDetector:
                     dy = world_c[1] - py
                     dist = math.hypot(dx, dy)
                     
-                    # Sanity check: Human speed limit (~10m/s -> 0.4m per frame @ 25fps)
-                    # If jump is too big, ignore (teleport/tracking error)
-                    if dist < 1.0: 
+                    # P1 fix: VID_STRIDE-aware speed limit
+                    # Max human sprint ~12 m/s; with VID_STRIDE=3 at 25fps each
+                    # frame interval is 0.12s, so max movement = 12*0.12 = 1.44m
+                    max_dist_per_frame = 12.0 * VID_STRIDE / FPS
+                    if dist < max_dist_per_frame:
                         stats[pid]["distance_m"] += dist
                 
                 # Phase 83: Track Class ID (Ball=0, GK=1, Player=2, Ref=3)
@@ -133,21 +135,25 @@ class AdvancedEventDetector:
                 
                 prev_pos[pid] = world_c
 
-        # Helper: Calculate xG (Updated to handle both goals)
+        # Helper: Calculate xG — P1 fix: logistic regression instead of exponential
+        # Old formula (0.75 * exp(-0.15*dist) * angle*1.5) was inflated at close range
+        # (always 0.99 under 3m). Logistic model calibrated to approximate StatsBomb values:
+        #   5m → ~0.39, 11m → ~0.14, 20m → ~0.04, 30m → ~0.01
         def calculate_xg(start_pos, header=False, under_pressure=False, goal_x=None):
-            # If goal_x not specified, use nearest goal
             if goal_x is None:
                 dist_to_right = abs(start_pos[0] - GOAL_X)
                 dist_to_left = abs(start_pos[0] - 0.0)
                 goal_x = GOAL_X if dist_to_right < dist_to_left else 0.0
 
             dist = math.hypot(goal_x - start_pos[0], GOAL_CENTER_Y - start_pos[1])
-            if dist < 0.1: dist = 0.1
-            angle = math.atan2(7.32, dist)
-            xg = 0.75 * math.exp(-0.15 * dist) * (angle * 1.5)
+            if dist < 0.5: dist = 0.5
+            angle_rad = math.atan2(7.32, dist)
+            # Logistic: coefficients calibrated to real xG distributions
+            log_odds = -1.75 - 0.10 * dist + 1.80 * angle_rad
+            xg = 1.0 / (1.0 + math.exp(-log_odds))
             if header: xg *= 0.6
-            if under_pressure: xg *= 0.75  # Pressure factor from xg.py
-            return min(0.99, max(0.01, xg))
+            if under_pressure: xg *= 0.75
+            return min(0.95, max(0.01, xg))
 
         # 0. Spatial Residency Check (for GK ID)
         # Iterate all player tracks to count frames in box
@@ -189,9 +195,12 @@ class AdvancedEventDetector:
                  s["dominant_class"] = 2 # Default Player
 
         # 1. Possession & Dribbling
-        # FIX: Debounce dribble detection - only count once per 1-second episode
+        # P0 fix: Track tackle frames from section 1 to prevent double-counting in section 3
+        # P2 fix: Require ball carrier movement for dribble detection
         dribble_debug_count = 0
+        _tackle_frames_s1 = set()  # frames where tackles were credited in this section
         last_dribble_frame = {}  # pid -> last frame counted as dribble
+        dribble_lookback = max(1, int(EFF_FPS * 0.5))  # 0.5 second lookback for movement check
         for t, pid in enumerate(ownership):
             if pid is not None:
                 stats[pid]["touch_frames"] += 1
@@ -199,6 +208,19 @@ class AdvancedEventDetector:
                 # Check Dribble (Opponent within range)
                 opp_id = self._is_opponent_near(t, pid, player_tracks, dist_m=DIST_DRIBBLE_OPP)
                 if opp_id is not None:
+                    # P2 fix: Require ball carrier to have moved (standing still ≠ dribble)
+                    moved = False
+                    if t >= dribble_lookback and ball_track[t] and ball_track[t - dribble_lookback]:
+                        move_dist = self.camera.calculate_distance(
+                            ball_track[t], ball_track[t - dribble_lookback])
+                        if move_dist > 1.0:  # Moved > 1m in 0.5 seconds
+                            moved = True
+                    elif t < dribble_lookback:
+                        moved = True  # Not enough history, benefit of doubt
+
+                    if not moved:
+                        continue  # Standing still with opponent near → not a dribble
+
                     # Debounce: Only count one dribble per 1-second window per player
                     last_frame = last_dribble_frame.get(pid, -999)
                     if t - last_frame > EFF_FPS:  # 1 second gap required between dribble events
@@ -215,8 +237,9 @@ class AdvancedEventDetector:
                         else:
                             # Dribble Failed -> Challenge Won by Opponent
                             stats[opp_id]["challenges_won_total"] += 1
-                            stats[opp_id]["tackles"] += 1  # Phase 195: Credit tackle on failed dribble
+                            stats[opp_id]["tackles"] += 1
                             stats[opp_id]["tackles_successful"] += 1
+                            _tackle_frames_s1.add(t)  # P0: track for dedup
 
         # 2. Passing (Change of Ownership)
         # Segment ownership
@@ -235,6 +258,7 @@ class AdvancedEventDetector:
         # Previously: A → None → B was skipped because both A→None and None→B had a None endpoint
         # Now: We compare non-None segments directly with a max gap check
         non_none_segments = [s for s in segments if s["pid"] is not None]
+        _pass_debug = {"transitions": 0, "gap_filtered": 0, "no_ball": 0, "too_short": 0, "tackle_filtered": 0, "counted": 0}
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
@@ -244,30 +268,63 @@ class AdvancedEventDetector:
             p_b = seg_b["pid"]
 
             if p_a == p_b: continue
+            _pass_debug["transitions"] += 1
 
             # Max gap check: Don't count as pass if gap > 3 seconds (ball out of play)
             gap_frames = seg_b["start"] - seg_a["end"]
             if gap_frames > EFF_FPS * 3:
+                _pass_debug["gap_filtered"] += 1
                 continue
-            
-            # Pass Attempt A -> B (Endpoint Logic)
-            # Old Logic: Required A and B to be adjacent in segments.
-            # New Logic: A ... (Gap) ... B
-            # We iterate adjacent segments, but the "Gap" is handled by ownership array being None?
-            # segments are calculated based on NON-NONE ownership.
-            # So if A has ball, then None, then B has ball.
-            # 'segments' list skips None.
-            # So seg[i] is A, seg[i+1] is B.
-            # This ALREADY implements "Endpoint Logic" effectively, because we ignore the gap.
-            # The issue is strictness of "Interception".
-            
+
+            # P0 fix: Check if this is a tackle/dispossession, not a pass
+            # If p_a and p_b were within close proximity at the transition,
+            # the ball was physically won, not deliberately passed
+            # Threshold: 2.0m (arm's length) — 3.0m was too aggressive, filtered short passes
+            transition_frame = seg_a["end"]
+            if transition_frame < len(player_tracks):
+                p_a_box = None
+                p_b_box = None
+                for b in player_tracks[transition_frame].get("boxes", []):
+                    if b.get("id") == p_a: p_a_box = b
+                    if b.get("id") == p_b: p_b_box = b
+                if p_a_box and p_b_box:
+                    p_a_c = bbox_center(p_a_box["xyxy"])
+                    p_b_c = bbox_center(p_b_box["xyxy"])
+                    prox = self.camera.calculate_distance(p_a_c, p_b_c)
+                    if prox < 2.0:  # Physical contact range → tackle, not pass
+                        _pass_debug["tackle_filtered"] += 1
+                        continue
+
             # Verify distance
+            # FIX: Search nearby frames if ball position is None at exact endpoint
+            # Ball is often undetected during passes (in flight) so we search backwards/forwards
             start_pos = ball_track[seg_a["end"]]
             end_pos = ball_track[seg_b["start"]]
 
+            if not start_pos:
+                for offset in range(1, 8):
+                    idx = seg_a["end"] - offset
+                    if idx >= seg_a["start"] and idx >= 0 and ball_track[idx]:
+                        start_pos = ball_track[idx]
+                        break
+
+            if not end_pos:
+                for offset in range(1, 8):
+                    idx = seg_b["start"] + offset
+                    if idx <= seg_b["end"] and idx < len(ball_track) and ball_track[idx]:
+                        end_pos = ball_track[idx]
+                        break
+
+            if not (start_pos and end_pos):
+                _pass_debug["no_ball"] += 1
+                continue
+
             if start_pos and end_pos:
                 dist = self.camera.calculate_distance(start_pos, end_pos)
+                if dist <= DIST_PASS_MIN:
+                    _pass_debug["too_short"] += 1
                 if dist > DIST_PASS_MIN:
+                    _pass_debug["counted"] += 1
                     stats[p_a]["passes_total"] += 1
                     
                     # RELAXED SUCCESS CHECK
@@ -363,6 +420,11 @@ class AdvancedEventDetector:
                     # Simplified: If Pass ends in Box and is NOT complete (or complete to shooter?), maybe shot?
                     # Better: Analzye Ball Trajectory for Shots (Speed > 15m/s towards goal)
                     
+        print(f"[PassDebug] Ownership transitions: {_pass_debug['transitions']}, "
+              f"gap_filtered: {_pass_debug['gap_filtered']}, tackle_filtered: {_pass_debug['tackle_filtered']}, "
+              f"no_ball: {_pass_debug['no_ball']}, too_short: {_pass_debug['too_short']}, "
+              f"counted: {_pass_debug['counted']}")
+
         # 5. Shot Detection (Trajectory Analysis)
         # Iterate ball track for High Velocity > Goal
         frames_count = len(ball_track)
@@ -577,19 +639,21 @@ class AdvancedEventDetector:
                                                          stats[gk_id]["jumping_saves"] += 1
 
         # 3. Defensive (Tackles)
-        # Detect change of possession where Opponent was near
+        # P0 fix: Deduplicate with section 1 tackles (dribble-based)
+        # Only count tackles here for transitions NOT already handled by dribble logic
         for i in range(len(segments) - 1):
              seg_a = segments[i]
              seg_b = segments[i+1]
              p_a = seg_a["pid"]
              p_b = seg_b["pid"]
-             
+
              if p_a is not None and p_b is not None and p_a != p_b:
-                 # Change occurred. Was B near A at the end of A's stint?
                  end_frame = seg_a["end"]
-                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=DIST_TOUCH): # Close encounter
-                     # A lost ball to B.
-                     # Credit B with Tackle
+                 # P0 fix: Skip if already counted as tackle in section 1 (within 1s window)
+                 already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
+                 if already_counted:
+                     continue
+                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=DIST_TOUCH):
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1
                      events.append({"type": "tackle", "by": p_b, "on": p_a, "frame": end_frame})
