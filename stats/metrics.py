@@ -18,10 +18,14 @@ class StatsEngine:
         for t, f in enumerate(all_frames):
              ball_tracker.update(t, f["boxes"])
         ball_track = ball_tracker.interpolate(len(all_frames))
-        
+        # Round 2 fix: Track which frames have real detections vs interpolated
+        raw_ball_frames = set(ball_tracker.tracks.keys())
+
         balls_found = sum(1 for b in ball_track if b is not None)
+        raw_count = len(raw_ball_frames)
         ball_pct = (balls_found / len(all_frames) * 100) if all_frames else 0
-        print(f"[StatsEngine] Ball track: {balls_found}/{len(all_frames)} frames ({ball_pct:.1f}%)")
+        print(f"[StatsEngine] Ball track: {balls_found}/{len(all_frames)} frames ({ball_pct:.1f}%) "
+              f"[{raw_count} raw detections, {balls_found - raw_count} interpolated]")
         if ball_pct < 30:
             print(f"[StatsEngine] WARNING: Low ball detection rate ({ball_pct:.1f}%). "
                   f"Pass/shot stats will be unreliable. Check ball model quality.")
@@ -53,7 +57,9 @@ class StatsEngine:
 
         # 2. Detect Events & Get Stats
         team_map_ref = self.team_map if hasattr(self, "team_map") else None
-        events, raw_stats = self.detector.analyze(ownership, player_tracks, ball_track, team_map=team_map_ref)
+        events, raw_stats = self.detector.analyze(ownership, player_tracks, ball_track,
+                                                    team_map=team_map_ref,
+                                                    raw_ball_frames=raw_ball_frames)
         
         # Phase 192/216: Remap raw_stats from track IDs to jersey numbers
         # This ensures passes/events are attributed to jersey numbers, not track IDs

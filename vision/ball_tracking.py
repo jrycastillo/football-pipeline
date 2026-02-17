@@ -17,7 +17,7 @@ class BallTracker:
     def __init__(self):
         self.tracks = {} # frame_idx -> (x, y)
         self.raw_detections = {} # frame_idx -> box
-        self.max_gap = 50 # Increased from 25 to fill larger gaps (6s at VID_STRIDE=3)
+        self.max_gap = 30 # Round 2 fix: 50→30 (50 frames at VID_STRIDE=5 = 10s, too long for linear interp)
 
     def update(self, frame_idx, boxes):
         """

@@ -81,11 +81,14 @@ class AdvancedEventDetector:
                 gap += 1
         return smoothed
 
-    def analyze(self, ownership, player_tracks, ball_track, team_map=None):
+    def analyze(self, ownership, player_tracks, ball_track, team_map=None, raw_ball_frames=None):
         """
         Detects: Dribbles, Passes, Crosses, Tackles, Interceptions, Goals, XG.
         team_map: dict {pid (str): "TeamName"}
+        raw_ball_frames: set of frame indices with actual ball detections (not interpolated)
         """
+        if raw_ball_frames is None:
+            raw_ball_frames = set()  # Fallback: treat all as raw (legacy behavior)
         stats = defaultdict(lambda: defaultdict(int))
         events = []
         
@@ -259,6 +262,8 @@ class AdvancedEventDetector:
         # Now: We compare non-None segments directly with a max gap check
         non_none_segments = [s for s in segments if s["pid"] is not None]
         _pass_debug = {"transitions": 0, "gap_filtered": 0, "no_ball": 0, "too_short": 0, "tackle_filtered": 0, "counted": 0}
+        # Round 2 fix: Interception debounce — max 1 per player per 3-second window
+        _last_interception_frame = {}  # pid -> last frame an interception was credited
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
@@ -393,24 +398,22 @@ class AdvancedEventDetector:
 
                     # --- INTERCEPTION LOGIC & ADVANCED DEFENSE ---
                     if not is_complete:
-                        # ... (existing interception logic) ...
                         if team_map and team_a and team_b and team_a != team_b:
-                            stats[p_b]["interceptions"] += 1
-                            stats[p_b]["ball_interceptions_total"] += 1 # Sync name
-                            
-                            # Ball Recovery in Opp Half
-                            # If p_b recovers ball and x > 52.5 (Assuming p_b attacking direction >?)
-                            # Actually "Opponent's Half" depends on team side.
-                            # Heuristic: If X > 52.5 (Right Half), recovery count? 
-                            # We don't know team sides easily without manual input.
-                            # Simplification: If loc > 52.5, assume it's attacking half implies high press?
-                            # Or just count raw: "recoveries_high"
-                            if end_pos[0] > 52.5: # Assuming recovered in right half
-                                 stats[p_b]["ball_recoveries_opp_half"] += 1
-                            elif end_pos[0] < 52.5:
-                                 stats[p_b]["ball_recoveries_own_half"] += 1
-                            
-                            events.append({"type": "interception", "by": p_b, "frame": seg_b["start"]})
+                            # Round 2 fix: Debounce — max 1 interception per player per 3s window
+                            int_frame = seg_b["start"]
+                            last_int = _last_interception_frame.get(p_b, -999)
+                            if int_frame - last_int > int(EFF_FPS * 3):
+                                _last_interception_frame[p_b] = int_frame
+                                stats[p_b]["interceptions"] += 1
+                                stats[p_b]["ball_interceptions_total"] += 1
+
+                                # Ball Recovery in Opp Half
+                                if end_pos[0] > 52.5:
+                                     stats[p_b]["ball_recoveries_opp_half"] += 1
+                                elif end_pos[0] < 52.5:
+                                     stats[p_b]["ball_recoveries_own_half"] += 1
+
+                                events.append({"type": "interception", "by": p_b, "frame": int_frame})
 
 
 
@@ -426,11 +429,17 @@ class AdvancedEventDetector:
               f"counted: {_pass_debug['counted']}")
 
         # 5. Shot Detection (Trajectory Analysis)
-        # Iterate ball track for High Velocity > Goal
+        # Round 2 fix: Only compute velocity on raw ball detections (not interpolated)
+        # Interpolated positions create false velocity spikes at gap boundaries
         frames_count = len(ball_track)
+        _shot_debug = {"raw_pairs": 0, "interp_skipped": 0}
         for i in range(2, frames_count):
             if ball_track[i] and ball_track[i-2]:
-                # Calcluate Velocity
+                # Round 2 fix: Skip if either frame is interpolated
+                if raw_ball_frames and (i not in raw_ball_frames or (i-2) not in raw_ball_frames):
+                    _shot_debug["interp_skipped"] += 1
+                    continue
+                _shot_debug["raw_pairs"] += 1
                 p1 = ball_track[i-2]
                 p2 = ball_track[i]
                 
@@ -546,6 +555,9 @@ class AdvancedEventDetector:
 
                                     # print(f"SHOT! Player {shooter} | Speed {speed_mps:.1f} m/s | xG {xg:.2f}")
 
+        print(f"[ShotDebug] Raw pairs evaluated: {_shot_debug['raw_pairs']}, "
+              f"interpolated skipped: {_shot_debug['interp_skipped']}")
+
         # 6. GK Save Detection (Post-Hoc Analysis of Trajectories)
         # FIX: Use YOLO dominant_class (cls_id=1) instead of frames_in_box heuristic
         # This prevents field players (strikers/defenders in the box) from getting save stats
@@ -554,9 +566,12 @@ class AdvancedEventDetector:
              if s.get("dominant_class") == 1:  # Only actual GKs (YOLO class 1)
                  possible_gks.append(pid)
         
-        # Iterate high-speed ball segments again
+        # Iterate high-speed ball segments again (same raw-only filter as shots)
         for i in range(2, frames_count - 5):
             if ball_track[i] and ball_track[i-2]:
+                # Round 2 fix: Skip interpolated frames
+                if raw_ball_frames and (i not in raw_ball_frames or (i-2) not in raw_ball_frames):
+                    continue
                 m1 = self.camera.project_point(ball_track[i-2][0], ball_track[i-2][1])
                 m2 = self.camera.project_point(ball_track[i][0], ball_track[i][1])
                 dist_m = math.hypot(m2[0]-m1[0], m2[1]-m1[1])
@@ -666,35 +681,23 @@ class AdvancedEventDetector:
         for seg in segments:
             pid = seg["pid"]
             if pid is None: continue
-            
+            # Round 2 fix: Skip GKs — their touches in their own box are saves/clearances, not shots
+            if stats.get(pid, {}).get("dominant_class") == 1:
+                continue
+
             end_f = seg["end"]
             ball_pos = ball_track[end_f]
-            
+
             if ball_pos and self.camera.is_in_penalty_box(ball_pos):
-                # Potential Shot
-                # Calculate xG
-                angle = self.camera.get_shot_cone_angle(ball_pos)
-                dist_g = self._dist_to_goal(ball_pos)
-                
-                # Simple Model: xG = 0.1 * (10/dist) * (angle/45)
-                if dist_g > 0:
-                    xg = 0.1 * (10.0 / dist_g) * (angle / 45.0)
-                else:
-                    xg = 0.5
-                xg = min(0.99, xg)
-                
-                # Opponent Cone?
+                # Round 2 fix: Use the logistic calculate_xg() instead of old inline formula
+                bm = self.camera.project_point(ball_pos[0], ball_pos[1])
                 opp_present = self._check_opp_cone(end_f, pid, player_tracks, ball_pos)
-                
+                xg = calculate_xg((bm[0], bm[1]), under_pressure=(opp_present is not None))
+
                 if opp_present:
                     stats[pid]["xg_foot_opponent_present"] += xg
                 else:
                     stats[pid]["xg_foot_no_opponent"] += xg
-                    
-                # Count as shot? Not every touch in box is a shot.
-                # Only if ball leaves player and goes near goal.
-                # Tracking this without velocity is hard.
-                # We will log xG accumulation for touches in High Danger Zone.
                 
         return events, stats
 
