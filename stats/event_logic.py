@@ -399,18 +399,24 @@ class AdvancedEventDetector:
                     # --- INTERCEPTION LOGIC & ADVANCED DEFENSE ---
                     if not is_complete:
                         if team_map and team_a and team_b and team_a != team_b:
-                            # Round 2 fix: Debounce — max 1 interception per player per 3s window
+                            # Round 3 fix: Debounce — max 1 interception per player per 10s window
+                            # (was 3s in Round 2; increased to match typical possession sequence
+                            # duration and mitigate inflation from team clustering errors)
                             int_frame = seg_b["start"]
                             last_int = _last_interception_frame.get(p_b, -999)
-                            if int_frame - last_int > int(EFF_FPS * 3):
+                            if int_frame - last_int > int(EFF_FPS * 10):
                                 _last_interception_frame[p_b] = int_frame
                                 stats[p_b]["interceptions"] += 1
                                 stats[p_b]["ball_interceptions_total"] += 1
 
                                 # Ball Recovery in Opp Half
-                                if end_pos[0] > 52.5:
+                                # Round 3 fix: Project to meters before comparing to 52.5m
+                                # Previously compared pixel X (0-1920) to 52.5 meters,
+                                # causing ALL recoveries to classify as "opp half"
+                                end_m = self.camera.project_point(end_pos[0], end_pos[1])
+                                if end_m[0] > 52.5:
                                      stats[p_b]["ball_recoveries_opp_half"] += 1
-                                elif end_pos[0] < 52.5:
+                                elif end_m[0] < 52.5:
                                      stats[p_b]["ball_recoveries_own_half"] += 1
 
                                 events.append({"type": "interception", "by": p_b, "frame": int_frame})
@@ -656,6 +662,9 @@ class AdvancedEventDetector:
         # 3. Defensive (Tackles)
         # P0 fix: Deduplicate with section 1 tackles (dribble-based)
         # Only count tackles here for transitions NOT already handled by dribble logic
+        # Round 3 fix: Add per-player debounce (max 1 per 5s window) to prevent
+        # rapid tackle counting at lower VID_STRIDE
+        _last_tackle_frame_s3 = {}  # pid -> last frame a tackle was credited in section 3
         for i in range(len(segments) - 1):
              seg_a = segments[i]
              seg_b = segments[i+1]
@@ -668,36 +677,33 @@ class AdvancedEventDetector:
                  already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
                  if already_counted:
                      continue
+                 # Round 3 fix: Per-player debounce — max 1 tackle per 5s window
+                 last_tkl = _last_tackle_frame_s3.get(p_b, -999)
+                 if end_frame - last_tkl < int(EFF_FPS * 5):
+                     continue
                  if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=DIST_TOUCH):
+                     _last_tackle_frame_s3[p_b] = end_frame
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1
                      events.append({"type": "tackle", "by": p_b, "on": p_a, "frame": end_frame})
                      
-        # 4. Shooting & xG
-        # Heuristic: Ball moves towards Goal fast, no receiver
-        # Ideally needs Velocity vector.
-        # Simple Logic: Last touch in Box -> xG
-        
+        # 4. Penalty Box Touch Tracking (xG REMOVED — Round 3 fix)
+        # Round 3 fix: Section 4 was accumulating xG for every ownership segment ending
+        # in the penalty box, regardless of whether a shot was taken. This caused:
+        # - xG inflation: 9.77 total (vs realistic 2-4) at VID_STRIDE=3
+        # - GK xG: Red #1 (GK) accumulated 1.50 xG from 0 shots (goal kicks/catches)
+        # - Double-counting: Same xG counters used by Section 5 (actual shots)
+        # xG now comes ONLY from Section 5 (velocity-verified shot detection).
+        # Section 4 still tracks penalty box touches for "in_box_touches" stat.
         for seg in segments:
             pid = seg["pid"]
             if pid is None: continue
-            # Round 2 fix: Skip GKs — their touches in their own box are saves/clearances, not shots
-            if stats.get(pid, {}).get("dominant_class") == 1:
-                continue
 
             end_f = seg["end"]
             ball_pos = ball_track[end_f]
 
             if ball_pos and self.camera.is_in_penalty_box(ball_pos):
-                # Round 2 fix: Use the logistic calculate_xg() instead of old inline formula
-                bm = self.camera.project_point(ball_pos[0], ball_pos[1])
-                opp_present = self._check_opp_cone(end_f, pid, player_tracks, ball_pos)
-                xg = calculate_xg((bm[0], bm[1]), under_pressure=(opp_present is not None))
-
-                if opp_present:
-                    stats[pid]["xg_foot_opponent_present"] += xg
-                else:
-                    stats[pid]["xg_foot_no_opponent"] += xg
+                stats[pid]["in_box_touches"] += 1
                 
         return events, stats
 

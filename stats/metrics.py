@@ -531,6 +531,17 @@ class StatsEngine:
 
             print(f"[ReID Fix] team_map now has {len(self.team_map)} entries (jersey + track IDs)")
 
+            # Round 3 fix: Warn on team size imbalance (indicates clustering errors)
+            size_a = len(team_a_jerseys)
+            size_b = len(team_b_jerseys)
+            if size_a > 0 and size_b > 0:
+                ratio = max(size_a, size_b) / min(size_a, size_b)
+                if ratio > 1.8:
+                    print(f"[Team] WARNING: Team size imbalance detected! "
+                          f"{team_a_color}={size_a}, {team_b_color}={size_b} (ratio {ratio:.1f}:1). "
+                          f"This will corrupt pass accuracy and interception stats. "
+                          f"Check color classifier output.")
+
             # Helper for the rest
             self.primary_teams = {team_a_color.capitalize(), team_b_color.capitalize()}
 
