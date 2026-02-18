@@ -612,7 +612,10 @@ class IdentityManager:
             if not votes: return
 
             # Find top 2 candidates
-            sorted_candidates = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+            # Round 4 fix: Add secondary sort key (jersey number as string) to break
+            # ties deterministically. Without this, equal-score candidates resolve by
+            # dict insertion order, which varies with non-deterministic JNR timing.
+            sorted_candidates = sorted(votes.items(), key=lambda x: (x[1], str(x[0])), reverse=True)
             best_num, best_score = sorted_candidates[0]
             second_score = sorted_candidates[1][1] if len(sorted_candidates) > 1 else 0.0
             
@@ -790,7 +793,9 @@ class IdentityManager:
             if jnum is not None:
                 jersey_map[jnum].append(t)
                 
-        for jnum, tracks in jersey_map.items():
+        # Round 4 fix: Sort jersey_map keys for deterministic collision resolution order
+        for jnum in sorted(jersey_map.keys(), key=lambda x: str(x)):
+            tracks = jersey_map[jnum]
             if len(tracks) > 1:
                 self.resolve_collision(tracks, jnum)
 
@@ -930,7 +935,8 @@ class IdentityManager:
         if len(valid_colors) < 2:
             return
         # Sort by frequency, take top 2
-        sorted_colors = sorted(valid_colors.items(), key=lambda x: x[1], reverse=True)
+        # Round 4 fix: Add color name as secondary sort key for deterministic tie-breaking
+        sorted_colors = sorted(valid_colors.items(), key=lambda x: (x[1], x[0]), reverse=True)
         self.team_colors = [sorted_colors[0][0], sorted_colors[1][0]]
         log(f"🏟️ [Team Detection] Team A: {self.team_colors[0]}, Team B: {self.team_colors[1]}")
 
@@ -1028,7 +1034,9 @@ class IdentityManager:
         consolidated_count = 0
         
         # We iterate over all tracks that have some Dirichlet evidence
-        for tid in list(self.alpha.keys()):
+        # Round 4 fix: Sort keys for deterministic iteration order.
+        # defaultdict insertion order varies with non-deterministic JNR timing.
+        for tid in sorted(self.alpha.keys(), key=lambda x: str(x)):
             # If this track is already bound, skip it
             if tid in self.active_bindings:
                 continue
@@ -1676,7 +1684,24 @@ if __name__ == "__main__":
 
     log(f"Starting Phase 85 Pipeline on {video_path}...")
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # --- Deterministic Seed Control (Round 4 fix) ---
+    # Ensures reproducible results across runs for the same video.
+    # Without this, GPU non-determinism in YOLO/JNR/ByteTrack causes:
+    # - Different track IDs → different jersey assignments
+    # - Different JNR confidence scores → different lock decisions
+    # - Different final player sets across runs
+    import random
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    log(f"🎲 [Determinism] Seeds set to {SEED}, cuDNN deterministic mode enabled")
+
     # Phase v27: Temporal Buffer
     track_history = defaultdict(lambda: deque(maxlen=5)) 
     # Phase 216: Temporal Crop Buffer for JNR (stores best crops per track)
