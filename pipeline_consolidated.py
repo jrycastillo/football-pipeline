@@ -904,6 +904,9 @@ class IdentityManager:
 
     def set_track_color(self, track_id, color, cls_id=None):
         """Set track color with role-based logic.
+        Round 5 fix: Always update to latest voted color (not just first detection).
+        The voting buffer in TeamColorClassifier stabilizes after ~5-10 frames,
+        so later calls have more reliable colors than the first call.
         - Referee (cls_id=3): Skip color assignment entirely
         - Goalkeeper (cls_id=1): Store in goalkeeper_colors, don't count for team detection
         - Player (cls_id=2): Store and count for team detection
@@ -911,19 +914,28 @@ class IdentityManager:
         # Skip color for Referee
         if cls_id == 3:
             return
-        
-        if track_id not in self.track_colors or self.track_colors[track_id] == "Unknown":
+
+        old_color = self.track_colors.get(track_id)
+
+        # Always update to latest voted color (not just first detection)
+        if color != "Unknown":
             self.track_colors[track_id] = color
-            
+
             # Goalkeeper: Store separately, don't count for team colors
             if cls_id == 1:
-                if color != "Unknown":
-                    self.goalkeeper_colors[track_id] = color
+                self.goalkeeper_colors[track_id] = color
                 return
-            
-            # Player: Count color frequency for team detection
-            if color != "Unknown":
+
+            # Player: Update color counter (correct previous count if color changed)
+            if old_color and old_color != "Unknown" and old_color != color:
+                # Decrement old color count
+                if old_color in self.color_counter and self.color_counter[old_color] > 0:
+                    self.color_counter[old_color] -= 1
+            if old_color != color:
+                # Increment new color count (only on change or first time)
                 self.color_counter[color] = self.color_counter.get(color, 0) + 1
+        elif old_color is None:
+            self.track_colors[track_id] = "Unknown"
     
     def detect_team_colors(self):
         """Detect the two team colors as the most common colors (excluding Gray/Unknown)."""
@@ -1027,39 +1039,46 @@ class IdentityManager:
 
     def finalize_bindings(self):
         """
-        Phase v27.2: Bayesian Tracklet Consolidation (Refined)
+        Phase v27.2: Tracklet Consolidation (Refined)
         Retroactively link tracklets that didn't reach the lock threshold.
+        Round 5 fix: Use vote_counts in Mode 2 (was using self.alpha which is empty in Mode 2).
         """
-        log("🔍 [IdentityManager] Starting Bayesian Tracklet Consolidation...")
+        log("🔍 [IdentityManager] Starting Tracklet Consolidation...")
         consolidated_count = 0
-        
-        # We iterate over all tracks that have some Dirichlet evidence
+
+        # Round 5 fix: Use the correct vote store based on locking mode.
+        # Mode 2 accumulates in self.vote_counts, Mode 3 in self.alpha.
+        # Previously always used self.alpha, which is empty in Mode 2 → zero consolidation.
+        if self.locking_mode == 2:
+            vote_store = self.vote_counts
+        else:
+            vote_store = self.alpha
+
         # Round 4 fix: Sort keys for deterministic iteration order.
-        # defaultdict insertion order varies with non-deterministic JNR timing.
-        for tid in sorted(self.alpha.keys(), key=lambda x: str(x)):
+        for tid in sorted(vote_store.keys(), key=lambda x: str(x)):
             # If this track is already bound, skip it
             if tid in self.active_bindings:
                 continue
-                
+
             # Find the number with the most evidence
-            track_alphas = self.alpha[tid]
-            if not track_alphas:
+            track_votes = vote_store[tid]
+            if not track_votes:
                 continue
-                
-            best_number = max(track_alphas, key=track_alphas.get)
-            evidence = track_alphas[best_number]
-            
-            # Threshold: 
+
+            best_number = max(track_votes, key=track_votes.get)
+            evidence = track_votes[best_number]
+
+            # Threshold:
             # 1. Evidence > 0.5 AND jersey was confirmed/locked by another track
             # 2. OR Evidence > 1.0 (Cold Start Fix - allow new players to appear)
             if (evidence > 0.5 and best_number in self.jersey_registry) or (evidence > 1.0):
                 log(f"🔄 [Finalize] Consolidating Track {tid} -> Jersey #{best_number} (Evidence: {evidence:.1f})")
                 self.active_bindings[tid] = best_number
-                
+
                 # Mapping Fix: Ensure track_map points to the Jersey Number for propagation
                 self.track_map[tid] = best_number
                 consolidated_count += 1
-                
+
         log(f"✅ [Finalize] Consolidated {consolidated_count} fragmented tracklets.")
 
 # --- 6. SUPER-RESOLUTION & SIGNAL MAXIMIZATION ---
