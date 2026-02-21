@@ -6,7 +6,7 @@ class StatsEngine:
     def __init__(self):
         self.detector = AdvancedEventDetector()
         
-    def process_events(self, all_frames, id_manager=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None):
         """
         Process full video history to generate stats.
         """
@@ -47,7 +47,7 @@ class StatsEngine:
                 dominant_cls = max(cls_counts.items(), key=lambda x: x[1])[0]
                 player_dominant_classes[pid] = dominant_cls
 
-            self._cluster_teams(id_manager, player_dominant_classes)
+            self._cluster_teams(id_manager, player_dominant_classes, match_kits=match_kits)
 
         # 1. Map Possession
         ownership = self.detector.calculate_ownership(player_tracks, ball_track)
@@ -386,7 +386,7 @@ class StatsEngine:
             
         return formatted_stats, events
 
-    def _cluster_teams(self, id_manager, player_dominant_classes=None):
+    def _cluster_teams(self, id_manager, player_dominant_classes=None, match_kits=None):
         """
         Force-assign every player to Team A or Team B based on Jersey Color.
         Merges similar colors and assigns Unknown players to nearest team.
@@ -447,9 +447,30 @@ class StatsEngine:
 
         counts = {c: len(ids) for c, ids in teams.items() if c != "Unknown"}
         if len(counts) >= 2:
-            top_2 = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:2]
-            team_a_color = top_2[0][0]
-            team_b_color = top_2[1][0]
+            # --- Round 6: Kit-guided team selection ---
+            # If KitCoordinator discovered exactly 2 player kit colors, prefer those
+            # over naive count-based top-2 selection.  This prevents scenarios like
+            # V3 where Green(6) is orphaned when Red(21)+Blue(6) are picked as top-2,
+            # even though the real teams are Red and Green.
+            kit_guided = False
+            if match_kits and len(match_kits.get("players", [])) == 2:
+                kit_a_raw, kit_b_raw = match_kits["players"]
+                kit_a_norm = color_merge_map.get(kit_a_raw.lower(), kit_a_raw.lower()).capitalize()
+                kit_b_norm = color_merge_map.get(kit_b_raw.lower(), kit_b_raw.lower()).capitalize()
+                if kit_a_norm in counts and kit_b_norm in counts:
+                    team_a_color = kit_a_norm
+                    team_b_color = kit_b_norm
+                    kit_guided = True
+                    print(f"[Team] Kit-guided selection: {team_a_color} ({counts[team_a_color]}), "
+                          f"{team_b_color} ({counts[team_b_color]}) "
+                          f"(from match_kits: {kit_a_raw}/{kit_b_raw})")
+
+            if not kit_guided:
+                top_2 = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:2]
+                team_a_color = top_2[0][0]
+                team_b_color = top_2[1][0]
+                print(f"[Team] Count-based selection: {team_a_color} ({counts[team_a_color]}), "
+                      f"{team_b_color} ({counts[team_b_color]})")
             
             # Update Identity Manager with EXPLICIT Team Names (The Color Itself)
             self.team_map = {}
@@ -491,9 +512,12 @@ class StatsEngine:
                 dist_a = _hue_dist(orphan_color, team_a_color)
                 dist_b = _hue_dist(orphan_color, team_b_color)
                 if dist_a == dist_b:
-                    # Tie-break: assign by jersey number proximity
-                    orphan_avg = sum(int(j) for j in orphan_jerseys) / len(orphan_jerseys) if orphan_jerseys else 0
-                    nearest = team_a_color if abs(orphan_avg - avg_a) < abs(orphan_avg - avg_b) else team_b_color
+                    # Round 6: Balance-aware tie-break — assign to the SMALLER team
+                    # This prevents 21+6→27 situations where orphans pile onto the
+                    # already-larger team due to arbitrary jersey-number proximity.
+                    size_a = len(team_a_jerseys)
+                    size_b = len(team_b_jerseys)
+                    nearest = team_b_color if size_a > size_b else team_a_color
                 else:
                     nearest = team_a_color if dist_a < dist_b else team_b_color
                 for j in orphan_jerseys:

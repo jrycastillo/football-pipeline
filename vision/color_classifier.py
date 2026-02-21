@@ -58,6 +58,9 @@ class TeamColorClassifier:
         # Color voting buffer per track ID
         self.color_buffer = {}  # {track_id: [color1, color2, ...]}
         self.buffer_size = 30
+        # Round 6.1: Kit-aware color correction
+        # Set by pipeline after KitCoordinator discovers player kit colors
+        self.known_kit_colors = None  # e.g., ["Green", "Red"]
     
     def _mask_grass(self, hsv_image):
         """Create mask to exclude grass (green pitch) pixels."""
@@ -209,6 +212,32 @@ class TeamColorClassifier:
         # Step 5: Classify using HSV ranges
         h_val, s_val, v_val = dominant_hsv
         color_name = self._classify_hsv(h_val, s_val, v_val)
+        
+        # Round 6.1: Kit-aware color correction
+        # If the predicted color is NOT one of the known kit colors,
+        # check if it's close in hue to a kit color and correct it.
+        # This fixes V3 where Green-jersey players get classified as Red
+        # due to HSV boundary proximity.
+        if self.known_kit_colors and color_name not in self.known_kit_colors:
+            _KIT_HUE_REF = {
+                "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
+                "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
+            }
+            pred_hue = _KIT_HUE_REF.get(color_name, -1)
+            if pred_hue >= 0:  # Only correct chromatic colors
+                best_kit = None
+                best_dist = 999
+                for kit_color in self.known_kit_colors:
+                    kit_hue = _KIT_HUE_REF.get(kit_color, -1)
+                    if kit_hue < 0:
+                        continue
+                    dist = min(abs(pred_hue - kit_hue), 180 - abs(pred_hue - kit_hue))
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_kit = kit_color
+                # Correct if hue distance is small (≤ 30° = adjacent color)
+                if best_kit and best_dist <= 30:
+                    color_name = best_kit
         
         return color_name
     

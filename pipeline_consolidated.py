@@ -628,16 +628,18 @@ class IdentityManager:
             # --- Phase 221: AGGRESSIVE SOFT REGISTRATION ---
             # Register jersey in registry after minimal observations
             # This allows StatsEngine to recognize it as a valid player faster
-            if best_score >= 1.5 and best_num not in self.jersey_registry:
+            # Round 6.1: Lowered from 1.5 to 0.6 to recover players with weak
+            # but consistent JNR reads (e.g., 2 reads at 0.30 each = 0.6).
+            if best_score >= 0.6 and best_num not in self.jersey_registry:
                 team = self.track_colors.get(track_id, "Unknown")
                 self.jersey_registry[best_num] = {"track_id": track_id, "team": team, "soft": True}
                 log(f"📝 [IdentityManager] Soft-registered Jersey #{best_num} for Track {track_id} (Score: {best_score:.1f})")
             
-            # Lock Rule (User Request V6):
-            # Score >= 0.50 (Filter)
-            # 3 Votes required (Faster locking)
-            # Keep margin check for safety (>= 1.0)
-            if best_tally >= 3 and (best_score - second_score) >= 1.0:
+            # Lock Rule (Round 6.1 — Relaxed):
+            # Votes >= 2 (was 3: faster locking for players with short track segments)
+            # Margin >= 0.5 (was 1.0: allows weaker but consistent reads)
+            # try_lock() still enforces global uniqueness — no conflicting locks.
+            if best_tally >= 2 and (best_score - second_score) >= 0.5:
                  if track_id not in self.locks:
                      # Check Global Uniqueness Logic
                      team = self.track_colors.get(track_id, "Unknown")
@@ -1563,10 +1565,10 @@ class StatsAdapter:
         # Note: EventDetector in StatsEngine creates its own Camera. 
         # We assume that is sufficient as it uses the same Homography logic.
 
-    def process_events(self, all_frames, id_manager=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None):
         # Delegate to new engine
         # returns (formatted_stats, events)
-        formatted_stats, events = self.engine.process_events(all_frames, id_manager)
+        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits)
         
         # Return in order expected by pipeline: raw_tracks, player_stats
         return events, formatted_stats
@@ -2025,6 +2027,14 @@ if __name__ == "__main__":
                                    # Phase 168: Global Kit Discovery
                                    kit_coordinator.observe(cls_id, color)
                                    
+                                   # Round 6.1: Propagate kit colors to classifier once
+                                   # after enough observations (500 processed frames).
+                                   if color_classifier.known_kit_colors is None and n >= 500:
+                                       _kits = kit_coordinator.get_discovery_result()
+                                       if len(_kits.get("players", [])) == 2:
+                                           color_classifier.known_kit_colors = _kits["players"]
+                                           log(f"🎨 [Kit] Set known kit colors: {_kits['players']}")
+                                   
                                    # Skip JNR for Goalkeepers (class 1) - only need color
                                    if cls_id == 1:
                                        continue
@@ -2209,7 +2219,8 @@ if __name__ == "__main__":
 
     # --- 9. STATS GENERATION (Entity Resolution) ---
     stats_adapter = StatsAdapter(camera, pitch_manager) # Pass pitch_manager
-    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager)
+    kits = kit_coordinator.get_discovery_result()
+    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits)
     
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
