@@ -600,8 +600,10 @@ class IdentityManager:
         # --- MODE 2: Strict Voting & Locking (Run 20) ---
         if self.locking_mode == 2:
             # 1. Update Vote Counts (if confident)
-            # User Request: Lower threshold to 0.50, but require 5 votes
-            if score >= 0.50: 
+            # Round 5 v2: Lowered from 0.50 to 0.30 to recover players with weak but
+            # consistent predictions. The lock condition (3 votes + margin >= 1.0) still
+            # prevents garbage locks — a player needs 3+ consistent reads to lock.
+            if score >= 0.30:
                 self.vote_counts[track_id][detected_number] += score
                 # Track vote count (tally)
                 if not hasattr(self, "vote_tallies"): self.vote_tallies = defaultdict(lambda: defaultdict(int))
@@ -904,9 +906,9 @@ class IdentityManager:
 
     def set_track_color(self, track_id, color, cls_id=None):
         """Set track color with role-based logic.
-        Round 5 fix: Always update to latest voted color (not just first detection).
-        The voting buffer in TeamColorClassifier stabilizes after ~5-10 frames,
-        so later calls have more reliable colors than the first call.
+        Round 5.1 fix: "Settle then lock" — store first color immediately, allow
+        ONE correction at the warmup threshold (10 observations) when the voting
+        buffer has stabilized, then lock permanently.
         - Referee (cls_id=3): Skip color assignment entirely
         - Goalkeeper (cls_id=1): Store in goalkeeper_colors, don't count for team detection
         - Player (cls_id=2): Store and count for team detection
@@ -915,27 +917,48 @@ class IdentityManager:
         if cls_id == 3:
             return
 
-        old_color = self.track_colors.get(track_id)
-
-        # Always update to latest voted color (not just first detection)
+        # Track observation count per track for warmup logic
+        if not hasattr(self, '_color_obs_count'):
+            self._color_obs_count = defaultdict(int)
         if color != "Unknown":
-            self.track_colors[track_id] = color
+            self._color_obs_count[track_id] += 1
 
-            # Goalkeeper: Store separately, don't count for team colors
-            if cls_id == 1:
-                self.goalkeeper_colors[track_id] = color
-                return
+        # Goalkeeper: Store color (excluded from team counting)
+        if cls_id == 1:
+            if color != "Unknown":
+                if track_id not in self.track_colors or self.track_colors[track_id] == "Unknown":
+                    self.track_colors[track_id] = color
+                    self.goalkeeper_colors[track_id] = color
+            return
 
-            # Player: Update color counter (correct previous count if color changed)
-            if old_color and old_color != "Unknown" and old_color != color:
-                # Decrement old color count
+        # Player: "Settle then lock" approach
+        # 1. Store first non-Unknown color immediately (so resolve_identity gets a color)
+        # 2. At WARMUP_THRESHOLD, allow ONE correction if voting buffer disagrees
+        # 3. After that, color is locked permanently
+        WARMUP_THRESHOLD = 10
+
+        if track_id not in self.track_colors or self.track_colors[track_id] == "Unknown":
+            # First non-Unknown color — store immediately
+            if color != "Unknown":
+                self.track_colors[track_id] = color
+                self.color_counter[color] = self.color_counter.get(color, 0) + 1
+            elif track_id not in self.track_colors:
+                self.track_colors[track_id] = "Unknown"
+        elif self._color_obs_count[track_id] == WARMUP_THRESHOLD:
+            # One-time correction at warmup threshold
+            old_color = self.track_colors[track_id]
+            if color != "Unknown" and color != old_color:
+                self.track_colors[track_id] = color
+                # Correct color_counter
                 if old_color in self.color_counter and self.color_counter[old_color] > 0:
                     self.color_counter[old_color] -= 1
-            if old_color != color:
-                # Increment new color count (only on change or first time)
                 self.color_counter[color] = self.color_counter.get(color, 0) + 1
-        elif old_color is None:
-            self.track_colors[track_id] = "Unknown"
+                # Also update player_colors if this track is already bound to a jersey
+                jersey_num = self.active_bindings.get(track_id)
+                if jersey_num is not None:
+                    self.player_colors[str(jersey_num)] = color
+                log(f"🎨 [Color Fix] Track {track_id}: {old_color} → {color} (warmup correction)")
+        # After WARMUP_THRESHOLD: locked, no more changes
     
     def detect_team_colors(self):
         """Detect the two team colors as the most common colors (excluding Gray/Unknown)."""
@@ -1039,34 +1062,34 @@ class IdentityManager:
 
     def finalize_bindings(self):
         """
-        Phase v27.2: Tracklet Consolidation (Refined)
+        Phase v27.2: Bayesian Tracklet Consolidation (Refined)
         Retroactively link tracklets that didn't reach the lock threshold.
-        Round 5 fix: Use vote_counts in Mode 2 (was using self.alpha which is empty in Mode 2).
+
+        NOTE (Round 5.1): This intentionally uses self.alpha (Mode 3 accumulator).
+        In Mode 2 (current default), self.alpha is empty, so this is effectively a no-op.
+        This is CORRECT because the Phase 216 remap in stats/metrics.py SUMS stats from
+        ALL tracks in active_bindings that map to the same jersey number. If we consolidated
+        many tracks here, the remap would multiply stats 10-20x (as seen in the Feb 20 run).
+        DO NOT change to use vote_counts without first fixing the Phase 216 remap to
+        deduplicate instead of sum.
         """
-        log("🔍 [IdentityManager] Starting Tracklet Consolidation...")
+        log("🔍 [IdentityManager] Starting Bayesian Tracklet Consolidation...")
         consolidated_count = 0
 
-        # Round 5 fix: Use the correct vote store based on locking mode.
-        # Mode 2 accumulates in self.vote_counts, Mode 3 in self.alpha.
-        # Previously always used self.alpha, which is empty in Mode 2 → zero consolidation.
-        if self.locking_mode == 2:
-            vote_store = self.vote_counts
-        else:
-            vote_store = self.alpha
-
         # Round 4 fix: Sort keys for deterministic iteration order.
-        for tid in sorted(vote_store.keys(), key=lambda x: str(x)):
+        # defaultdict insertion order varies with non-deterministic JNR timing.
+        for tid in sorted(self.alpha.keys(), key=lambda x: str(x)):
             # If this track is already bound, skip it
             if tid in self.active_bindings:
                 continue
 
             # Find the number with the most evidence
-            track_votes = vote_store[tid]
-            if not track_votes:
+            track_alphas = self.alpha[tid]
+            if not track_alphas:
                 continue
 
-            best_number = max(track_votes, key=track_votes.get)
-            evidence = track_votes[best_number]
+            best_number = max(track_alphas, key=track_alphas.get)
+            evidence = track_alphas[best_number]
 
             # Threshold:
             # 1. Evidence > 0.5 AND jersey was confirmed/locked by another track
