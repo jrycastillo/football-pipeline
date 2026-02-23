@@ -188,18 +188,47 @@ class TeamColorClassifier:
         
         # Step 2: Convert to HSV
         hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-        
+
+        # Step 2.5: Detect green jersey BEFORE grass masking
+        # The grass mask (H 35-90) completely overlaps with green jersey hue (H 55-85).
+        # Green jersey pixels get masked out, leaving non-green remnants (skin, shorts)
+        # that misclassify as Red. Fix: if the torso is dominated by saturated green
+        # pixels (S > 80, typical of jersey fabric vs grass S 25-80), return Green early.
+        all_pixels = hsv.reshape(-1, 3)
+        if len(all_pixels) > 20:
+            high_sat_green = (
+                (all_pixels[:, 0] >= 35) & (all_pixels[:, 0] <= 90) &
+                (all_pixels[:, 1] > 80)
+            )
+            green_ratio = np.sum(high_sat_green) / len(all_pixels)
+            if green_ratio > 0.35:
+                color_name = "Green"
+                # Apply kit correction if active
+                if self.known_kit_colors and color_name not in self.known_kit_colors:
+                    _KIT_HUE_REF = {
+                        "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
+                        "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
+                    }
+                    for kit_color in self.known_kit_colors:
+                        kit_hue = _KIT_HUE_REF.get(kit_color, -1)
+                        if kit_hue >= 0:
+                            dist = min(abs(60 - kit_hue), 180 - abs(60 - kit_hue))
+                            if dist <= 30:
+                                color_name = kit_color
+                                break
+                return color_name
+
         # Step 3: Mask out grass pixels
         keep_mask = self._mask_grass(hsv)
-        
+
         # Flatten and apply mask
         hsv_flat = hsv.reshape(-1, 3)
         mask_flat = keep_mask.flatten()
         kept_pixels = hsv_flat[mask_flat]
-        
+
         if len(kept_pixels) < 20:
             kept_pixels = hsv_flat
-        
+
         if len(kept_pixels) < 10:
             return "Unknown"
         
