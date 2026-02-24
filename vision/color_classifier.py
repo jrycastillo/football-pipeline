@@ -70,30 +70,26 @@ class TeamColorClassifier:
         s = hsv_image[:, :, 1]
         v = hsv_image[:, :, 2]
         
-        grass_mask = (h >= 35) & (h <= 90) & (s > 25) & (v > 20)
+        grass_mask = (h >= 35) & (h <= 90) & (s > 70) & (v > 20)
         return ~grass_mask
     
     def _get_torso_roi(self, crop):
-        """Extract center-upper body region (torso) from crop."""
+        """Extract upper chest/shoulder region to avoid jersey numbers and grass background."""
         h, w = crop.shape[:2]
         
-        # If crop is already very narrow/short relative to a full person, it might be a torso
-        # Regular person aspect is ~2-3. Torso aspect is ~1.
-        aspect = h / w if w > 0 else 0
+        # Target the top 15% to 45% of the player bounding box (shoulders/upper chest)
+        # Narrower than full torso to avoid: (1) grass background at lower body,
+        # (2) large red jersey numbers on chest, (3) shorts bleeding into ROI
+        # Target the center 25% to 75% width to avoid background grass on the sides
+        y1 = int(h * 0.15)
+        y2 = int(h * 0.45)
+        x1 = int(w * 0.25)
+        x2 = int(w * 0.75)
         
-        if aspect < 1.5:
-            # Likely ALREADY a torso or close to it. Don't double crop too much.
-            y1 = int(h * 0.1)
-            y2 = int(h * 0.9)
-            x1 = int(w * 0.1)
-            x2 = int(w * 0.9)
-        else:
-            # Torso: center region to avoid shorts/socks
-            y1 = int(h * 0.15)
-            y2 = int(h * 0.65)
-            x1 = int(w * 0.20)
-            x2 = int(w * 0.80)
-        
+        # If the crop is incredibly tight (e.g. only the head), fallback gracefully
+        if y2 <= y1 or x2 <= x1:
+            return crop
+            
         return crop[y1:y2, x1:x2]
     
     def _find_dominant_hsv(self, hsv_pixels):
@@ -105,16 +101,24 @@ class TeamColorClassifier:
             return None
             
         # 1. Separate into Chromatic (Color) and Achromatic (Gray/Black/White)
-        # S < 40 considered achromatic (white/black/grey)
-        is_chromatic = hsv_pixels[:, 1] > 40
+        # S <= 70 considered achromatic: white jerseys reflecting green pitch
+        # have S ~55-68 (green tint) which must still classify as White.
+        # Genuine colored jerseys have S > 150 so this is safe.
+        is_chromatic = hsv_pixels[:, 1] > 70
         
         chromatic_pixels = hsv_pixels[is_chromatic]
         achromatic_pixels = hsv_pixels[~is_chromatic]
         
         # 2. Determine if the jersey is mostly Color or Grayscale
-        # Heuristic: If > 30% pixels are chromatic, treat as Colored. 
-        # (Jerseys usually have strong color unless they are White/Black)
-        if len(chromatic_pixels) > len(hsv_pixels) * 0.3:
+        # FIX: If achromatic pixels (White/Black) are the absolute majority
+        # of the torso crop, don't let 30% skin/red numbers overwrite it!
+        if len(achromatic_pixels) > len(chromatic_pixels):
+            # --- ACHROMATIC PATH (Black/White/Grey strictly dominates) ---
+            if len(achromatic_pixels) == 0:
+                return np.median(hsv_pixels, axis=0)
+            return np.median(achromatic_pixels, axis=0)
+            
+        elif len(chromatic_pixels) > len(hsv_pixels) * 0.3:
             # --- CHROMATIC PATH (Find Dominant Hue) ---
             
             # Histogram for Hue (0-180), bin size 10 -> 18 bins
@@ -146,18 +150,19 @@ class TeamColorClassifier:
     
     def _classify_hsv(self, h, s, v):
         """Classify HSV values to color name with wide tolerance."""
-        # 1. Check Specific Color Ranges first
+        # 1. Heuristic Fallbacks for very desaturated
+        # Match the achromatic threshold (S <= 70) used in _find_dominant_hsv
+        if s <= 70:
+            if v > 150: return "White"
+            if v < 60:  return "Black"
+            return "White"  # Gray -> White for football
+            
+        # 2. Check Specific Color Ranges if adequately saturated
         for color_name, ranges in HSV_COLOR_RANGES.items():
             for r in ranges:
                 # 6-param tuple: (h_min, h_max, s_min, s_max, v_min, v_max)
                 if (r[0] <= h <= r[1]) and (r[2] <= s <= r[3]) and (r[4] <= v <= r[5]):
                     return _football_color(color_name)
-        
-        # 2. Heuristic Fallbacks for very desaturated 
-        if s < 30:
-            if v > 180: return "White"
-            if v < 60:  return "Black"
-            return "White"  # Gray -> White for football
             
         # 3. Last Resort: Closest Hue
         if h < 10 or h > 170: return "Red"
@@ -190,33 +195,40 @@ class TeamColorClassifier:
         hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
 
         # Step 2.5: Detect green jersey BEFORE grass masking
-        # The grass mask (H 35-90) completely overlaps with green jersey hue (H 55-85).
-        # Green jersey pixels get masked out, leaving non-green remnants (skin, shorts)
-        # that misclassify as Red. Fix: if the torso is dominated by saturated green
-        # pixels (S > 80, typical of jersey fabric vs grass S 25-80), return Green early.
-        all_pixels = hsv.reshape(-1, 3)
-        if len(all_pixels) > 20:
-            high_sat_green = (
-                (all_pixels[:, 0] >= 35) & (all_pixels[:, 0] <= 90) &
-                (all_pixels[:, 1] > 80)
-            )
-            green_ratio = np.sum(high_sat_green) / len(all_pixels)
-            if green_ratio > 0.35:
-                color_name = "Green"
-                # Apply kit correction if active
-                if self.known_kit_colors and color_name not in self.known_kit_colors:
-                    _KIT_HUE_REF = {
-                        "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
-                        "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
-                    }
-                    for kit_color in self.known_kit_colors:
-                        kit_hue = _KIT_HUE_REF.get(kit_color, -1)
-                        if kit_hue >= 0:
-                            dist = min(abs(60 - kit_hue), 180 - abs(60 - kit_hue))
-                            if dist <= 30:
-                                color_name = kit_color
-                                break
-                return color_name
+        # Some teams (like green) get heavily filtered by the grass mask.
+        # We perform a quick check on a strict center crop to avoid inflating 
+        # the ratio with background grass behind the player.
+        h_c, w_c = crop.shape[:2]
+        center_y1, center_y2 = int(h_c * 0.20), int(h_c * 0.50)
+        center_x1, center_x2 = int(w_c * 0.40), int(w_c * 0.60)
+        
+        # Only evaluate if crop is viable
+        if center_y2 > center_y1 and center_x2 > center_x1:
+            center_crop = crop[center_y1:center_y2, center_x1:center_x2]
+            hsv_center = cv2.cvtColor(center_crop, cv2.COLOR_BGR2HSV)
+            all_pixels = hsv_center.reshape(-1, 3)
+            
+            if len(all_pixels) > 10:
+                # Look for pixels with Green hue AND high saturation
+                high_sat_green = ((all_pixels[:, 0] >= 35) & (all_pixels[:, 0] <= 90) & (all_pixels[:, 1] > 80))
+                green_ratio = np.sum(high_sat_green) / len(all_pixels)
+                
+                # If more than 60% of the *dead center* is saturated green, early exit
+                if green_ratio > 0.60:
+                    color_name = "Green"
+                    # Apply kit correction if active
+                    if self.known_kit_colors and color_name not in self.known_kit_colors:
+                        _KIT_HUE_REF = {
+                            "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
+                            "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
+                        }
+                        for kit_color in self.known_kit_colors:
+                            kit_hue = _KIT_HUE_REF.get(kit_color, -1)
+                            if kit_hue >= 0:
+                                dist = min(abs(60 - kit_hue), 180 - abs(60 - kit_hue))
+                                if dist <= 30:
+                                    return kit_color
+                    return "Green"
 
         # Step 3: Mask out grass pixels
         keep_mask = self._mask_grass(hsv)
@@ -339,14 +351,23 @@ class SigLIPTeamClassifier:
     Extracts high-dimensional embeddings for player crops to cluster teams robustly.
     """
     def __init__(self, model_id="google/siglip-base-patch16-224"):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
         print(f"🔄 [SigLIP] Initializing component on {self.device}...")
         self.processor = SiglipImageProcessor.from_pretrained(model_id)
         self.model = SiglipVisionModel.from_pretrained(model_id).to(self.device)
         self.model.eval()
-        
+
         # Buffer for embeddings per track: {track_id: [embedding1, embedding2, ...]}
         self.embeddings = {}
+        # Throttle: track observation counts to limit SigLIP calls
+        self._obs_count = defaultdict(int)
+        self.max_embeddings_per_track = 10  # Enough for stable clustering
+        self.obs_cadence = 30  # Only sample every 30th frame per track
     
     def extract_embedding(self, crop):
         """Extract a semantic embedding for a player crop (BGR numpy or PIL)."""
@@ -409,7 +430,13 @@ class SigLIPTeamClassifier:
         return False, max_score
 
     def add_observation(self, track_id, crop):
-        """Add an embedding observation for a track."""
+        """Add an embedding observation for a track (throttled)."""
+        self._obs_count[track_id] += 1
+        # Throttle: only sample every Nth frame, stop after max embeddings
+        if self._obs_count[track_id] % self.obs_cadence != 1:
+            return
+        if track_id in self.embeddings and len(self.embeddings[track_id]) >= self.max_embeddings_per_track:
+            return
         embed = self.extract_embedding(crop)
         if embed is not None:
             if track_id not in self.embeddings:

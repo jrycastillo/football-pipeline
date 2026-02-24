@@ -6,7 +6,7 @@ class StatsEngine:
     def __init__(self):
         self.detector = AdvancedEventDetector()
         
-    def process_events(self, all_frames, id_manager=None, match_kits=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
         """
         Process full video history to generate stats.
         """
@@ -47,7 +47,7 @@ class StatsEngine:
                 dominant_cls = max(cls_counts.items(), key=lambda x: x[1])[0]
                 player_dominant_classes[pid] = dominant_cls
 
-            self._cluster_teams(id_manager, player_dominant_classes, match_kits=match_kits)
+            self._cluster_teams(id_manager, player_dominant_classes, match_kits=match_kits, siglip_teams=siglip_teams)
 
         # 1. Map Possession
         ownership = self.detector.calculate_ownership(player_tracks, ball_track)
@@ -386,7 +386,7 @@ class StatsEngine:
             
         return formatted_stats, events
 
-    def _cluster_teams(self, id_manager, player_dominant_classes=None, match_kits=None):
+    def _cluster_teams(self, id_manager, player_dominant_classes=None, match_kits=None, siglip_teams=None):
         """
         Force-assign every player to Team A or Team B based on Jersey Color.
         Merges similar colors and assigns Unknown players to nearest team.
@@ -403,6 +403,102 @@ class StatsEngine:
             print(f"[Team] Found {gk_count} goalkeeper(s) from YOLO class detection: "
                   f"{[pid for pid, c in jersey_classes.items() if c == 1]}")
 
+        # === SigLIP-based team clustering (Round 7) ===
+        # If SigLIP visual clusters are available, use them as the PRIMARY team source.
+        # This replaces HSV color-based clustering which fails under lighting variation.
+        if siglip_teams and len(siglip_teams) >= 4:
+            print(f"[Team] Using SigLIP visual clustering ({len(siglip_teams)} tracks)")
+
+            # 1. Map track_ids → jersey numbers, group by cluster label
+            cluster_jerseys = defaultdict(list)  # {0: [jersey1, jersey2], 1: [jersey3, ...]}
+            for track_id, cluster_label in siglip_teams.items():
+                jersey_num = id_manager.active_bindings.get(track_id)
+                if jersey_num is None:
+                    continue
+                # Skip goalkeepers
+                if jersey_classes.get(jersey_num) == 1 or jersey_classes.get(str(jersey_num)) == 1:
+                    continue
+                cluster_jerseys[cluster_label].append(str(jersey_num))
+
+            if len(cluster_jerseys) >= 2:
+                # 2. Name each cluster by the dominant HSV color of its members
+                cluster_colors = {}
+                for label, jerseys in cluster_jerseys.items():
+                    color_counts = defaultdict(int)
+                    for j in jerseys:
+                        color = id_manager.player_colors.get(j, "Unknown")
+                        if color != "Unknown":
+                            color_counts[color] += 1
+                    if color_counts:
+                        cluster_colors[label] = max(color_counts, key=color_counts.get)
+                    else:
+                        cluster_colors[label] = f"Team{label}"
+
+                # If both clusters got the same color name, disambiguate
+                labels = sorted(cluster_jerseys.keys())
+                team_a_label, team_b_label = labels[0], labels[1]
+                team_a_color = cluster_colors.get(team_a_label, "TeamA")
+                team_b_color = cluster_colors.get(team_b_label, "TeamB")
+                if team_a_color == team_b_color:
+                    team_a_color = f"{team_a_color}_A"
+                    team_b_color = f"{team_b_color}_B"
+
+                print(f"[Team] SigLIP clusters: {team_a_color} ({len(cluster_jerseys[team_a_label])} players), "
+                      f"{team_b_color} ({len(cluster_jerseys[team_b_label])} players)")
+
+                # 3. Build team_map
+                self.team_map = {}
+                team_a_jerseys = [int(j) for j in cluster_jerseys[team_a_label]]
+                team_b_jerseys = [int(j) for j in cluster_jerseys[team_b_label]]
+                for j in cluster_jerseys[team_a_label]:
+                    self.team_map[str(j)] = team_a_color.capitalize()
+                for j in cluster_jerseys[team_b_label]:
+                    self.team_map[str(j)] = team_b_color.capitalize()
+
+                # 4. Assign players NOT in SigLIP (unlocked tracks, GKs) via jersey proximity
+                avg_a = sum(team_a_jerseys) / len(team_a_jerseys) if team_a_jerseys else 15
+                avg_b = sum(team_b_jerseys) / len(team_b_jerseys) if team_b_jerseys else 25
+
+                # Assign GKs
+                for jersey_str, cls_id in jersey_classes.items():
+                    if cls_id == 1 and str(jersey_str) not in self.team_map:
+                        try:
+                            jnum = int(jersey_str)
+                            dist_a = abs(jnum - avg_a)
+                            dist_b = abs(jnum - avg_b)
+                            assigned = team_a_color if dist_a < dist_b else team_b_color
+                            self.team_map[str(jersey_str)] = assigned.capitalize()
+                            print(f"[Team] SigLIP: GK #{jersey_str} → {assigned} (jersey proximity)")
+                        except (ValueError, TypeError):
+                            pass
+
+                # Assign remaining jerseys from player_colors not in SigLIP
+                for jersey, color in id_manager.player_colors.items():
+                    if str(jersey) not in self.team_map:
+                        try:
+                            jnum = int(jersey)
+                            dist_a = abs(jnum - avg_a)
+                            dist_b = abs(jnum - avg_b)
+                            assigned = team_a_color if dist_a < dist_b else team_b_color
+                            self.team_map[str(jersey)] = assigned.capitalize()
+                            print(f"[Team] SigLIP: Unmatched #{jersey} → {assigned} (jersey proximity)")
+                        except (ValueError, TypeError):
+                            pass
+
+                # Add track_id mappings for unbound tracks
+                if hasattr(id_manager, 'active_bindings'):
+                    for track_id, jersey_num in id_manager.active_bindings.items():
+                        jersey_team = self.team_map.get(str(jersey_num))
+                        if jersey_team and str(track_id) not in self.team_map:
+                            self.team_map[str(track_id)] = jersey_team
+
+                self.primary_teams = {team_a_color.capitalize(), team_b_color.capitalize()}
+                print(f"[Team] SigLIP team_map: {len(self.team_map)} entries")
+                return  # Skip HSV-based clustering entirely
+            else:
+                print(f"[Team] SigLIP: Only {len(cluster_jerseys)} clusters found, falling back to HSV")
+
+        # === HSV-based clustering (fallback) ===
         teams = defaultdict(list)
         for jersey, color in id_manager.player_colors.items():
             # Exclude goalkeepers (cls_id=1) from team clustering

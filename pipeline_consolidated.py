@@ -962,6 +962,49 @@ class IdentityManager:
                 log(f"🎨 [Color Fix] Track {track_id}: {old_color} → {color} (warmup correction)")
         # After WARMUP_THRESHOLD: locked, no more changes
     
+    def apply_kit_correction(self, kit_colors):
+        """
+        After kit discovery, retroactively correct track colors that were locked
+        before kit-aware color classification was active (frame < 500).
+        Tracks whose color doesn't match either kit color but is close in hue
+        (≤ 30°) get corrected to the nearest kit color.
+        """
+        if not kit_colors or len(kit_colors) < 2:
+            return
+        _HUE_REF = {
+            "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
+            "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
+        }
+        kit_set = set(c.capitalize() for c in kit_colors)
+        corrections = 0
+        for track_id, color in list(self.track_colors.items()):
+            if color in kit_set or color in ("Unknown", "White", "Black"):
+                continue
+            color_hue = _HUE_REF.get(color, -1)
+            if color_hue < 0:
+                continue
+            best_kit = None
+            best_dist = 999
+            for kit_color in kit_set:
+                kit_hue = _HUE_REF.get(kit_color, -1)
+                if kit_hue < 0:
+                    continue
+                dist = min(abs(color_hue - kit_hue), 180 - abs(color_hue - kit_hue))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_kit = kit_color
+            if best_kit and best_dist <= 30:
+                old_color = color
+                self.track_colors[track_id] = best_kit
+                if old_color in self.color_counter and self.color_counter[old_color] > 0:
+                    self.color_counter[old_color] -= 1
+                self.color_counter[best_kit] = self.color_counter.get(best_kit, 0) + 1
+                jersey_num = self.active_bindings.get(track_id)
+                if jersey_num is not None:
+                    self.player_colors[str(jersey_num)] = best_kit
+                corrections += 1
+        log(f"🎨 [Kit Correction] Retroactively corrected {corrections} track colors using kit discovery")
+
     def detect_team_colors(self):
         """Detect the two team colors as the most common colors (excluding Gray/Unknown)."""
         if not self.color_counter:
@@ -1565,10 +1608,10 @@ class StatsAdapter:
         # Note: EventDetector in StatsEngine creates its own Camera. 
         # We assume that is sufficient as it uses the same Homography logic.
 
-    def process_events(self, all_frames, id_manager=None, match_kits=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
         # Delegate to new engine
         # returns (formatted_stats, events)
-        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits)
+        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits, siglip_teams=siglip_teams)
         
         # Return in order expected by pipeline: raw_tracks, player_stats
         return events, formatted_stats
@@ -1681,12 +1724,19 @@ if __name__ == "__main__":
     parser.add_argument("--jnr_stride", type=int, default=30, help="Stride for JNR (frames)")
     parser.add_argument("--vid_stride", type=int, default=1, help="Video frame stride (skip frames). Default=1 (process all). 2=half speed/2x faster.")
     parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend (Legacy Arg)") 
-    parser.add_argument("--tracker", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Strict Tracker Selector")
-    parser.add_argument("--enable_reid", type=int, default=0, help="Enable ReID (0/1)")
-    parser.add_argument("--audit_rejections", type=int, default=0, help="Enable Rejection Audit (0/1)")
-    parser.add_argument("--resize_h", type=int, default=0, help="Resize height (0 to disable)")
+    parser.add_argument('--tracker', choices=['bytetrack', 'botsort'], help="Legacy tracker arg, will override tracking_mode if set")
+    parser.add_argument('--enable_reid', type=bool, default=False, help="Enable SigLIP ReID")
+    parser.add_argument('--audit_rejections', type=bool, default=False, help="Enable Tracklet audit logging")
+    parser.add_argument('--resize_h', type=int, default=None, help="Downsample height (e.g. 720) for speed")
+    parser.add_argument('--start_frame', type=int, default=0, help="Start processing from this frame number")
     args = parser.parse_args()
     
+    # Handle legacy argument mapping
+    if args.tracker:
+        args.tracking_mode = args.tracker
+    else:
+        args.tracker = args.tracking_mode
+
     # Determine video path
     video_path = args.video or os.environ.get("PIPELINE_VIDEO") or CONFIG.get('env', {}).get('SRC_VIDEO') or "/home/ubuntu/football/121364_0.mp4"
     output_dir = args.output_dir or os.environ.get("PIPELINE_OUTPUT") or "output"
@@ -2034,6 +2084,8 @@ if __name__ == "__main__":
                                        if len(_kits.get("players", [])) == 2:
                                            color_classifier.known_kit_colors = _kits["players"]
                                            log(f"🎨 [Kit] Set known kit colors: {_kits['players']}")
+                                           # Retroactively correct track colors locked before kit discovery
+                                           id_manager.apply_kit_correction(_kits["players"])
                                    
                                    # Skip JNR for Goalkeepers (class 1) - only need color
                                    if cls_id == 1:
@@ -2185,16 +2237,19 @@ if __name__ == "__main__":
     # Perform this BEFORE stats and propagation
     id_manager.finalize_bindings()
     
-    # Phase v28: SigLIP Team Clustering Report
+    # Phase v28: SigLIP Team Clustering
+    siglip_teams = None
     if siglip_classifier:
-        log("📊 [SigLIP] Generating Team Clustering Report...")
+        log("📊 [SigLIP] Generating Team Clusters...")
         try:
-            team_map = siglip_classifier.cluster_teams(n_teams=2)
-            for tid, team_label in team_map.items():
+            siglip_teams = siglip_classifier.cluster_teams(n_teams=2)
+            log(f"📊 [SigLIP] Clustered {len(siglip_teams)} tracks into 2 teams")
+            for tid, team_label in siglip_teams.items():
                 jersey = id_manager.active_bindings.get(tid, "??")
                 log(f"  Track {tid} (Jersey #{jersey}) -> Team Cluster {team_label}")
         except Exception as e:
-            log(f"⚠️ [SigLIP] Clustering report failed: {e}")
+            log(f"⚠️ [SigLIP] Clustering failed: {e}")
+            siglip_teams = None
     else:
         log("📊 [SigLIP] Team Clustering Skipped (ReID Disabled)")
     
@@ -2220,7 +2275,7 @@ if __name__ == "__main__":
     # --- 9. STATS GENERATION (Entity Resolution) ---
     stats_adapter = StatsAdapter(camera, pitch_manager) # Pass pitch_manager
     kits = kit_coordinator.get_discovery_result()
-    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits)
+    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams)
     
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
