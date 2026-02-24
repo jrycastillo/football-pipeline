@@ -16,19 +16,19 @@ from PIL import Image
 # Note: OpenCV uses H: 0-180, S: 0-255, V: 0-255
 HSV_COLOR_RANGES = {
     # (H_min, H_max, S_min, S_max, V_min, V_max)
-    "Maroon": [(0, 10, 50, 255, 20, 100), (170, 180, 50, 255, 20, 100)],
-    "Red": [(0, 10, 60, 255, 40, 255), (170, 180, 60, 255, 40, 255)],
-    "Orange": [(10, 20, 80, 255, 60, 255)],
-    "Gold": [(20, 25, 40, 255, 50, 255)],  # Fixed: H[20-25] to avoid overlap with Yellow
-    "Yellow": [(25, 35, 60, 255, 40, 255)], # Narrowed to make room for Gold/Lime
-    "Lime": [(35, 55, 40, 255, 40, 255)], # The requested "Light Green"
-    "Green": [(55, 85, 40, 255, 20, 255)], # Shifted up
-    "Teal": [(80, 95, 40, 255, 30, 150)],
-    "Cyan": [(85, 105, 50, 255, 40, 255)],
-    "Blue": [(100, 140, 50, 255, 81, 255)],  # Fixed: V[81-255] to separate from Navy
-    "Navy": [(105, 145, 40, 255, 20, 80)],
-    "Purple": [(140, 150, 40, 255, 40, 255)],  # Fixed: H[140-150] to avoid overlap with Pink
-    "Pink": [(150, 170, 30, 255, 80, 255)],
+    "Maroon": [(0, 10, 160, 255, 20, 100), (170, 180, 160, 255, 20, 100)],
+    "Red": [(0, 10, 160, 255, 40, 255), (170, 180, 160, 255, 40, 255)],
+    "Orange": [(10, 20, 160, 255, 60, 255)],
+    "Gold": [(20, 25, 160, 255, 50, 255)],  # Fixed: H[20-25] to avoid overlap with Yellow
+    "Yellow": [(25, 35, 160, 255, 40, 255)], # Narrowed to make room for Gold/Lime
+    "Lime": [(35, 55, 160, 255, 40, 255)], # The requested "Light Green"
+    "Green": [(55, 85, 160, 255, 20, 255)], # Shifted up
+    "Teal": [(80, 95, 160, 255, 30, 150)],
+    "Cyan": [(85, 105, 160, 255, 40, 255)],
+    "Blue": [(100, 140, 160, 255, 81, 255)],  # Fixed: V[81-255] to separate from Navy
+    "Navy": [(105, 145, 160, 255, 20, 80)],
+    "Purple": [(140, 150, 160, 255, 40, 255)],  # Fixed: H[140-150] to avoid overlap with Pink
+    "Pink": [(150, 170, 160, 255, 80, 255)],
     "White": [(0, 180, 0, 50, 180, 255)],
     "Silver": [(0, 180, 0, 30, 120, 180)],
     "Black": [(0, 180, 0, 255, 0, 30)],
@@ -101,10 +101,10 @@ class TeamColorClassifier:
             return None
             
         # 1. Separate into Chromatic (Color) and Achromatic (Gray/Black/White)
-        # S <= 70 considered achromatic: white jerseys reflecting green pitch
-        # have S ~55-68 (green tint) which must still classify as White.
-        # Genuine colored jerseys have S > 150 so this is safe.
-        is_chromatic = hsv_pixels[:, 1] > 70
+        # S <= 160 considered achromatic: white jerseys reflecting green pitch
+        # or under extreme sun can have high S (tint) which must still classify as White.
+        # Genuine colored jerseys have S > 180 so this is safe.
+        is_chromatic = hsv_pixels[:, 1] > 160
         
         chromatic_pixels = hsv_pixels[is_chromatic]
         achromatic_pixels = hsv_pixels[~is_chromatic]
@@ -151,8 +151,8 @@ class TeamColorClassifier:
     def _classify_hsv(self, h, s, v):
         """Classify HSV values to color name with wide tolerance."""
         # 1. Heuristic Fallbacks for very desaturated
-        # Match the achromatic threshold (S <= 70) used in _find_dominant_hsv
-        if s <= 70:
+        # Match the achromatic threshold (S <= 160) used in _find_dominant_hsv
+        if s <= 160:
             if v > 150: return "White"
             if v < 60:  return "Black"
             return "White"  # Gray -> White for football
@@ -207,13 +207,12 @@ class TeamColorClassifier:
             center_crop = crop[center_y1:center_y2, center_x1:center_x2]
             hsv_center = cv2.cvtColor(center_crop, cv2.COLOR_BGR2HSV)
             all_pixels = hsv_center.reshape(-1, 3)
-            
             if len(all_pixels) > 10:
-                # Look for pixels with Green hue AND high saturation
-                high_sat_green = ((all_pixels[:, 0] >= 35) & (all_pixels[:, 0] <= 90) & (all_pixels[:, 1] > 80))
+                # If more than 60% of the *dead center* is saturated green, early exit.
+                # Uses S > 175 to ensure it's a solid green jersey, not a white jersey reflection (S < 160).
+                high_sat_green = ((all_pixels[:, 0] >= 35) & (all_pixels[:, 0] <= 90) & (all_pixels[:, 1] > 175))
                 green_ratio = np.sum(high_sat_green) / len(all_pixels)
                 
-                # If more than 60% of the *dead center* is saturated green, early exit
                 if green_ratio > 0.60:
                     color_name = "Green"
                     # Apply kit correction if active
