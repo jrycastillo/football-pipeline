@@ -30,7 +30,7 @@ heuristics:
   DET_CONF: 0.10
   DET_IOU: 0.50
   DET_IMG_SIZE: 640         # 640x640 vs 832x832 = 40% fewer pixels, ~2x faster detection
-  VID_STRIDE: 5             # Process every 5th frame (5x speedup, ByteTrack interpolates)
+  VID_STRIDE: 3             # Process every 3rd frame (3x speedup, ByteTrack interpolates)
 
   # JNR - Reduced frequency, ID locking prevents redundant calls anyway
   JNR_IMG_SIZE: 160         # Full resolution crops

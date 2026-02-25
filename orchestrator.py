@@ -143,14 +143,14 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
     # 1. Download/Streaming Hybrid Logic
     # USER REQUEST: Always download to temp for reliable processing
     if video_path.startswith("http"):
-        print(f"[pipeline] Downloading to temp (streaming disabled): {video_path[:60]}...")
+        print(f"[pipeline] Downloading to temp: {video_path}...")
         use_streaming = False  # Always download
 
         if not use_streaming:
             temp_dir = tempfile.mkdtemp(prefix="pf_")
             temp_video_path = os.path.join(temp_dir, filename)
             try:
-                resp = requests.get(video_path, stream=True, timeout=300)
+                resp = requests.get(video_path, stream=True, timeout=3600)
                 resp.raise_for_status()
                 with open(temp_video_path, 'wb') as f:
                     for chunk in resp.iter_content(chunk_size=65536):
