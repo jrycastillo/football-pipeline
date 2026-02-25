@@ -601,25 +601,49 @@ class StatsEngine:
                     return 180  # achromatic → max distance, let jersey-number fallback decide
                 return min(abs(h1 - h2), 180 - abs(h1 - h2))
 
+            # Detect if either team is achromatic (White/Black/Gray)
+            _team_a_achromatic = _HSV_HUE_REF.get(team_a_color.lower(), -1) < 0
+            _team_b_achromatic = _HSV_HUE_REF.get(team_b_color.lower(), -1) < 0
+
             for orphan_color, orphan_jerseys in teams.items():
                 if orphan_color in (team_a_color, team_b_color, "Unknown"):
                     continue
-                # Compute HSV hue distance to each primary team
-                dist_a = _hue_dist(orphan_color, team_a_color)
-                dist_b = _hue_dist(orphan_color, team_b_color)
-                if dist_a == dist_b:
-                    # Round 6: Balance-aware tie-break — assign to the SMALLER team
-                    # This prevents 21+6→27 situations where orphans pile onto the
-                    # already-larger team due to arbitrary jersey-number proximity.
-                    size_a = len(team_a_jerseys)
-                    size_b = len(team_b_jerseys)
-                    nearest = team_b_color if size_a > size_b else team_a_color
+                orphan_hue = _HSV_HUE_REF.get(orphan_color.lower(), -1)
+
+                # Special case: one team is achromatic (White/Black).
+                # Hue distance to achromatic is always 180 (max), so orphans
+                # would never be assigned there. But green-tinted white jerseys
+                # get classified as Green/Blue — they should go to the White team.
+                # Rule: if orphan is NOT close to the chromatic team (>30°), assign
+                # to the achromatic team (it's likely a misclassified white/black).
+                if _team_a_achromatic and not _team_b_achromatic:
+                    # Team A is achromatic (e.g. White), Team B is chromatic (e.g. Red)
+                    dist_to_chromatic = _hue_dist(orphan_color, team_b_color)
+                    if orphan_hue >= 0 and dist_to_chromatic > 30:
+                        nearest = team_a_color  # Assign to White
+                    else:
+                        nearest = team_b_color  # Close to chromatic team
+                elif _team_b_achromatic and not _team_a_achromatic:
+                    # Team B is achromatic, Team A is chromatic
+                    dist_to_chromatic = _hue_dist(orphan_color, team_a_color)
+                    if orphan_hue >= 0 and dist_to_chromatic > 30:
+                        nearest = team_b_color  # Assign to White/Black
+                    else:
+                        nearest = team_a_color  # Close to chromatic team
                 else:
-                    nearest = team_a_color if dist_a < dist_b else team_b_color
+                    # Both teams chromatic — use standard hue distance
+                    dist_a = _hue_dist(orphan_color, team_a_color)
+                    dist_b = _hue_dist(orphan_color, team_b_color)
+                    if dist_a == dist_b:
+                        # Round 6: Balance-aware tie-break — assign to the SMALLER team
+                        size_a = len(team_a_jerseys)
+                        size_b = len(team_b_jerseys)
+                        nearest = team_b_color if size_a > size_b else team_a_color
+                    else:
+                        nearest = team_a_color if dist_a < dist_b else team_b_color
                 for j in orphan_jerseys:
                     self.team_map[str(j)] = nearest.capitalize()
-                print(f"[Team] FIX#4: Merged orphan color '{orphan_color}' ({len(orphan_jerseys)} players) → {nearest} "
-                      f"(hue dist: A={dist_a}, B={dist_b})")
+                print(f"[Team] FIX#4: Merged orphan color '{orphan_color}' ({len(orphan_jerseys)} players) → {nearest}")
 
             # FIX: Also add track_id -> team mappings via active_bindings reverse lookup
             # This allows team validation to work for both jersey numbers AND track IDs
@@ -641,13 +665,27 @@ class StatsEngine:
                         elif merged_color in [team_b_color.lower()]:
                             self.team_map[str(track_id)] = team_b_color.capitalize()
                         else:
-                            # Orphan track color — use hue distance
-                            d_a = _hue_dist(color_lower, team_a_color)
-                            d_b = _hue_dist(color_lower, team_b_color)
-                            if d_a <= d_b:
-                                self.team_map[str(track_id)] = team_a_color.capitalize()
+                            # Orphan track color — use achromatic-aware hue distance
+                            orphan_h = _HSV_HUE_REF.get(color_lower, -1)
+                            if _team_a_achromatic and not _team_b_achromatic:
+                                d_chrom = _hue_dist(color_lower, team_b_color)
+                                if orphan_h >= 0 and d_chrom > 30:
+                                    self.team_map[str(track_id)] = team_a_color.capitalize()
+                                else:
+                                    self.team_map[str(track_id)] = team_b_color.capitalize()
+                            elif _team_b_achromatic and not _team_a_achromatic:
+                                d_chrom = _hue_dist(color_lower, team_a_color)
+                                if orphan_h >= 0 and d_chrom > 30:
+                                    self.team_map[str(track_id)] = team_b_color.capitalize()
+                                else:
+                                    self.team_map[str(track_id)] = team_a_color.capitalize()
                             else:
-                                self.team_map[str(track_id)] = team_b_color.capitalize()
+                                d_a = _hue_dist(color_lower, team_a_color)
+                                d_b = _hue_dist(color_lower, team_b_color)
+                                if d_a <= d_b:
+                                    self.team_map[str(track_id)] = team_a_color.capitalize()
+                                else:
+                                    self.team_map[str(track_id)] = team_b_color.capitalize()
 
             print(f"[ReID Fix] team_map now has {len(self.team_map)} entries (jersey + track IDs)")
 
