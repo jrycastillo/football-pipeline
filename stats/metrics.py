@@ -61,14 +61,15 @@ class StatsEngine:
                                                     team_map=team_map_ref,
                                                     raw_ball_frames=raw_ball_frames)
         
-        # Phase 192/216: Remap raw_stats from track IDs to jersey numbers
-        # This ensures passes/events are attributed to jersey numbers, not track IDs
-        # Phase 216: Also builds reverse lookup from jersey_registry for soft-registered jerseys
+        # Phase 216: Remap raw_stats from track IDs to jersey numbers.
+        # PICK PRIMARY TRACK per jersey (most frames) — do NOT sum across tracks.
+        # Summing caused 10-22x stat inflation when multiple ByteTrack fragments
+        # mapped to the same jersey.
         if id_manager:
             remapped_stats = {}
             remap_count = 0
-            
-            # Build reverse lookup: track_id -> jersey_number from jersey_registry
+
+            # Build reverse lookup: track_id -> jersey_number
             track_to_jersey = {}
             if hasattr(id_manager, 'active_bindings'):
                 track_to_jersey.update(id_manager.active_bindings)
@@ -76,29 +77,46 @@ class StatsEngine:
                 for jersey_num, info in id_manager.jersey_registry.items():
                     if isinstance(info, dict) and 'track_id' in info:
                         tid = info['track_id']
-                        if tid not in track_to_jersey:  # active_bindings takes priority
+                        if tid not in track_to_jersey:
                             track_to_jersey[tid] = jersey_num
-            
+
+            # Group tracks by target jersey number, keeping track of which
+            # track has the most data (primary track)
+            jersey_candidates = defaultdict(list)  # jersey_num -> [(track_id, stats_dict, weight)]
+            unmapped = {}  # tracks with no jersey mapping
+
             for track_id, stats_dict in raw_stats.items():
-                # Check if this track ID maps to a jersey number
                 jersey_num = track_to_jersey.get(track_id)
-                target_id = jersey_num if (jersey_num is not None and jersey_num != track_id) else track_id
                 if jersey_num is not None and jersey_num != track_id:
+                    # Weight = total distance + touch frames (proxy for "most data")
+                    weight = 0
+                    for key in ("distance_m", "total_distance", "touch_frames", "ball_touches"):
+                        if key in stats_dict:
+                            weight += abs(stats_dict[key]) if isinstance(stats_dict[key], (int, float)) else 0
+                    jersey_candidates[jersey_num].append((track_id, stats_dict, weight))
                     remap_count += 1
-                
-                # Initialize target if needed
-                if target_id not in remapped_stats:
-                    remapped_stats[target_id] = defaultdict(int)
-                
-                # Merge stats - handle both int values and nested dicts
-                for key, value in stats_dict.items():
-                    if isinstance(value, (int, float)):
-                        remapped_stats[target_id][key] += value
-                    else:
-                        # If value is a dict or other type, just assign (don't accumulate)
-                        remapped_stats[target_id][key] = value
+                else:
+                    unmapped[track_id] = stats_dict
+
+            # For each jersey, pick the primary track (highest weight)
+            for jersey_num, candidates in jersey_candidates.items():
+                if len(candidates) == 1:
+                    _, stats_dict, _ = candidates[0]
+                    remapped_stats[jersey_num] = stats_dict
+                else:
+                    # Pick the track with the most data
+                    candidates.sort(key=lambda x: x[2], reverse=True)
+                    primary_tid, primary_stats, primary_w = candidates[0]
+                    remapped_stats[jersey_num] = primary_stats
+                    dropped = len(candidates) - 1
+                    print(f"[Phase 216] Jersey #{jersey_num}: picked track {primary_tid} (weight={primary_w:.0f}), dropped {dropped} duplicate track(s)")
+
+            # Keep unmapped tracks as-is
+            for track_id, stats_dict in unmapped.items():
+                remapped_stats[track_id] = stats_dict
+
             raw_stats = remapped_stats
-            print(f"[Phase 216] Remapped {remap_count} track IDs to jersey numbers (active_bindings + jersey_registry)")
+            print(f"[Phase 216] Remapped {remap_count} track IDs to jersey numbers (pick-primary, no summing)")
         
         # 3. Final Formatting
         formatted_stats = {}
@@ -115,7 +133,7 @@ class StatsEngine:
                  if b["id"] is not None:
                      id_frame_counts[b["id"]] += 1
 
-        # Phase 216 Fix: Remap frame counts to jersey numbers
+        # Phase 216 Fix: Remap frame counts to jersey numbers (pick max, not sum)
         if id_manager:
             track_to_jersey = {}
             if hasattr(id_manager, 'active_bindings'):
@@ -126,16 +144,15 @@ class StatsEngine:
                         tid = info['track_id']
                         if tid not in track_to_jersey:
                             track_to_jersey[tid] = jersey_num
-            
-            # Aggregate frame counts for mapped entities
+
+            # Pick the max frame count across tracks for each jersey (not sum)
+            jersey_max_frames = defaultdict(int)
             for tid, count in list(id_frame_counts.items()):
                 if tid in track_to_jersey:
                     jnum = track_to_jersey[tid]
-                    # Add to jersey count
-                    id_frame_counts[jnum] += count
-                    # Note: We don't remove the track ID count, as raw_stats might still have it? 
-                    # Actually raw_stats was remapped destructivelyish (remapped_stats).
-                    # But it's safer to keep both or ensure keys match.
+                    jersey_max_frames[jnum] = max(jersey_max_frames[jnum], count)
+            for jnum, max_count in jersey_max_frames.items():
+                id_frame_counts[jnum] = max_count
 
 
         for id_key in all_ids:
