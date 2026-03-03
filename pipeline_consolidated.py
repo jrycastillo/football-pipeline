@@ -1110,31 +1110,29 @@ class IdentityManager:
         Phase v27.2: Bayesian Tracklet Consolidation (Refined)
         Retroactively link tracklets that didn't reach the lock threshold.
 
-        NOTE (Round 5.1): This intentionally uses self.alpha (Mode 3 accumulator).
-        In Mode 2 (current default), self.alpha is empty, so this is effectively a no-op.
-        This is CORRECT because the Phase 216 remap in stats/metrics.py SUMS stats from
-        ALL tracks in active_bindings that map to the same jersey number. If we consolidated
-        many tracks here, the remap would multiply stats 10-20x (as seen in the Feb 20 run).
-        DO NOT change to use vote_counts without first fixing the Phase 216 remap to
-        deduplicate instead of sum.
+        Round 9: Now uses vote_counts (Mode 2) instead of self.alpha (Mode 3).
+        Phase 216 remap was fixed to pick-primary-track (commit b04d368), so
+        adding more tracks to active_bindings no longer causes stats inflation.
         """
         log("🔍 [IdentityManager] Starting Bayesian Tracklet Consolidation...")
         consolidated_count = 0
 
+        # Use vote_counts for Mode 2 (current default), fall back to alpha for Mode 3
+        source = self.vote_counts if self.locking_mode == 2 else self.alpha
+
         # Round 4 fix: Sort keys for deterministic iteration order.
-        # defaultdict insertion order varies with non-deterministic JNR timing.
-        for tid in sorted(self.alpha.keys(), key=lambda x: str(x)):
+        for tid in sorted(source.keys(), key=lambda x: str(x)):
             # If this track is already bound, skip it
             if tid in self.active_bindings:
                 continue
 
-            # Find the number with the most evidence
-            track_alphas = self.alpha[tid]
-            if not track_alphas:
+            # Find the jersey number with the most evidence
+            votes = source[tid]
+            if not votes:
                 continue
 
-            best_number = max(track_alphas, key=track_alphas.get)
-            evidence = track_alphas[best_number]
+            best_number = max(votes, key=votes.get)
+            evidence = votes[best_number]
 
             # Threshold:
             # 1. Evidence > 0.5 AND jersey was confirmed/locked by another track
