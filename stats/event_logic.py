@@ -273,12 +273,9 @@ class AdvancedEventDetector:
         # Previously: A → None → B was skipped because both A→None and None→B had a None endpoint
         # Now: We compare non-None segments directly with a max gap check
         non_none_segments = [s for s in segments if s["pid"] is not None]
-        _pass_debug = {"transitions": 0, "gap_filtered": 0, "no_ball": 0, "too_short": 0, "tackle_filtered": 0, "pass_debounced": 0, "counted": 0}
+        _pass_debug = {"transitions": 0, "gap_filtered": 0, "no_ball": 0, "too_short": 0, "tackle_filtered": 0, "counted": 0}
         # Round 2 fix: Interception debounce — max 1 per player per 3-second window
         _last_interception_frame = {}  # pid -> last frame an interception was credited
-        # Round 11 fix: Pass debounce — max 1 pass per passer per 3-second window
-        # Without this, rapid ownership oscillations (A→B→A→B) inflate pass counts 3-5x
-        _last_pass_frame = {}  # pid -> last frame a pass was credited
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
@@ -344,12 +341,6 @@ class AdvancedEventDetector:
                 if dist <= DIST_PASS_MIN:
                     _pass_debug["too_short"] += 1
                 if dist > DIST_PASS_MIN:
-                    # Round 11 fix: Per-passer debounce — max 1 pass per 3s window
-                    last_pf = _last_pass_frame.get(p_a, -999)
-                    if transition_frame - last_pf < int(EFF_FPS * 3):
-                        _pass_debug["pass_debounced"] += 1
-                        continue
-                    _last_pass_frame[p_a] = transition_frame
                     _pass_debug["counted"] += 1
                     stats[p_a]["passes_total"] += 1
                     
@@ -453,7 +444,7 @@ class AdvancedEventDetector:
         print(f"[PassDebug] Ownership transitions: {_pass_debug['transitions']}, "
               f"gap_filtered: {_pass_debug['gap_filtered']}, tackle_filtered: {_pass_debug['tackle_filtered']}, "
               f"no_ball: {_pass_debug['no_ball']}, too_short: {_pass_debug['too_short']}, "
-              f"pass_debounced: {_pass_debug['pass_debounced']}, counted: {_pass_debug['counted']}")
+              f"counted: {_pass_debug['counted']}")
 
         # 5. Shot Detection (Trajectory Analysis)
         # Round 2 fix: Only compute velocity on raw ball detections (not interpolated)
