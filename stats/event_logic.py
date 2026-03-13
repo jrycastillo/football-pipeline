@@ -106,36 +106,47 @@ class AdvancedEventDetector:
         # We need to map: PID -> List of positions (x,y)
         # Or accumulate on the fly.
         
-        prev_pos = {} # pid -> (x,y)
-        
+        prev_pos = {} # pid -> (x_m, y_m)
+
+        # Round 11 fix: Speed limit for distance calculation
+        # Max human sprint ~12 m/s; with VID_STRIDE=3 at 25fps each
+        # frame interval is 0.12s, so max movement = 12*0.12 = 1.44m
+        max_dist_per_frame = 12.0 * VID_STRIDE / FPS
+
         for t, frame_data in enumerate(player_tracks):
             boxes = frame_data.get("boxes", [])
+            # Round 11 fix: Deduplicate PIDs within a frame to prevent prev_pos oscillation.
+            # When finalize_bindings maps multiple ByteTrack fragments to the same jersey,
+            # overlapping tracks produce 2+ boxes with the same PID in one frame.
+            # Processing both causes prev_pos to ping-pong between physical locations,
+            # so every frame-to-frame delta exceeds the speed limit → near-zero distance.
+            # Fix: only process the FIRST (largest) box per PID per frame.
+            seen_pids = set()
             for b in boxes:
                 pid = b.get("id")
                 if pid is None: continue
-                
+                if pid in seen_pids:
+                    continue  # Skip duplicate PID in same frame
+                seen_pids.add(pid)
+
                 c = bbox_center(b["xyxy"])
                 world_c = self.camera.project_point(c[0], c[1]) # Returns (x_m, y_m)
-                
+
                 if pid in prev_pos:
                     px, py = prev_pos[pid]
                     dx = world_c[0] - px
                     dy = world_c[1] - py
                     dist = math.hypot(dx, dy)
-                    
-                    # P1 fix: VID_STRIDE-aware speed limit
-                    # Max human sprint ~12 m/s; with VID_STRIDE=3 at 25fps each
-                    # frame interval is 0.12s, so max movement = 12*0.12 = 1.44m
-                    max_dist_per_frame = 12.0 * VID_STRIDE / FPS
+
                     if dist < max_dist_per_frame:
                         stats[pid]["distance_m"] += dist
-                
+
                 # Phase 83: Track Class ID (Ball=0, GK=1, Player=2, Ref=3)
                 cls = b.get("cls", 2)
                 if "class_counts" not in stats[pid]:
                      stats[pid]["class_counts"] = defaultdict(int)
                 stats[pid]["class_counts"][cls] += 1
-                
+
                 prev_pos[pid] = world_c
 
         # Helper: Calculate xG — P1 fix: logistic regression instead of exponential
@@ -224,9 +235,10 @@ class AdvancedEventDetector:
                     if not moved:
                         continue  # Standing still with opponent near → not a dribble
 
-                    # Debounce: Only count one dribble per 1-second window per player
+                    # Round 11 fix: Increased dribble debounce from 1s to 3s per player
+                    # V4 produced 153 dribbles at 1s; real match ~1-5 per player
                     last_frame = last_dribble_frame.get(pid, -999)
-                    if t - last_frame > EFF_FPS:  # 1 second gap required between dribble events
+                    if t - last_frame > EFF_FPS * 3:  # 3 second gap between dribble events
                         last_dribble_frame[pid] = t
                         stats[pid]["dribbles"] += 1
                         dribble_debug_count += 1
@@ -261,9 +273,12 @@ class AdvancedEventDetector:
         # Previously: A → None → B was skipped because both A→None and None→B had a None endpoint
         # Now: We compare non-None segments directly with a max gap check
         non_none_segments = [s for s in segments if s["pid"] is not None]
-        _pass_debug = {"transitions": 0, "gap_filtered": 0, "no_ball": 0, "too_short": 0, "tackle_filtered": 0, "counted": 0}
+        _pass_debug = {"transitions": 0, "gap_filtered": 0, "no_ball": 0, "too_short": 0, "tackle_filtered": 0, "pass_debounced": 0, "counted": 0}
         # Round 2 fix: Interception debounce — max 1 per player per 3-second window
         _last_interception_frame = {}  # pid -> last frame an interception was credited
+        # Round 11 fix: Pass debounce — max 1 pass per passer per 3-second window
+        # Without this, rapid ownership oscillations (A→B→A→B) inflate pass counts 3-5x
+        _last_pass_frame = {}  # pid -> last frame a pass was credited
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
@@ -329,6 +344,12 @@ class AdvancedEventDetector:
                 if dist <= DIST_PASS_MIN:
                     _pass_debug["too_short"] += 1
                 if dist > DIST_PASS_MIN:
+                    # Round 11 fix: Per-passer debounce — max 1 pass per 3s window
+                    last_pf = _last_pass_frame.get(p_a, -999)
+                    if transition_frame - last_pf < int(EFF_FPS * 3):
+                        _pass_debug["pass_debounced"] += 1
+                        continue
+                    _last_pass_frame[p_a] = transition_frame
                     _pass_debug["counted"] += 1
                     stats[p_a]["passes_total"] += 1
                     
@@ -432,7 +453,7 @@ class AdvancedEventDetector:
         print(f"[PassDebug] Ownership transitions: {_pass_debug['transitions']}, "
               f"gap_filtered: {_pass_debug['gap_filtered']}, tackle_filtered: {_pass_debug['tackle_filtered']}, "
               f"no_ball: {_pass_debug['no_ball']}, too_short: {_pass_debug['too_short']}, "
-              f"counted: {_pass_debug['counted']}")
+              f"pass_debounced: {_pass_debug['pass_debounced']}, counted: {_pass_debug['counted']}")
 
         # 5. Shot Detection (Trajectory Analysis)
         # Round 2 fix: Only compute velocity on raw ball detections (not interpolated)
@@ -491,8 +512,9 @@ class AdvancedEventDetector:
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
                                 shooter = None
                             if shooter:
-                                # Debounce: Don't count same shot multiple times (~1 second window)
-                                shot_debounce = max(10, int(EFF_FPS))
+                                # Round 11 fix: Increased debounce from 1s to 5s (was EFF_FPS ≈ 8 frames)
+                                # V4 produced 85 shots at 1s debounce; real match ~10-15 per team
+                                shot_debounce = max(10, int(EFF_FPS * 5))
                                 recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < shot_debounce]
                                 if not recent:
                                     # Check if under pressure
@@ -662,8 +684,8 @@ class AdvancedEventDetector:
         # 3. Defensive (Tackles)
         # P0 fix: Deduplicate with section 1 tackles (dribble-based)
         # Only count tackles here for transitions NOT already handled by dribble logic
-        # Round 3 fix: Add per-player debounce (max 1 per 5s window) to prevent
-        # rapid tackle counting at lower VID_STRIDE
+        # Round 11 fix: Increased debounce from 5s to 15s. At 5s, V4 (482K frames)
+        # produced 302 tackles (real match ~25-35 total). 15s limits to ~1 per 15s per player.
         _last_tackle_frame_s3 = {}  # pid -> last frame a tackle was credited in section 3
         for i in range(len(segments) - 1):
              seg_a = segments[i]
@@ -677,9 +699,9 @@ class AdvancedEventDetector:
                  already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
                  if already_counted:
                      continue
-                 # Round 3 fix: Per-player debounce — max 1 tackle per 5s window
+                 # Round 11 fix: Per-player debounce — max 1 tackle per 15s window (was 5s)
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
-                 if end_frame - last_tkl < int(EFF_FPS * 5):
+                 if end_frame - last_tkl < int(EFF_FPS * 15):
                      continue
                  if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=DIST_TOUCH):
                      _last_tackle_frame_s3[p_b] = end_frame
