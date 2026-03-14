@@ -22,7 +22,7 @@ env:
 
   # ScoutBridge API
   SBG_BASE: "https://api-staging.scoutbridge.net/football-gallery/api"
-  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzAyMDk1MjIsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.WEEs2UqP2ecAF_uG4krTkTutVNzFhrWHrr5vFaC9y7s"
+  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzM2NDI0NzMsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.gBnQkyuSM6SKXSJuO-Dfme9EC1gM7_so7jX0rBU75oc"
 
 # Heuristics & Thresholds - OPTIMIZED FOR H100 (SPEED + QUALITY BALANCE)
 heuristics:

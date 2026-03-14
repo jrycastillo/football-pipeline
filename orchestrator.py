@@ -250,7 +250,7 @@ def fetch_pending_videos():
     
     try:
         while True:
-            resp = requests.get(f"{SBG_LIST_URL}?page={page}", headers=headers, timeout=10)
+            resp = requests.get(f"{SBG_LIST_URL}?page={page}&size=100", headers=headers, timeout=10)
             health.record_api_call(success=(resp.status_code == 200))
             
             if resp.status_code != 200:
