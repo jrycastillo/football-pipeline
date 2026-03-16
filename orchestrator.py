@@ -184,8 +184,14 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             cmd.extend(["--max_frames", str(max_frames)])
         if jnr_stride:
             cmd.extend(["--jnr_stride", str(jnr_stride)])
+        # Round 12 fix: Always pass --vid_stride from config if not explicitly provided.
+        # Previously, omitting --vid_stride caused pipeline to default to stride=1 (every frame),
+        # making processing 3x slower than intended and causing V4 (60fps) to timeout at 24h.
         if vid_stride:
             cmd.extend(["--vid_stride", str(vid_stride)])
+        else:
+            vid_stride_cfg = CONFIG.get("heuristics", {}).get("VID_STRIDE", 3)
+            cmd.extend(["--vid_stride", str(vid_stride_cfg)])
         if tracking_mode:
             cmd.extend(["--tracking_mode", tracking_mode])
             

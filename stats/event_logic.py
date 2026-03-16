@@ -235,10 +235,10 @@ class AdvancedEventDetector:
                     if not moved:
                         continue  # Standing still with opponent near → not a dribble
 
-                    # Round 11 fix: Increased dribble debounce from 1s to 3s per player
-                    # V4 produced 153 dribbles at 1s; real match ~1-5 per player
+                    # Round 12: Dribble cooldown 2s per player (was 3s R11, 1s R10)
+                    # 3s was too aggressive for V1/V2/V3; 2s balances V4 inflation vs undercounting
                     last_frame = last_dribble_frame.get(pid, -999)
-                    if t - last_frame > EFF_FPS * 3:  # 3 second gap between dribble events
+                    if t - last_frame > EFF_FPS * 2:  # 2 second gap between dribble events
                         last_dribble_frame[pid] = t
                         stats[pid]["dribbles"] += 1
                         dribble_debug_count += 1
@@ -503,9 +503,9 @@ class AdvancedEventDetector:
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
                                 shooter = None
                             if shooter:
-                                # Round 11 fix: Increased debounce from 1s to 5s (was EFF_FPS ≈ 8 frames)
-                                # V4 produced 85 shots at 1s debounce; real match ~10-15 per team
-                                shot_debounce = max(10, int(EFF_FPS * 5))
+                                # Round 12: Shot debounce 3s (was 5s R11, 1s R10)
+                                # 5s was too restrictive; 3s prevents rapid duplicate shots while counting real ones
+                                shot_debounce = max(10, int(EFF_FPS * 3))
                                 recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < shot_debounce]
                                 if not recent:
                                     # Check if under pressure
@@ -690,9 +690,10 @@ class AdvancedEventDetector:
                  already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
                  if already_counted:
                      continue
-                 # Round 11 fix: Per-player debounce — max 1 tackle per 15s window (was 5s)
+                 # Round 12: Tackle cooldown 8s per player (was 15s R11, 5s R10)
+                 # 15s too restrictive for V1/V2/V3; 8s allows realistic tackle frequency
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
-                 if end_frame - last_tkl < int(EFF_FPS * 15):
+                 if end_frame - last_tkl < int(EFF_FPS * 8):
                      continue
                  if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=DIST_TOUCH):
                      _last_tackle_frame_s3[p_b] = end_frame

@@ -98,18 +98,58 @@ class StatsEngine:
                 else:
                     unmapped[track_id] = stats_dict
 
-            # For each jersey, pick the primary track (highest weight)
+            # For each jersey, MERGE stats from all fragments:
+            # - Event stats (discrete occurrences): SUM across all fragments
+            #   (each fragment covers different time periods, so events are additive)
+            # - Accumulative stats (distance, frames): keep PRIMARY only
+            #   (overlapping fragments would double-count continuous metrics)
+            _EVENT_KEYS = {
+                "tackles", "tackles_successful", "shots_on_target",
+                "dribbles", "dribbles_successful",
+                "passes_total", "passes_complete",
+                "crosses_total", "crosses_complete",
+                "interceptions", "ball_interceptions_total",
+                "ball_recoveries_opp_half", "ball_recoveries_own_half",
+                "challenges_total", "challenges_won_total",
+                "goals", "goals_total", "goals_conceded",
+                "shots_saved_total",
+                "close_range_shots", "mid_range_shots", "long_range_shots",
+                "short_passes", "medium_passes", "long_passes",
+                "short_passes_accurate", "medium_passes_accurate", "long_passes_accurate",
+                "close_range_saves", "mid_range_saves", "long_range_saves",
+                "jumping_saves", "penalties_saved", "freekick_saved", "corners_saved",
+                "in_box_touches",
+                "xg_foot_no_opponent", "xg_foot_opponent_present", "expected_assists",
+                "fouls_total",
+            }
+
             for jersey_num, candidates in jersey_candidates.items():
                 if len(candidates) == 1:
                     _, stats_dict, _ = candidates[0]
                     remapped_stats[jersey_num] = stats_dict
                 else:
-                    # Pick the track with the most data
+                    # Sort by weight (most data first = primary)
                     candidates.sort(key=lambda x: x[2], reverse=True)
                     primary_tid, primary_stats, primary_w = candidates[0]
-                    remapped_stats[jersey_num] = primary_stats
-                    dropped = len(candidates) - 1
-                    print(f"[Phase 216] Jersey #{jersey_num}: picked track {primary_tid} (weight={primary_w:.0f}), dropped {dropped} duplicate track(s)")
+
+                    # Start with primary stats as base (keep defaultdict behavior)
+                    merged = defaultdict(int)
+                    merged.update(primary_stats)
+
+                    # Sum event stats from non-primary fragments
+                    recovered_events = 0
+                    for tid, stats_dict, w in candidates[1:]:
+                        for key in _EVENT_KEYS:
+                            if key in stats_dict:
+                                val = stats_dict[key]
+                                if isinstance(val, (int, float)) and val > 0:
+                                    merged[key] = merged.get(key, 0) + val
+                                    recovered_events += 1
+
+                    remapped_stats[jersey_num] = merged
+                    extra = len(candidates) - 1
+                    print(f"[Phase 216] Jersey #{jersey_num}: merged {extra+1} tracks "
+                          f"(primary={primary_tid}, recovered {recovered_events} events from {extra} fragment(s))")
 
             # Keep unmapped tracks as-is
             for track_id, stats_dict in unmapped.items():
