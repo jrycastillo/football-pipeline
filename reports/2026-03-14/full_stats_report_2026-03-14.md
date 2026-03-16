@@ -1,0 +1,229 @@
+# Full Player Stats Report — 2026-03-14
+
+**Pipeline:** Round 11 Event Logic Fixes (Tackle 15s, Shot 5s, Dribble 3s, Distance Dedup) | Commit `74d65cd`
+**Generated:** 2026-03-14 08:38 UTC
+**Status:** ⚠️ 3/4 Videos Completed (V4 Timeout — reprocessing locally)
+
+---
+
+## Summary
+
+| Video | File Size | Duration | FPS | Teams | Score | Passes | Tackles | Shots | Dribbles | Status |
+|-------|-----------|----------|-----|-------|-------|--------|---------|-------|----------|--------|
+| V1 `1e942f` | 1.3 GB | ~105 min | 30 | Green 19 / White 11 | 0-0 | 96 | 9 | 7 | 2 | ✅ |
+| V2 `82d037` | 1.4 GB | ~105 min | 30 | White 22 / Red 12 | 1-0 | 60 | 5 | 2 | 2 | ✅ |
+| V3 `e4d860` | 3.3 GB | ~100 min | 30 | Red 18 / White 9 | 0-1 | 283 | 20 | 10 | 3 | ✅ |
+| V4 `f56151` | 2.2 GB | 134 min | **60** | White 30 / Red 7 | 7-0 | — | — | — | — | ⏳ Processing |
+
+---
+
+## Round 11 vs Round 10 Changes
+
+| Metric | V1 R10 → R11 | V2 R10 → R11 | V3 R10 → R11 |
+|--------|-------------|-------------|-------------|
+| Passes | 96 → 96 | 60 → 60 | 283 → 283 |
+| Tackles | 10 → **9** (-1) | 5 → 5 | 21 → **20** (-1) |
+| Shots | 10 → **7** (-3) | 2 → 2 | 11 → **10** (-1) |
+| Dribbles | 2 → 2 | 2 → 2 | 3 → 3 |
+
+Changes are minimal as expected — the cooldown fixes primarily target V4's extreme inflation.
+
+---
+
+## Video 1 — `1e942fd8a6344bd` (1.3 GB)
+**File:** f4dbcb0a_2026-03-09-22-46-45337194.webm
+**User:** f4dbcb0a
+**Score:** Green 0  White 0
+**Match Totals:** Shots: 7 | xG: 0.07 | Passes: 96 | Tackles: 9 | Dribbles: 2 | Saves: 0
+
+### Team Green (19 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 1 | GK | 1598 | 222.0 | 243 | 29.16 | 0 | 7 | 0.07 | 1 | 16 | 68.8 | 0 | 0 | 6 | 2 |
+| 2 | Player | 160 | 7.6 | 28 | 3.36 | 0 | 1 | 0.01 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 3 | Player | 5930 | 920.4 | 46 | 5.52 | 0 | 0 | 0.00 | 0 | 6 | 50.0 | 1 | 0 | 0 | 0 |
+| 4 | Player | 1166 | 113.0 | 122 | 14.64 | 0 | 0 | 0.00 | 0 | 6 | 83.3 | 3 | 0 | 4 | 4 |
+| 5 | Player | 1792 | 354.2 | 92 | 11.04 | 0 | 0 | 0.00 | 0 | 3 | 33.3 | 0 | 0 | 0 | 0 |
+| 8 | Player | 2376 | 475.4 | 167 | 20.04 | 0 | 0 | 0.00 | 0 | 6 | 16.7 | 1 | 0 | 4 | 3 |
+| 10 | Player | 796 | 45.9 | 58 | 6.96 | 0 | 0 | 0.00 | 0 | 2 | 0.0 | 0 | 0 | 2 | 0 |
+| 11 | Player | 230 | 0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 15 | Player | 746 | 111.1 | 40 | 4.8 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 1 | 0 |
+| 17 | Player | 114 | 22.8 | 46 | 5.52 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 0 | 0 | 1 | 0 |
+| 18 | Player | 2270 | 435.6 | 102 | 12.24 | 0 | 0 | 0.00 | 0 | 3 | 33.3 | 2 | 1 | 1 | 1 |
+| 25 | Player | 134 | 28.1 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 27 | Player | 1006 | 0.0 | 2 | 0.24 | 0 | 0 | 0.00 | 0 | 1 | 0.0 | 0 | 0 | 1 | 1 |
+| 29 | Player | 542 | 45.6 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 30 | Player | 1126 | 139.4 | 59 | 7.08 | 0 | 1 | 0.01 | 0 | 4 | 100.0 | 1 | 0 | 1 | 1 |
+| 34 | Player | 246 | 0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 35 | Player | 4238 | 674.5 | 171 | 20.52 | 0 | 0 | 0.00 | 1 | 10 | 60.0 | 0 | 0 | 2 | 2 |
+| 44 | Player | 474 | 67.0 | 6 | 0.72 | 0 | 0 | 0.00 | 0 | 1 | 100.0 | 0 | 0 | 0 | 0 |
+| 62 | Player | 70 | 12.4 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+
+### Team White (11 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 6 | Player | 136 | 15.2 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 9 | Player | 2820 | 389.3 | 320 | 38.4 | 0 | 0 | 0.00 | 0 | 14 | 14.3 | 0 | 0 | 10 | 5 |
+| 13 | Player | 3530 | 570.1 | 76 | 9.12 | 0 | 0 | 0.00 | 0 | 12 | 66.7 | 0 | 0 | 4 | 3 |
+| 14 | Player | 3060 | 245.6 | 582 | 69.84 | 0 | 0 | 0.00 | 0 | 5 | 40.0 | 1 | 0 | 1 | 0 |
+| 22 | Player | 222 | 18.3 | 36 | 4.32 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 23 | Player | 38 | 2.6 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 24 | Player | 612 | 137.1 | 2 | 0.24 | 0 | 0 | 0.00 | 0 | 1 | 100.0 | 0 | 0 | 0 | 0 |
+| 33 | Player | 244 | 0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 36 | Player | 736 | 74.2 | 190 | 22.8 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 38 | Player | 316 | 59.5 | 32 | 3.84 | 0 | 1 | 0.01 | 0 | 4 | 100.0 | 1 | 0 | 1 | 0 |
+| 40 | Player | 240 | 57.1 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+
+---
+
+## Video 2 — `82d0374d58a8433` (1.4 GB)
+**File:** f4dbcb0a_2026-03-09-23-30-32696103.mp4
+**User:** f4dbcb0a
+**Score:** White 1  Red 0
+**Match Totals:** Shots: 2 | xG: 0.19 | Passes: 60 | Tackles: 5 | Dribbles: 2 | Saves: 0
+
+### Team White (22 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 1 | GK | 13702 | 21.9 | 310 | 37.2 | 0 | 1 | 0.01 | 0 | 13 | 100.0 | 0 | 0 | 0 | 0 |
+| 2 | Player | 418 | 5.9 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 3 | Player | 13644 | 6.1 | 120 | 14.4 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 4 | Player | 13732 | 17.1 | 208 | 24.96 | 0 | 0 | 0.00 | 0 | 1 | 0.0 | 0 | 0 | 1 | 1 |
+| 5 | Player | 4710 | 12.3 | 404 | 48.48 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 6 | Player | 10210 | 0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 9 | Player | 20978 | 1.0 | 2994 | 359.28 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 10 | Player | 292 | 10.0 | 78 | 9.36 | 0 | 0 | 0.00 | 0 | 1 | 0.0 | 0 | 0 | 1 | 1 |
+| 11 | Player | 224 | 7.7 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 13 | Player | 7046 | 4.4 | 405 | 48.6 | 0 | 0 | 0.00 | 0 | 3 | 100.0 | 0 | 0 | 0 | 0 |
+| 14 | Player | 7224 | 28.6 | 520 | 62.4 | 0 | 0 | 0.00 | 0 | 5 | 100.0 | 1 | 0 | 0 | 0 |
+| 15 | Player | 428 | 0.3 | 18 | 2.16 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 23 | Player | 226 | 14.1 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 25 | Player | 1006 | 36.5 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 28 | Player | 110 | 9.8 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 29 | Player | 2822 | 39.0 | 1747 | 209.64 | 0 | 0 | 0.00 | 0 | 23 | 100.0 | 1 | 0 | 0 | 0 |
+| 30 | Player | 8948 | 47.9 | 435 | 52.2 | 0 | 0 | 0.00 | 0 | 3 | 100.0 | 1 | 0 | 0 | 0 |
+| 33 | Player | 114 | 10.2 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 34 | Player | 30 | 0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 35 | Player | 20908 | 16.3 | 302 | 36.24 | 1 | 1 | 0.18 | 0 | 3 | 66.7 | 1 | 0 | 2 | 2 |
+| 38 | Player | 350 | 0.6 | 44 | 5.28 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 62 | Player | 5630 | 1.7 | 130 | 15.6 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+
+### Team Red (12 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 8 | Player | 1236 | 85.7 | 52 | 6.24 | 0 | 0 | 0.00 | 1 | 5 | 40.0 | 0 | 0 | 2 | 2 |
+| 17 | Player | 466 | 8.7 | 12 | 1.44 | 0 | 0 | 0.00 | 0 | 1 | 0.0 | 0 | 0 | 0 | 0 |
+| 18 | Player | 16834 | 13.2 | 310 | 37.2 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 1 | 0 | 0 | 0 |
+| 20 | Player | 222 | 1.0 | 26 | 3.12 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 22 | Player | 110 | 7.8 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 24 | Player | 772 | 66.4 | 16 | 1.92 | 0 | 0 | 0.00 | 1 | 1 | 100.0 | 0 | 0 | 0 | 0 |
+| 27 | Player | 80 | 1.1 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 31 | Player | 350 | 11.6 | 106 | 12.72 | 0 | 0 | 0.00 | 0 | 1 | 100.0 | 0 | 0 | 0 | 0 |
+| 36 | Player | 13644 | 17.5 | 116 | 13.92 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 40 | Player | 192 | 8.9 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 44 | Player | 236 | 7.7 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 56 | Player | 570 | 23.0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+
+---
+
+## Video 3 — `e4d860cc1e44468` (3.3 GB)
+**File:** f4dbcb0a_2026-03-09-23-01-11456234.webm
+**User:** f4dbcb0a
+**Score:** Red 0  White 1
+**Match Totals:** Shots: 10 | xG: 0.21 | Passes: 283 | Tackles: 20 | Dribbles: 3 | Saves: 0
+
+### Team Red (18 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 1 | GK | 4972 | 2.6 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 2 | Player | 472 | 77.4 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 3 | Player | 1658 | 243.7 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 5 | Player | 1954 | 335.2 | 20 | 2.4 | 0 | 0 | 0.00 | 0 | 1 | 100.0 | 1 | 0 | 1 | 1 |
+| 10 | Player | 1270 | 175.1 | 37 | 4.44 | 0 | 0 | 0.00 | 0 | 4 | 50.0 | 2 | 1 | 2 | 2 |
+| 15 | Player | 28 | 2.6 | 20 | 2.4 | 0 | 1 | 0.12 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 18 | Player | 13322 | 2064.8 | 116 | 13.92 | 0 | 0 | 0.00 | 1 | 28 | 42.9 | 1 | 0 | 10 | 9 |
+| 20 | Player | 1498 | 176.8 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 23 | Player | 708 | 51.6 | 115 | 13.8 | 0 | 0 | 0.00 | 0 | 6 | 16.7 | 0 | 0 | 3 | 0 |
+| 24 | Player | 1610 | 220.2 | 182 | 21.84 | 0 | 1 | 0.01 | 0 | 6 | 50.0 | 0 | 0 | 1 | 0 |
+| 25 | Player | 572 | 36.7 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 27 | Player | 1102 | 150.7 | 23 | 2.76 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 0 | 0 | 0 | 0 |
+| 29 | Player | 3508 | 396.6 | 69 | 8.28 | 0 | 0 | 0.00 | 0 | 10 | 70.0 | 3 | 0 | 3 | 3 |
+| 31 | Player | 1634 | 94.7 | 562 | 67.44 | 0 | 0 | 0.00 | 0 | 4 | 0.0 | 0 | 0 | 3 | 3 |
+| 33 | Player | 116 | 4.6 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 36 | Player | 2408 | 359.3 | 402 | 48.24 | 0 | 1 | 0.01 | 0 | 19 | 63.2 | 0 | 0 | 5 | 5 |
+| 55 | Player | 996 | 116.3 | 51 | 6.12 | 0 | 0 | 0.00 | 0 | 1 | 100.0 | 0 | 0 | 0 | 0 |
+| 62 | Player | 3296 | 526.1 | 197 | 23.64 | 0 | 2 | 0.02 | 0 | 21 | 66.7 | 1 | 0 | 6 | 6 |
+
+### Team White (9 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 4 | Player | 6142 | 1083.4 | 649 | 77.88 | 0 | 0 | 0.00 | 0 | 59 | 47.5 | 2 | 0 | 21 | 9 |
+| 8 | Player | 638 | 10.1 | 136 | 16.32 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 1 | 1 |
+| 9 | Player | 4012 | 621.4 | 265 | 31.8 | 0 | 0 | 0.00 | 1 | 34 | 44.1 | 2 | 0 | 11 | 8 |
+| 13 | Player | 2968 | 327.6 | 354 | 42.48 | 0 | 1 | 0.01 | 0 | 15 | 86.7 | 3 | 0 | 1 | 1 |
+| 14 | Player | 4750 | 713.2 | 167 | 20.04 | 0 | 0 | 0.00 | 0 | 20 | 55.0 | 3 | 2 | 5 | 5 |
+| 30 | Player | 5504 | 800.5 | 83 | 9.96 | 0 | 0 | 0.00 | 1 | 14 | 71.4 | 0 | 0 | 4 | 4 |
+| 35 | Player | 6144 | 1065.3 | 428 | 51.36 | 0 | 4 | 0.04 | 0 | 35 | 45.7 | 2 | 1 | 12 | 11 |
+| 38 | Player | 580 | 104.5 | 19 | 2.28 | 0 | 0 | 0.00 | 0 | 1 | 0.0 | 0 | 0 | 1 | 1 |
+| 40 | Player | 1400 | 282.9 | 42 | 5.04 | 1 | 1 | 0.01 | 0 | 3 | 0.0 | 1 | 0 | 2 | 2 |
+
+---
+
+## Video 4 — `f561510bde5e4ca` (2.2 GB)
+**File:** 3235879b_2026-03-10-02-10-20767443.mp4
+**User:** 3235879b
+**Status:** ⏳ **Processing locally on M4 Pro — ETA March 17, ~07:30 AM**
+
+### Round 10 Reference (before Round 11 fixes)
+**Score:** White 7  Red 0
+**Match Totals:** Shots: 85 | xG: 0.98 | Passes: 1582 | Tackles: 302 | Dribbles: 153 | Saves: 0
+**Teams:** White 30 / Red 7 (severely imbalanced)
+
+### Why V4 Failed on H100
+- Video is **60fps** (all others are 30fps) — 2x more frames per second
+- Duration is **134 minutes** (others are 100-105 min)
+- Total: **482,880 frames** vs ~180,000 for other videos
+- The orchestrator did not pass `--vid_stride` to the pipeline, so it defaulted to stride=1 (every frame)
+- Estimated time at stride=1: **~47 hours** — exceeded the 24-hour timeout
+
+### Expected Round 11 Impact on V4
+| Stat | Round 10 | Expected Round 11 |
+|------|----------|-------------------|
+| Passes | 1,582 | ~1,582 (unchanged — inflation caused by team imbalance, not event frequency) |
+| Tackles | 302 | ~30-80 (15s cooldown fix) |
+| Shots | 85 | ~10-25 (5s debounce fix) |
+| Dribbles | 153 | ~20-50 (3s cooldown fix) |
+
+*V4 full per-player stats will be added when local processing completes.*
+
+---
+
+## Known Issues
+
+1. **V2 Distance Bug**: Players with 10K-20K observations show 1-20m total distance. Root cause: duplicate PIDs per frame from `finalize_bindings`. Round 11 includes the distance dedup fix — **V2 distances should improve on next reprocessing with proper stride.**
+
+2. **Team Imbalance (all videos)**: V1: 19/11, V2: 22/12, V3: 18/9, V4: 30/7. The pipeline assigns too many players to one team. V4's 30/7 split is the worst and directly causes pass inflation. This will be addressed in a future round.
+
+3. **Processing Speed**: All H100 runs used stride=1 instead of stride=3 due to a missing CLI argument in the orchestrator. Fix: pass `--vid_stride` from config. This would reduce processing time from 15-17 hrs to ~5-6 hrs per video.
+
+---
+
+## Legend
+| Col | Meaning |
+|-----|---------|
+| # | Jersey number |
+| Pos | Position |
+| Obs | Frames seen |
+| Dist | Distance (m) |
+| Touch | Ball touches |
+| ToB | Time on ball (s) |
+| G | Goals |
+| S | Shots |
+| xG | Expected Goals |
+| Drb | Dribbles |
+| Pass | Passes |
+| P% | Pass accuracy (%) |
+| Tkl | Tackles |
+| Chal | Challenges |
+| Int | Interceptions |
+| Rec | Ball recoveries (opp half) |
