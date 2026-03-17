@@ -2,7 +2,7 @@
 
 **Pipeline:** Round 11 Event Logic Fixes (Tackle 15s, Shot 5s, Dribble 3s, Distance Dedup) | Commit `74d65cd`
 **Generated:** 2026-03-14 08:38 UTC
-**Status:** ⚠️ 3/4 Videos Completed (V4 Timeout — reprocessing locally)
+**Status:** ✅ 4/4 Videos Completed
 
 ---
 
@@ -13,7 +13,7 @@
 | V1 `1e942f` | 1.3 GB | ~105 min | 30 | Green 19 / White 11 | 0-0 | 96 | 9 | 7 | 2 | ✅ |
 | V2 `82d037` | 1.4 GB | ~105 min | 30 | White 22 / Red 12 | 1-0 | 60 | 5 | 2 | 2 | ✅ |
 | V3 `e4d860` | 3.3 GB | ~100 min | 30 | Red 18 / White 9 | 0-1 | 283 | 20 | 10 | 3 | ✅ |
-| V4 `f56151` | 2.2 GB | 134 min | **60** | White 30 / Red 7 | 7-0 | — | — | — | — | ⏳ Processing |
+| V4 `f56151` | 2.2 GB | 134 min | **60** | White 17 / Red 19 | 2-0 | 114 | 20 | 8 | 8 | ✅ |
 
 ---
 
@@ -172,29 +172,63 @@ Changes are minimal as expected — the cooldown fixes primarily target V4's ext
 ## Video 4 — `f561510bde5e4ca` (2.2 GB)
 **File:** 3235879b_2026-03-10-02-10-20767443.mp4
 **User:** 3235879b
-**Status:** ⏳ **Processing locally on M4 Pro — ETA March 17, ~07:30 AM**
+**Score:** White 2  Red 0
+**Match Totals:** Shots: 8 | xG: 0.34 | Passes: 114 | Tackles: 20 | Dribbles: 8 | Saves: 0
+**Processed locally on M4 Pro** (stride=7 for 60fps, ~19 hrs)
 
-### Round 10 Reference (before Round 11 fixes)
-**Score:** White 7  Red 0
-**Match Totals:** Shots: 85 | xG: 0.98 | Passes: 1582 | Tackles: 302 | Dribbles: 153 | Saves: 0
-**Teams:** White 30 / Red 7 (severely imbalanced)
+### Round 10 → Round 11 Comparison
+| Stat | Round 10 | Round 11 | Change |
+|------|----------|----------|--------|
+| Teams | White 30 / Red 7 | White 17 / Red 19 | ✅ Balanced |
+| Passes | 1,582 | 114 | -93% (team balance fix) |
+| Tackles | 302 | 20 | -93% (15s cooldown) |
+| Shots | 85 | 8 | -91% (5s debounce) |
+| Dribbles | 153 | 8 | -95% (3s cooldown) |
+| Score | 7-0 | 2-0 | Realistic |
 
-### Why V4 Failed on H100
-- Video is **60fps** (all others are 30fps) — 2x more frames per second
-- Duration is **134 minutes** (others are 100-105 min)
-- Total: **482,880 frames** vs ~180,000 for other videos
-- The orchestrator did not pass `--vid_stride` to the pipeline, so it defaulted to stride=1 (every frame)
-- Estimated time at stride=1: **~47 hours** — exceeded the 24-hour timeout
+### Team White (17 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 1 | GK | 300 | 78.9 | 2 | 0.24 | 0 | 0 | 0.00 | 1 | 1 | 100.0 | 1 | 1 | 0 | 0 |
+| 3 | Player | 286 | 30.4 | 29 | 3.48 | 0 | 0 | 0.00 | 0 | 3 | 66.7 | 0 | 0 | 2 | 2 |
+| 4 | Player | 328 | 52.0 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 5 | Player | 466 | 85.5 | 37 | 4.44 | 0 | 0 | 0.00 | 0 | 8 | 50.0 | 0 | 0 | 2 | 1 |
+| 8 | Player | 230 | 35.4 | 15 | 1.8 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 0 | 0 | 1 | 1 |
+| 9 | Player | 230 | 48.4 | 29 | 3.48 | 0 | 0 | 0.00 | 1 | 4 | 75.0 | 2 | 1 | 2 | 1 |
+| 11 | Player | 134 | 1.5 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 13 | Player | 1412 | 40.2 | 6 | 0.72 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 0 | 0 | 1 | 1 |
+| 16 | Player | 328 | 84.7 | 37 | 4.44 | 0 | 0 | 0.00 | 0 | 8 | 50.0 | 2 | 0 | 1 | 1 |
+| 17 | Player | 306 | 72.4 | 27 | 3.24 | 0 | 1 | 0.01 | 0 | 9 | 66.7 | 1 | 0 | 3 | 0 |
+| 18 | Player | 458 | 98.5 | 30 | 3.6 | 0 | 0 | 0.00 | 1 | 3 | 100.0 | 1 | 1 | 1 | 0 |
+| 19 | Player | 138 | 23.6 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 29 | Player | 236 | 75.5 | 9 | 1.08 | 1 | 1 | 0.01 | 0 | 2 | 0.0 | 0 | 0 | 1 | 0 |
+| 30 | Player | 360 | 70.4 | 27 | 3.24 | 1 | 1 | 0.02 | 0 | 3 | 66.7 | 0 | 0 | 1 | 0 |
+| 33 | Player | 176 | 20.8 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 35 | Player | 480 | 103.2 | 57 | 6.84 | 0 | 0 | 0.00 | 0 | 9 | 33.3 | 2 | 0 | 3 | 2 |
+| 38 | Player | 396 | 116.1 | 23 | 2.76 | 0 | 0 | 0.00 | 1 | 6 | 83.3 | 0 | 0 | 1 | 0 |
 
-### Expected Round 11 Impact on V4
-| Stat | Round 10 | Expected Round 11 |
-|------|----------|-------------------|
-| Passes | 1,582 | ~1,582 (unchanged — inflation caused by team imbalance, not event frequency) |
-| Tackles | 302 | ~30-80 (15s cooldown fix) |
-| Shots | 85 | ~10-25 (5s debounce fix) |
-| Dribbles | 153 | ~20-50 (3s cooldown fix) |
-
-*V4 full per-player stats will be added when local processing completes.*
+### Team Red (19 players)
+| # | Pos | Obs | Dist | Touch | ToB | G | S | xG | Drb | Pass | P% | Tkl | Chal | Int | Rec |
+|---|-----|-----|------|-------|-----|---|---|----|-----|------|----|-----|------|-----|-----|
+| 2 | Player | 102 | 14.5 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 6 | Player | 166 | 45.9 | 8 | 0.96 | 0 | 1 | 0.01 | 0 | 4 | 75.0 | 0 | 0 | 1 | 1 |
+| 10 | Player | 360 | 111.4 | 9 | 1.08 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 1 | 0 | 1 | 0 |
+| 14 | Player | 562 | 144.7 | 75 | 9.0 | 0 | 0 | 0.00 | 4 | 12 | 16.7 | 4 | 3 | 4 | 4 |
+| 15 | Player | 200 | 57.8 | 6 | 0.72 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 0 | 0 | 1 | 1 |
+| 20 | Player | 144 | 39.6 | 43 | 5.16 | 0 | 1 | 0.01 | 0 | 7 | 57.1 | 2 | 0 | 1 | 1 |
+| 21 | Player | 74 | 19.7 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 22 | Player | 322 | 60.5 | 15 | 1.8 | 0 | 0 | 0.00 | 0 | 4 | 25.0 | 1 | 1 | 2 | 1 |
+| 23 | Player | 340 | 9.2 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 24 | Player | 380 | 109.5 | 2 | 0.24 | 0 | 0 | 0.00 | 0 | 1 | 0.0 | 0 | 1 | 1 | 1 |
+| 25 | Player | 270 | 54.8 | 3 | 0.36 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 1 | 1 | 0 | 0 |
+| 27 | Player | 244 | 56.0 | 3 | 0.36 | 0 | 0 | 0.00 | 0 | 2 | 50.0 | 0 | 0 | 2 | 2 |
+| 28 | Player | 134 | 32.1 | 2 | 0.24 | 0 | 0 | 0.00 | 0 | 1 | 100.0 | 0 | 0 | 0 | 0 |
+| 31 | Player | 418 | 113.6 | 28 | 3.36 | 0 | 1 | 0.01 | 0 | 3 | 100.0 | 1 | 0 | 1 | 1 |
+| 36 | Player | 324 | 41.1 | 107 | 12.84 | 0 | 2 | 0.27 | 0 | 7 | 85.7 | 1 | 1 | 1 | 1 |
+| 40 | Player | 222 | 48.2 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 44 | Player | 26 | 4.7 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
+| 50 | Player | 146 | 22.9 | 34 | 4.08 | 0 | 0 | 0.00 | 0 | 7 | 71.4 | 0 | 0 | 1 | 0 |
+| 62 | Player | 278 | 1.9 | 0 | 0.0 | 0 | 0 | 0.00 | 0 | 0 | 0.0 | 0 | 0 | 0 | 0 |
 
 ---
 
@@ -202,7 +236,7 @@ Changes are minimal as expected — the cooldown fixes primarily target V4's ext
 
 1. **V2 Distance Bug**: Players with 10K-20K observations show 1-20m total distance. Root cause: duplicate PIDs per frame from `finalize_bindings`. Round 11 includes the distance dedup fix — **V2 distances should improve on next reprocessing with proper stride.**
 
-2. **Team Imbalance (all videos)**: V1: 19/11, V2: 22/12, V3: 18/9, V4: 30/7. The pipeline assigns too many players to one team. V4's 30/7 split is the worst and directly causes pass inflation. This will be addressed in a future round.
+2. **Team Imbalance (V1-V3)**: V1: 19/11, V2: 22/12, V3: 18/9. The pipeline assigns too many players to one team. V4 improved to 17/19 with stride=7 processing. V1-V3 may improve with correct stride=3 on reprocessing.
 
 3. **Processing Speed**: All H100 runs used stride=1 instead of stride=3 due to a missing CLI argument in the orchestrator. Fix: pass `--vid_stride` from config. This would reduce processing time from 15-17 hrs to ~5-6 hrs per video.
 
