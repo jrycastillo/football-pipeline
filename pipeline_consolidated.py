@@ -1827,8 +1827,10 @@ if __name__ == "__main__":
     pitch_manager = PitchManager(model_path=CONFIG['env']['POSE_WEIGHTS'], device=get_device().type)
     camera = Camera(pitch_manager.H_default)
     
-    player_model = YOLO(CONFIG['env']['DET_WEIGHTS'])
-    ball_model = YOLO(CONFIG['env']['BALL_MODEL_PATH'])
+    _device = get_device().type  # cuda > mps > cpu
+    player_model = YOLO(CONFIG['env']['DET_WEIGHTS']).to(_device)
+    ball_model = YOLO(CONFIG['env']['BALL_MODEL_PATH']).to(_device)
+    log(f"🚀 [Device] Models loaded on: {_device}")
     loader = ThreadedVideoReader(video_path)
     time.sleep(1.0)
     
@@ -1913,7 +1915,7 @@ if __name__ == "__main__":
             
             try:
                 # 1. Detect Players (Original Params)
-                det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], verbose=False)[0]
+                det_res = player_model(f, classes=[1, 2, 3], conf=CONFIG["heuristics"]["DET_CONF"], imgsz=CONFIG["heuristics"].get("DET_IMG_SIZE", 640), device=_device, verbose=False)[0]
                     
                 if det_res.boxes is not None and len(det_res.boxes) > 0:
                     # Ensure CPU for tracker
