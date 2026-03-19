@@ -276,6 +276,10 @@ class AdvancedEventDetector:
         # Round 2 fix: Interception debounce — max 1 per player per 3-second window
         _last_interception_frame = {}  # pid -> last frame an interception was credited
 
+        # Round 14: Minimum ownership duration to count as pass origin
+        # Rapid ownership switching (<0.3s) in crowded areas creates false passes
+        MIN_OWN_FRAMES = max(2, int(EFF_FPS * 0.3))  # ~2-3 frames at stride=3
+
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
             seg_b = non_none_segments[i+1]
@@ -284,6 +288,12 @@ class AdvancedEventDetector:
             p_b = seg_b["pid"]
 
             if p_a == p_b: continue
+
+            # Round 14: Skip if passer held ball for less than 0.3s (noise)
+            seg_a_duration = seg_a["end"] - seg_a["start"]
+            if seg_a_duration < MIN_OWN_FRAMES:
+                continue
+
             _pass_debug["transitions"] += 1
 
             # Max gap check: Don't count as pass if gap > 3 seconds (ball out of play)
@@ -688,11 +698,14 @@ class AdvancedEventDetector:
                  already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
                  if already_counted:
                      continue
-                 # Round 13: Tackle cooldown 5s per player (R8 baseline)
+                 # Round 14: Tackle cooldown 3s per player (lowered from 5s)
+                 # MPS produces fewer proximity events so 5s was too strict
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
-                 if end_frame - last_tkl < int(EFF_FPS * 5):
+                 if end_frame - last_tkl < int(EFF_FPS * 3):
                      continue
-                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=DIST_TOUCH):
+                 # Round 14: Widen proximity from DIST_TOUCH (5m) to 7m
+                 # Stride=3 causes 6-9m player movement between frames
+                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=7.0):
                      _last_tackle_frame_s3[p_b] = end_frame
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1

@@ -228,11 +228,12 @@ class StatsEngine:
             minutes_played = (total_frames / EFF_FPS) / 60.0
             seconds_played = (total_frames / EFF_FPS)
             
-            # Strict Filter: < 3.0 Seconds -> DELETE (Task 3)
-            # User request: "Delete ANY player object that has total_time_on_pitch < 3.0 seconds."
+            # Strict Filter: < 1.5 Seconds -> DELETE
+            # Round 14: Lowered from 3.0s to 1.5s to recover White team players
+            # that have short tracks due to lower MPS detection confidence.
             # EXCEPTION: If they scored a goal, KEEP THEM!
             goals_detected = raw_stats.get(id_key, {}).get("goals", 0)
-            if seconds_played < 3.0 and goals_detected == 0:
+            if seconds_played < 1.5 and goals_detected == 0:
                 # print(f"Skipping {id_key} (played {seconds_played:.2f}s)")
                 continue
 
@@ -445,7 +446,21 @@ class StatsEngine:
                 if "Unknown" not in formatted_stats[final_key]["player_name"]:
                      formatted_stats[final_key]["player_name"] = f"Unknown Player {final_key}"
                 pass # KEEP EVERYONE
-            
+
+        # Round 14: Filter ghost players — high observations but zero stats
+        # These are detection artifacts (billboards, sideline people, camera glitches)
+        ghost_keys = []
+        for key, pdata in formatted_stats.items():
+            obs = pdata.get("observations", 0)
+            st = pdata.get("stats", {})
+            dist = st.get("total_distance", 0)
+            touches = st.get("touch_frames", 0)
+            passes = st.get("passes_total", 0)
+            if obs > 200 and dist == 0 and touches == 0 and passes == 0:
+                ghost_keys.append(key)
+        for key in ghost_keys:
+            del formatted_stats[key]
+
         return formatted_stats, events
 
     def _cluster_teams(self, id_manager, player_dominant_classes=None, match_kits=None, siglip_teams=None):
