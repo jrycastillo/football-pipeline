@@ -3,7 +3,7 @@
 
 # Environment Settings
 env:
-  SRC_VIDEO: "test_videos/clipped_ikorudo_tornadoes.mp4"
+  SRC_VIDEO: "test_videos/v1_1e942fd8a6344bd.webm"
   DET_WEIGHTS: "models/yolo_player.pt"
   POSE_WEIGHTS: "models/yolo_pitch.pt"
   JNR_WEIGHTS: "models/resnet34_rgb_jnr.pt"
@@ -22,7 +22,7 @@ env:
 
   # ScoutBridge API
   SBG_BASE: "https://api-staging.scoutbridge.net/football-gallery/api"
-  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzM2NDI0NzMsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.gBnQkyuSM6SKXSJuO-Dfme9EC1gM7_so7jX0rBU75oc"
+  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzQzNDQzMTEsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.Y2fPbgUPxlKX6xbmbuJzYc_SXI_7rO47rN0LAPKQvdk"
 
 # Heuristics & Thresholds - OPTIMIZED FOR H100 (SPEED + QUALITY BALANCE)
 heuristics:

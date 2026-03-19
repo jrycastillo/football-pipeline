@@ -123,7 +123,11 @@ class StatsEngine:
                 "fouls_total",
             }
 
-            _MERGE_MAX_FRAGMENTS = 5  # Only sum events when <=5 fragments; above = pick-primary
+            # Round 13: Top-N merge — always sum events from top N fragments by weight.
+            # This recovers events from significant fragments without summing all 1500.
+            # R8 had no pick-primary and summed everything; pick-primary (R9-R12) was too aggressive
+            # and discarded 95%+ of events. Top-N is the middle ground.
+            _MERGE_TOP_N = 5  # Sum events from primary + top 4 fragments
             for jersey_num, candidates in jersey_candidates.items():
                 if len(candidates) == 1:
                     _, stats_dict, _ = candidates[0]
@@ -133,27 +137,24 @@ class StatsEngine:
                     candidates.sort(key=lambda x: x[2], reverse=True)
                     primary_tid, primary_stats, primary_w = candidates[0]
 
-                    if len(candidates) <= _MERGE_MAX_FRAGMENTS:
-                        # Small number of fragments — safe to sum events
-                        merged = defaultdict(int)
-                        merged.update(primary_stats)
-                        recovered_events = 0
-                        for tid, stats_dict, w in candidates[1:]:
-                            for key in _EVENT_KEYS:
-                                if key in stats_dict:
-                                    val = stats_dict[key]
-                                    if isinstance(val, (int, float)) and val > 0:
-                                        merged[key] = merged.get(key, 0) + val
-                                        recovered_events += 1
-                        remapped_stats[jersey_num] = merged
-                        extra = len(candidates) - 1
-                        print(f"[Phase 216] Jersey #{jersey_num}: smart-merged {extra+1} tracks "
-                              f"(primary={primary_tid}, recovered {recovered_events} events from {extra} fragment(s))")
-                    else:
-                        # Too many fragments — pick-primary only (summing would inflate)
-                        remapped_stats[jersey_num] = primary_stats
-                        print(f"[Phase 216] Jersey #{jersey_num}: pick-primary from {len(candidates)} tracks "
-                              f"(primary={primary_tid}, {len(candidates)-1} fragments skipped — too many to merge)")
+                    # Take top N fragments for event merging
+                    merge_candidates = candidates[:_MERGE_TOP_N]
+                    merged = defaultdict(int)
+                    merged.update(primary_stats)
+                    recovered_events = 0
+                    for tid, stats_dict, w in merge_candidates[1:]:
+                        for key in _EVENT_KEYS:
+                            if key in stats_dict:
+                                val = stats_dict[key]
+                                if isinstance(val, (int, float)) and val > 0:
+                                    merged[key] = merged.get(key, 0) + val
+                                    recovered_events += 1
+                    remapped_stats[jersey_num] = merged
+                    extra = len(merge_candidates) - 1
+                    skipped = len(candidates) - len(merge_candidates)
+                    print(f"[Phase 216] Jersey #{jersey_num}: top-{len(merge_candidates)} merged "
+                          f"(primary={primary_tid}, recovered {recovered_events} events from {extra} fragment(s), "
+                          f"{skipped} minor fragments skipped)")
 
             # Keep unmapped tracks as-is
             for track_id, stats_dict in unmapped.items():
