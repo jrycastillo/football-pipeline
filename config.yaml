@@ -3,7 +3,7 @@
 
 # Environment Settings
 env:
-  SRC_VIDEO: "test_videos/v1_1e942fd8a6344bd.webm"
+  SRC_VIDEO: "test_videos/g5718885-fullhd.mp4"
   DET_WEIGHTS: "models/yolo_player.pt"
   POSE_WEIGHTS: "models/yolo_pitch.pt"
   JNR_WEIGHTS: "models/resnet34_rgb_jnr.pt"

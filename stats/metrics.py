@@ -447,19 +447,8 @@ class StatsEngine:
                      formatted_stats[final_key]["player_name"] = f"Unknown Player {final_key}"
                 pass # KEEP EVERYONE
 
-        # Round 14: Filter ghost players — high observations but zero stats
-        # These are detection artifacts (billboards, sideline people, camera glitches)
-        ghost_keys = []
-        for key, pdata in formatted_stats.items():
-            obs = pdata.get("observations", 0)
-            st = pdata.get("stats", {})
-            dist = st.get("total_distance", 0)
-            touches = st.get("touch_frames", 0)
-            passes = st.get("passes_total", 0)
-            if obs > 200 and dist == 0 and touches == 0 and passes == 0:
-                ghost_keys.append(key)
-        for key in ghost_keys:
-            del formatted_stats[key]
+        # Round 15: Ghost filter removed — was deleting White team players
+        # and worsening team imbalance (14G/5W). Keep all players in output.
 
         return formatted_stats, events
 
@@ -766,16 +755,70 @@ class StatsEngine:
 
             print(f"[ReID Fix] team_map now has {len(self.team_map)} entries (jersey + track IDs)")
 
-            # Round 3 fix: Warn on team size imbalance (indicates clustering errors)
+            # Round 15: Team rebalancing when ratio > 2:1
+            # MPS color classifier misclassifies White as Green, causing 14G/5W.
+            # Move lowest-observation players from larger team to smaller team
+            # until ratio is <= 1.5:1 or teams are equal.
             size_a = len(team_a_jerseys)
             size_b = len(team_b_jerseys)
             if size_a > 0 and size_b > 0:
                 ratio = max(size_a, size_b) / min(size_a, size_b)
-                if ratio > 1.8:
+                if ratio > 2.0:
                     print(f"[Team] WARNING: Team size imbalance detected! "
                           f"{team_a_color}={size_a}, {team_b_color}={size_b} (ratio {ratio:.1f}:1). "
-                          f"This will corrupt pass accuracy and interception stats. "
-                          f"Check color classifier output.")
+                          f"Attempting rebalance...")
+
+                    # Identify which team is larger
+                    if size_a > size_b:
+                        big_color, small_color = team_a_color, team_b_color
+                        big_jerseys, small_jerseys = team_a_jerseys, team_b_jerseys
+                    else:
+                        big_color, small_color = team_b_color, team_a_color
+                        big_jerseys, small_jerseys = team_b_jerseys, team_a_jerseys
+
+                    # Get observation counts for players in the bigger team
+                    # Players with fewest observations are most likely misclassified
+                    jersey_obs = {}
+                    if hasattr(id_manager, 'jersey_registry'):
+                        for j in big_jerseys:
+                            reg = id_manager.jersey_registry.get(j, {})
+                            jersey_obs[j] = reg.get("observations", 0) if isinstance(reg, dict) else 0
+                    if not jersey_obs:
+                        # Fallback: use player_colors observation counts
+                        for j in big_jerseys:
+                            jersey_obs[j] = 0
+
+                    # Sort by observations (fewest first = most likely misclassified)
+                    sorted_big = sorted(big_jerseys, key=lambda j: jersey_obs.get(j, 0))
+
+                    # Move players until ratio <= 1.5:1 or equal
+                    moved = []
+                    while len(sorted_big) > len(small_jerseys) and len(sorted_big) - len(small_jerseys) > 2:
+                        # Don't move GKs (jersey #1 or dominant_class == 1)
+                        candidate = sorted_big[0]
+                        if candidate == 1 or jersey_classes.get(candidate, 2) == 1:
+                            sorted_big = sorted_big[1:]
+                            continue
+                        # Move candidate to smaller team
+                        sorted_big.pop(0)
+                        small_jerseys.append(candidate)
+                        self.team_map[str(candidate)] = small_color.capitalize()
+                        moved.append(candidate)
+                        # Check if balanced enough
+                        new_ratio = max(len(sorted_big), len(small_jerseys)) / max(1, min(len(sorted_big), len(small_jerseys)))
+                        if new_ratio <= 1.5:
+                            break
+
+                    if moved:
+                        print(f"[Team] Rebalanced: moved jerseys {moved} from {big_color} to {small_color}")
+                        print(f"[Team] New sizes: {big_color}={len(sorted_big)}, {small_color}={len(small_jerseys)}")
+                        # Update the jersey lists
+                        if size_a > size_b:
+                            team_a_jerseys = sorted_big
+                            team_b_jerseys = small_jerseys
+                        else:
+                            team_b_jerseys = sorted_big
+                            team_a_jerseys = small_jerseys
 
             # Helper for the rest
             self.primary_teams = {team_a_color.capitalize(), team_b_color.capitalize()}

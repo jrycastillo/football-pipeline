@@ -276,9 +276,10 @@ class AdvancedEventDetector:
         # Round 2 fix: Interception debounce — max 1 per player per 3-second window
         _last_interception_frame = {}  # pid -> last frame an interception was credited
 
-        # Round 14: Minimum ownership duration to count as pass origin
-        # Rapid ownership switching (<0.3s) in crowded areas creates false passes
-        MIN_OWN_FRAMES = max(2, int(EFF_FPS * 0.3))  # ~2-3 frames at stride=3
+        # Round 15: Minimum ownership duration to count as pass origin
+        # Rapid ownership switching in crowded areas creates false passes
+        # Lowered from 0.3s to 0.15s to recover real short passes
+        MIN_OWN_FRAMES = max(2, int(EFF_FPS * 0.15))  # ~1-2 frames at stride=3
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
