@@ -25,15 +25,15 @@ DIST_TOUCH = 5.0  # Increased for better possession detection
 DIST_DRIBBLE_OPP = 3.0  # Phase 195: Increased from 2.0 to 3.0m for more dribble detection
 DIST_PASS_MIN = 1.0  # Reduced to 1m to capture short/lateral passes (was 2.0m)
 TIME_DRIBBLE_RETAIN = 1.5  # Phase 195: Reduced from 2.0s to 1.5s for quicker dribble success
-SHOT_SPEED_THRESHOLD = 12.0  # P2 fix: Raised from 8 to 12 m/s (43 km/h) — 8 m/s catches fast passes
+SHOT_SPEED_THRESHOLD = 10.0  # Round 17: 10 m/s (36 km/h) — true speed with corrected camera
 
 def bbox_center(xyxy):
     x1, y1, x2, y2 = xyxy
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
 class AdvancedEventDetector:
-    def __init__(self):
-        self.camera = Camera() # Default Homography
+    def __init__(self, frame_width=None, frame_height=None):
+        self.camera = Camera(frame_width=frame_width, frame_height=frame_height)
         
     def calculate_ownership(self, player_tracks, ball_track):
         """
@@ -207,6 +207,29 @@ class AdvancedEventDetector:
                  s["dominant_class"] = dom_cls
             else:
                  s["dominant_class"] = 2 # Default Player
+
+        # Round 16: Infer team attack directions for goal attribution validation
+        # Team with lower avg_x attacks right goal (105m), higher avg_x attacks left (0m)
+        self._team_attack_direction = {}  # team_name -> goal_x
+        if team_map:
+            team_sum_x = defaultdict(float)
+            team_count = defaultdict(int)
+            for pid, s in stats.items():
+                if s.get("pos_count", 0) > 10:
+                    team_name = team_map.get(str(pid))
+                    if team_name and team_name != "Unknown":
+                        team_sum_x[team_name] += s.get("avg_x", 52.5)
+                        team_count[team_name] += 1
+            team_avg_x = {}
+            for tn in team_sum_x:
+                if team_count[tn] > 0:
+                    team_avg_x[tn] = team_sum_x[tn] / team_count[tn]
+            if len(team_avg_x) >= 2:
+                sorted_teams = sorted(team_avg_x.items(), key=lambda x: x[1])
+                self._team_attack_direction[sorted_teams[0][0]] = 105.0
+                self._team_attack_direction[sorted_teams[1][0]] = 0.0
+                print(f"[GoalDir] {sorted_teams[0][0]} attacks RIGHT (avg_x={sorted_teams[0][1]:.1f}), "
+                      f"{sorted_teams[1][0]} attacks LEFT (avg_x={sorted_teams[1][1]:.1f})")
 
         # 1. Possession & Dribbling
         # P0 fix: Track tackle frames from section 1 to prevent double-counting in section 3
@@ -514,7 +537,8 @@ class AdvancedEventDetector:
                                 shooter = None
                             if shooter:
                                 # Round 13: Shot debounce 1s (R8 baseline)
-                                shot_debounce = max(10, int(EFF_FPS * 1))
+                                # Round 16: Shot debounce 2s (was 1s) to reduce over-count
+                                shot_debounce = max(10, int(EFF_FPS * 2))
                                 recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < shot_debounce]
                                 if not recent:
                                     # Check if under pressure
@@ -569,17 +593,45 @@ class AdvancedEventDetector:
                                         if ball_track[k]:
                                             mk = self.camera.project_point(ball_track[k][0], ball_track[k][1])
                                             # Check correct goal based on shot direction
-                                            if moving_right and mk[0] > 105.0 and (30.34 < mk[1] < 37.66):
+                                            # Round 17: Tolerance for goal line — with correct camera scaling,
+                                            # pitch boundaries are exact (0-105m), ball can't exceed them.
+                                            # Also widened Y range for goal mouth detection.
+                                            if moving_right and mk[0] > 103.0 and (28.0 < mk[1] < 40.0):
                                                 goal_confirmed = True
                                                 break
-                                            elif moving_left and mk[0] < 0.0 and (30.34 < mk[1] < 37.66):
+                                            elif moving_left and mk[0] < 2.0 and (28.0 < mk[1] < 40.0):
                                                 goal_confirmed = True
                                                 break
 
                                     if goal_confirmed:
-                                        stats[shooter]["goals"] += 1
-                                        stats[shooter]["goals_total"] += 1 # Sync name
-                                        events.append({"type": "goal", "player": shooter, "frame": i, "assist": None})
+                                        # Round 16: Validate shooter's team attacks this goal
+                                        correct_shooter = shooter
+                                        if team_map and self._team_attack_direction:
+                                            shooter_team = team_map.get(str(shooter))
+                                            expected_goal = self._team_attack_direction.get(shooter_team)
+                                            actual_goal = 105.0 if moving_right else 0.0
+                                            if expected_goal is not None and expected_goal != actual_goal:
+                                                # Mismatch: find nearest player from attacking team
+                                                atk_teams = [t for t, g in self._team_attack_direction.items() if g == actual_goal]
+                                                if atk_teams and i < len(player_tracks):
+                                                    best_alt, best_d = None, 999
+                                                    for b in player_tracks[i].get("boxes", []):
+                                                        alt_pid = b.get("id")
+                                                        if alt_pid is None: continue
+                                                        if team_map.get(str(alt_pid)) == atk_teams[0]:
+                                                            c = bbox_center(b["xyxy"])
+                                                            if ball_track[i]:
+                                                                d = self.camera.calculate_distance(c, ball_track[i])
+                                                                if d < best_d:
+                                                                    best_d = d
+                                                                    best_alt = alt_pid
+                                                    if best_alt and best_d < 15.0:
+                                                        print(f"[Goal] Corrected: {shooter} ({shooter_team}) -> "
+                                                              f"{best_alt} ({atk_teams[0]})")
+                                                        correct_shooter = best_alt
+                                        stats[correct_shooter]["goals"] += 1
+                                        stats[correct_shooter]["goals_total"] += 1
+                                        events.append({"type": "goal", "player": correct_shooter, "frame": i, "assist": None})
 
                                     # print(f"SHOT! Player {shooter} | Speed {speed_mps:.1f} m/s | xG {xg:.2f}")
 
@@ -699,14 +751,14 @@ class AdvancedEventDetector:
                  already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
                  if already_counted:
                      continue
-                 # Round 14: Tackle cooldown 3s per player (lowered from 5s)
-                 # MPS produces fewer proximity events so 5s was too strict
+                 # Round 17: Tackle cooldown 10s per player
+                 # With correct camera, proximity events are more frequent
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
-                 if end_frame - last_tkl < int(EFF_FPS * 3):
+                 if end_frame - last_tkl < int(EFF_FPS * 10):
                      continue
-                 # Round 14: Widen proximity from DIST_TOUCH (5m) to 7m
-                 # Stride=3 causes 6-9m player movement between frames
-                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=7.0):
+                 # Round 17: Proximity 3m — true 3m with corrected camera
+                 # Old effective range was ~2.7m (5m * 0.055/0.1), so 3m is close
+                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=3.0):
                      _last_tackle_frame_s3[p_b] = end_frame
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1

@@ -9,15 +9,17 @@ PITCH_WIDTH = 68.0
 GOAL_WIDTH = 7.32
 
 class Camera:
-    def __init__(self, homography_matrix=None):
+    def __init__(self, homography_matrix=None, frame_width=None, frame_height=None):
         if homography_matrix is not None:
              self.H = np.array(homography_matrix)
         else:
-             # Default Scaling: Map 1280px width -> 105m (approx 0.08 m/px)
-             # This is a fallback if no calibration is provided.
+             # Round 16: Resolution-aware scaling
+             # Map actual video dimensions to standard pitch (105m x 68m)
              self.H = np.eye(3)
-             self.H[0, 0] = 0.1 # Scale X
-             self.H[1, 1] = 0.1 # Scale Y
+             fw = frame_width or 1920
+             fh = frame_height or 1080
+             self.H[0, 0] = PITCH_LENGTH / fw   # 105.0 / 1920 ≈ 0.0547
+             self.H[1, 1] = PITCH_WIDTH / fh     # 68.0 / 1080  ≈ 0.0630
              
     def project_point(self, x, y):
         """

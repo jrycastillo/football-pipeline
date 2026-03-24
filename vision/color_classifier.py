@@ -17,8 +17,8 @@ from PIL import Image
 HSV_COLOR_RANGES = {
     # (H_min, H_max, S_min, S_max, V_min, V_max)
     "Maroon": [(0, 10, 50, 255, 20, 100), (170, 180, 50, 255, 20, 100)],
-    "Red": [(0, 10, 60, 255, 40, 255), (170, 180, 60, 255, 40, 255)],
-    "Orange": [(10, 20, 80, 255, 60, 255)],
+    "Red": [(0, 15, 60, 255, 40, 255), (165, 180, 60, 255, 40, 255)],
+    "Orange": [(15, 20, 80, 255, 60, 255)],
     "Gold": [(20, 25, 40, 255, 50, 255)],  # Fixed: H[20-25] to avoid overlap with Yellow
     "Yellow": [(25, 35, 60, 255, 40, 255)], # Narrowed to make room for Gold/Lime
     "Lime": [(35, 55, 40, 255, 40, 255)], # The requested "Light Green"
@@ -39,7 +39,7 @@ HSV_COLOR_RANGES = {
 # This prevents team clustering from fragmenting similar colors
 # (e.g. Blue/Navy/Cyan all become "Blue").
 _FOOTBALL_MERGE = {
-    "Maroon": "Red", "Pink": "Red",
+    "Maroon": "Red", "Pink": "Red", "Orange": "Red",
     "Navy": "Blue", "Cyan": "Blue", "Teal": "Blue",
     "Lime": "Green",
     "Gold": "Yellow",
@@ -70,7 +70,11 @@ class TeamColorClassifier:
         s = hsv_image[:, :, 1]
         v = hsv_image[:, :, 2]
         
-        grass_mask = (h >= 35) & (h <= 90) & (s > 70) & (v > 20)
+        # Round 18: Extended H lower bound from 35→30 to catch yellowish-green
+        # grass at H 30-34 that was leaking through and classifying as "Yellow".
+        # Real yellow jerseys (H 25-35) still survive if S is high (fabric S > 150)
+        # but grass yellowish-green (H 30-34, S 70-120) gets properly masked.
+        grass_mask = (h >= 30) & (h <= 90) & (s > 70) & (v > 20)
         return ~grass_mask
     
     def _get_torso_roi(self, crop):
@@ -118,7 +122,17 @@ class TeamColorClassifier:
             # --- ACHROMATIC PATH (Black/White/Grey strictly dominates) ---
             if len(achromatic_pixels) == 0:
                 return np.median(hsv_pixels, axis=0)
-            return np.median(achromatic_pixels, axis=0)
+            # Round 18: Use V-channel histogram mode instead of median.
+            # Dark jerseys have mixed achromatic pixels: dark fabric (V~30),
+            # skin (V~160), white trim (V~200). Median gets pulled up to V~130
+            # → misclassifies as White. Histogram mode finds the dominant V band.
+            v_values = achromatic_pixels[:, 2]
+            v_hist, v_bins = np.histogram(v_values, bins=6, range=(0, 256))
+            peak_bin = np.argmax(v_hist)
+            peak_v = (v_bins[peak_bin] + v_bins[peak_bin + 1]) / 2.0
+            result = np.median(achromatic_pixels, axis=0).copy()
+            result[2] = peak_v
+            return result
             
         elif len(chromatic_pixels) > len(hsv_pixels) * 0.3:
             # --- CHROMATIC PATH (Find Dominant Hue) ---
@@ -146,9 +160,15 @@ class TeamColorClassifier:
             # --- ACHROMATIC PATH (Black/White/Grey) ---
             if len(achromatic_pixels) == 0:
                 return np.median(hsv_pixels, axis=0)
-                
-            # For greyscale, we care about Value (Brightness)
-            return np.median(achromatic_pixels, axis=0)
+
+            # Round 18: V-histogram mode (same as primary achromatic path above)
+            v_values = achromatic_pixels[:, 2]
+            v_hist, v_bins = np.histogram(v_values, bins=6, range=(0, 256))
+            peak_bin = np.argmax(v_hist)
+            peak_v = (v_bins[peak_bin] + v_bins[peak_bin + 1]) / 2.0
+            result = np.median(achromatic_pixels, axis=0).copy()
+            result[2] = peak_v
+            return result
     
     def _classify_hsv(self, h, s, v):
         """Classify HSV values to color name with wide tolerance."""
@@ -157,8 +177,8 @@ class TeamColorClassifier:
         # WARNING: Do NOT raise above 70. S=160 broke all color detection.
         if s <= 70:
             if v > 150: return "White"
-            if v < 60:  return "Black"
-            return "White"  # Gray -> White for football
+            if v < 80:  return "Black"  # Round 18: was V<60; dark jerseys (V 60-80) are Black not White
+            return "White"  # Light gray -> White for football
             
         # 2. Check Specific Color Ranges if adequately saturated
         for color_name, ranges in HSV_COLOR_RANGES.items():
@@ -168,8 +188,9 @@ class TeamColorClassifier:
                     return _football_color(color_name)
             
         # 3. Last Resort: Closest Hue
-        if h < 10 or h > 170: return "Red"
-        if h < 20: return "Orange"
+        # Round 16: Expanded red to H<15 (was H<10) — red kits often read H 10-15
+        if h < 15 or h > 165: return "Red"
+        if h < 20: return "Red"       # Orange range → merge to Red for football
         if h < 25: return "Yellow"    # Gold -> Yellow
         if h < 35: return "Yellow"
         if h < 55: return "Green"     # Lime -> Green
@@ -218,20 +239,29 @@ class TeamColorClassifier:
                 green_ratio = np.sum(high_sat_green) / len(all_pixels)
                 
                 if green_ratio > 0.60:
-                    color_name = "Green"
-                    # Apply kit correction if active
-                    if self.known_kit_colors and color_name not in self.known_kit_colors:
-                        _KIT_HUE_REF = {
-                            "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
-                            "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
-                        }
-                        for kit_color in self.known_kit_colors:
-                            kit_hue = _KIT_HUE_REF.get(kit_color, -1)
-                            if kit_hue >= 0:
-                                dist = min(abs(60 - kit_hue), 180 - abs(60 - kit_hue))
-                                if dist <= 30:
-                                    return kit_color
-                    return "Green"
+                    # Round 18: Guard against dark jerseys with grass background.
+                    # If a significant portion of the center crop is dark/achromatic
+                    # (low S + low V), the player wears a dark kit — the green is
+                    # just pitch behind them, not their jersey.
+                    dark_pixels = (all_pixels[:, 1] < 70) & (all_pixels[:, 2] < 100)
+                    dark_ratio = np.sum(dark_pixels) / len(all_pixels)
+                    if dark_ratio > 0.15:
+                        pass  # Skip green early-exit, continue to normal HSV path
+                    else:
+                        color_name = "Green"
+                        # Apply kit correction if active
+                        if self.known_kit_colors and color_name not in self.known_kit_colors:
+                            _KIT_HUE_REF = {
+                                "Red": 0, "Orange": 15, "Yellow": 30, "Green": 60,
+                                "Blue": 120, "Purple": 140, "White": -1, "Black": -1,
+                            }
+                            for kit_color in self.known_kit_colors:
+                                kit_hue = _KIT_HUE_REF.get(kit_color, -1)
+                                if kit_hue >= 0:
+                                    dist = min(abs(60 - kit_hue), 180 - abs(60 - kit_hue))
+                                    if dist <= 30:
+                                        return kit_color
+                        return "Green"
 
         # Step 3: Mask out grass pixels
         keep_mask = self._mask_grass(hsv)
@@ -320,8 +350,8 @@ class TeamColorClassifier:
 class KitCoordinator:
     """Aggregates detection colors to find base team kits (Phase 168)."""
     def __init__(self):
-        # 1=GK, 2=Player
-        self.counts = {1: Counter(), 2: Counter()}
+        # 1=GK, 2=Player, 3=Referee
+        self.counts = {1: Counter(), 2: Counter(), 3: Counter()}
 
     def observe(self, cls_id, color):
         """Register a color observation for a class."""
@@ -329,22 +359,36 @@ class KitCoordinator:
             return
         if cls_id in self.counts:
             self.counts[cls_id][color] += 1
-            
+
     def get_discovery_result(self):
         """Return top 2 colors for GKs and Players."""
         res = {
             "goalkeepers": [],
             "players": []
         }
-        
+
+        # Round 17: Find referee dominant color to exclude from team discovery
+        # Referees typically wear yellow/green/pink — these should NOT be team colors
+        referee_color = None
+        if self.counts[3]:
+            referee_color = self.counts[3].most_common(1)[0][0]
+
         # Top 2 GK colors
         for color, _ in self.counts[1].most_common(2):
             res["goalkeepers"].append(color)
-            
-        # Top 2 Player colors
-        for color, _ in self.counts[2].most_common(2):
+
+        # Top 2 Player colors, excluding referee color
+        for color, _ in self.counts[2].most_common(4):
+            if color == referee_color:
+                continue
             res["players"].append(color)
-            
+            if len(res["players"]) >= 2:
+                break
+
+        if referee_color:
+            print(f"[KitCoordinator] Referee color '{referee_color}' excluded from team discovery")
+            print(f"[KitCoordinator] Player color counts: {self.counts[2].most_common(5)}")
+
         return res
 
 

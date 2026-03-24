@@ -1598,13 +1598,11 @@ class EventDetector:
 
 # --- 9. STATS ENGINE ADAPTER ---
 class StatsAdapter:
-    def __init__(self, camera=None, pitch_manager=None):
+    def __init__(self, camera=None, pitch_manager=None, frame_width=None, frame_height=None):
         self.camera = camera
-        # Initialize new engine (Patched to point to post_processor.py logic)
-        from stats.metrics import StatsEngine 
-        self.engine = StatsEngine() 
-        # Note: EventDetector in StatsEngine creates its own Camera. 
-        # We assume that is sufficient as it uses the same Homography logic.
+        # Round 16: Pass video dimensions to StatsEngine for correct homography scaling
+        from stats.metrics import StatsEngine
+        self.engine = StatsEngine(frame_width=frame_width, frame_height=frame_height)
 
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
         # Delegate to new engine
@@ -2053,6 +2051,14 @@ if __name__ == "__main__":
                 # possession (ball at player feet), destroying ownership/pass tracking.
                 # Ball model is trained specifically for balls; confidence threshold handles FPs.
                 
+                # Round 17: Observe referee colors for kit exclusion
+                for box_data in frame_data["boxes"]:
+                        if box_data["cls"] == 3:
+                            crop = _torso_crop(img, box_data["xyxy"])
+                            if crop is not None and crop.size > 0:
+                                ref_color = color_classifier.predict(crop)
+                                kit_coordinator.observe(3, ref_color)
+
                 # Post-Process for JNR
                 for box_data in frame_data["boxes"]:
                         # Process GK (1), Player (2) - Skip Referee (3) and Ball (32)
@@ -2273,7 +2279,7 @@ if __name__ == "__main__":
 
 
     # --- 9. STATS GENERATION (Entity Resolution) ---
-    stats_adapter = StatsAdapter(camera, pitch_manager) # Pass pitch_manager
+    stats_adapter = StatsAdapter(camera, pitch_manager, frame_width=width, frame_height=height)
     kits = kit_coordinator.get_discovery_result()
     raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams)
     

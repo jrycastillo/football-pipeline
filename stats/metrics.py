@@ -3,8 +3,8 @@ import math
 from .event_logic import AdvancedEventDetector, EFF_FPS
 
 class StatsEngine:
-    def __init__(self):
-        self.detector = AdvancedEventDetector()
+    def __init__(self, frame_width=None, frame_height=None):
+        self.detector = AdvancedEventDetector(frame_width=frame_width, frame_height=frame_height)
         
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
         """
@@ -234,10 +234,25 @@ class StatsEngine:
             # EXCEPTION: If they scored a goal, KEEP THEM!
             goals_detected = raw_stats.get(id_key, {}).get("goals", 0)
             if seconds_played < 1.5 and goals_detected == 0:
-                # print(f"Skipping {id_key} (played {seconds_played:.2f}s)")
                 continue
 
-                    # Identify Player
+            # Round 16: Secondary ghost filter — moderate presence but zero activity
+            # Catches detection artifacts that persist 2-24s but contribute nothing
+            if seconds_played > 2.0 and total_frames < 200 and goals_detected == 0:
+                s_check = raw_stats.get(id_key, defaultdict(int))
+                has_activity = (
+                    s_check.get("passes_total", 0) > 0 or
+                    s_check.get("tackles", 0) > 0 or
+                    s_check.get("shots_on_target", 0) > 0 or
+                    s_check.get("touch_frames", 0) > 0 or
+                    s_check.get("dribbles", 0) > 0 or
+                    s_check.get("interceptions", 0) > 0
+                )
+                dominant_cls = s_check.get("dominant_class", 2)
+                if not has_activity and dominant_cls != 1:
+                    continue
+
+            # Identify Player
             is_known = False
             
             # Check 1: Is it a valid Jersey Number in Registry?
@@ -626,6 +641,22 @@ class StatsEngine:
                     print(f"[Team] Kit-guided selection: {team_a_color} ({counts[team_a_color]}), "
                           f"{team_b_color} ({counts[team_b_color]}) "
                           f"(from match_kits: {kit_a_raw}/{kit_b_raw})")
+                elif kit_a_norm in counts or kit_b_norm in counts:
+                    # Round 18: One kit color present, other missing from player_colors.
+                    # This happens when dark jerseys (Black/Navy) get misclassified as
+                    # Yellow/Green in individual tracks but KitCoordinator correctly
+                    # identifies the true kit color from aggregate observations.
+                    # Trust the kit discovery: present color is one team, all other
+                    # players belong to the missing kit color team.
+                    present = kit_a_norm if kit_a_norm in counts else kit_b_norm
+                    missing = kit_b_norm if present == kit_a_norm else kit_a_norm
+                    team_a_color = present
+                    team_b_color = missing
+                    # Create empty entry for the missing color so downstream code works
+                    teams[missing] = []
+                    kit_guided = True
+                    print(f"[Team] Kit-guided selection (partial): {present} ({counts[present]}), "
+                          f"{missing} (0 locked, from match_kits: {kit_a_raw}/{kit_b_raw})")
 
             if not kit_guided:
                 top_2 = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:2]
