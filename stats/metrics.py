@@ -149,6 +149,21 @@ class StatsEngine:
                                 if isinstance(val, (int, float)) and val > 0:
                                     merged[key] = merged.get(key, 0) + val
                                     recovered_events += 1
+                    # R19: Goal rescue — scan ALL remaining fragments for goal events
+                    # Goals are rare and critical; we can't afford to lose them
+                    _CRITICAL_EVENT_KEYS = {"goals", "goals_total"}
+                    remaining = candidates[_MERGE_TOP_N:]
+                    rescued_goals = 0
+                    for tid, stats_dict, w in remaining:
+                        for key in _CRITICAL_EVENT_KEYS:
+                            if key in stats_dict:
+                                val = stats_dict[key]
+                                if isinstance(val, (int, float)) and val > 0:
+                                    merged[key] = merged.get(key, 0) + val
+                                    rescued_goals += val
+                    if rescued_goals > 0:
+                        print(f"[Phase 216] Jersey #{jersey_num}: RESCUED {rescued_goals} goal(s) from minor fragments")
+
                     remapped_stats[jersey_num] = merged
                     extra = len(merge_candidates) - 1
                     skipped = len(candidates) - len(merge_candidates)

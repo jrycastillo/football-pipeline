@@ -25,7 +25,7 @@ DIST_TOUCH = 5.0  # Increased for better possession detection
 DIST_DRIBBLE_OPP = 3.0  # Phase 195: Increased from 2.0 to 3.0m for more dribble detection
 DIST_PASS_MIN = 1.0  # Reduced to 1m to capture short/lateral passes (was 2.0m)
 TIME_DRIBBLE_RETAIN = 1.5  # Phase 195: Reduced from 2.0s to 1.5s for quicker dribble success
-SHOT_SPEED_THRESHOLD = 10.0  # Round 17: 10 m/s (36 km/h) — true speed with corrected camera
+SHOT_SPEED_THRESHOLD = 16.0  # Round 19: 16 m/s (58 km/h) — filters passes/clearances, keeps real shots
 
 def bbox_center(xyxy):
     x1, y1, x2, y2 = xyxy
@@ -519,6 +519,11 @@ class AdvancedEventDetector:
                         goal_x = 0.0    # Left goal
                         goal_center_y = 34.0
 
+                    # R19: Ball must be in attacking third (within 35m of target goal)
+                    dist_to_goal = abs(m2[0] - goal_x)
+                    if dist_to_goal > 35.0:
+                        continue  # Ball too far from goal to be a real shot
+
                     # Check if inside goal coordinates
                     # Simple linear projection
                     if abs(m2[0] - m1[0]) > 0.1:
@@ -536,9 +541,8 @@ class AdvancedEventDetector:
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
                                 shooter = None
                             if shooter:
-                                # Round 13: Shot debounce 1s (R8 baseline)
-                                # Round 16: Shot debounce 2s (was 1s) to reduce over-count
-                                shot_debounce = max(10, int(EFF_FPS * 2))
+                                # Round 19: Shot debounce 5s (was 2s) to reduce over-count
+                                shot_debounce = max(10, int(EFF_FPS * 5))
                                 recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < shot_debounce]
                                 if not recent:
                                     # Check if under pressure
@@ -629,9 +633,22 @@ class AdvancedEventDetector:
                                                         print(f"[Goal] Corrected: {shooter} ({shooter_team}) -> "
                                                               f"{best_alt} ({atk_teams[0]})")
                                                         correct_shooter = best_alt
-                                        stats[correct_shooter]["goals"] += 1
-                                        stats[correct_shooter]["goals_total"] += 1
-                                        events.append({"type": "goal", "player": correct_shooter, "frame": i, "assist": None})
+                                        # R19: Goal debounce — 30s per-team cooldown
+                                        goal_team = team_map.get(str(correct_shooter), "unknown") if team_map else "unknown"
+                                        goal_debounce_frames = int(30.0 * EFF_FPS)
+                                        recent_team_goal = any(
+                                            e for e in events
+                                            if e["type"] == "goal"
+                                            and abs(e["frame"] - i) < goal_debounce_frames
+                                            and team_map and team_map.get(str(e["player"])) == goal_team
+                                        )
+                                        if not recent_team_goal:
+                                            stats[correct_shooter]["goals"] += 1
+                                            stats[correct_shooter]["goals_total"] += 1
+                                            events.append({"type": "goal", "player": correct_shooter, "frame": i, "assist": None})
+                                            print(f"[Goal] Confirmed: Player #{correct_shooter} (team={goal_team}) at frame {i}")
+                                        else:
+                                            print(f"[Goal] Debounced: Player #{correct_shooter} (team={goal_team}) at frame {i} — duplicate within 30s")
 
                                     # print(f"SHOT! Player {shooter} | Speed {speed_mps:.1f} m/s | xG {xg:.2f}")
 
