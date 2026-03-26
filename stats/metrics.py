@@ -149,20 +149,32 @@ class StatsEngine:
                                 if isinstance(val, (int, float)) and val > 0:
                                     merged[key] = merged.get(key, 0) + val
                                     recovered_events += 1
-                    # R19: Goal rescue — scan ALL remaining fragments for goal events
-                    # Goals are rare and critical; we can't afford to lose them
+                    # R20: Goal rescue with dedup — scan remaining fragments for goals,
+                    # but only rescue if top-N merge found 0 goals for this player.
+                    # Cap at 2 goals per player max (hat-tricks are rare edge cases).
                     _CRITICAL_EVENT_KEYS = {"goals", "goals_total"}
-                    remaining = candidates[_MERGE_TOP_N:]
-                    rescued_goals = 0
-                    for tid, stats_dict, w in remaining:
-                        for key in _CRITICAL_EVENT_KEYS:
-                            if key in stats_dict:
-                                val = stats_dict[key]
-                                if isinstance(val, (int, float)) and val > 0:
-                                    merged[key] = merged.get(key, 0) + val
-                                    rescued_goals += val
-                    if rescued_goals > 0:
-                        print(f"[Phase 216] Jersey #{jersey_num}: RESCUED {rescued_goals} goal(s) from minor fragments")
+                    existing_goals = max(merged.get("goals", 0), merged.get("goals_total", 0))
+                    if existing_goals == 0:
+                        # No goals in top-N — check remaining fragments
+                        remaining = candidates[_MERGE_TOP_N:]
+                        has_rescued = False
+                        for tid, stats_dict, w in remaining:
+                            if has_rescued:
+                                break
+                            for key in _CRITICAL_EVENT_KEYS:
+                                if key in stats_dict:
+                                    val = stats_dict[key]
+                                    if isinstance(val, (int, float)) and val > 0:
+                                        merged[key] = merged.get(key, 0) + min(val, 1)
+                                        has_rescued = True
+                        if has_rescued:
+                            print(f"[Phase 216] Jersey #{jersey_num}: RESCUED 1 goal from minor fragments")
+                    # Cap goals per player at 2 (covers most real scenarios)
+                    _MAX_GOALS_PER_PLAYER = 2
+                    for key in _CRITICAL_EVENT_KEYS:
+                        if merged.get(key, 0) > _MAX_GOALS_PER_PLAYER:
+                            print(f"[Phase 216] Jersey #{jersey_num}: capped {key} from {merged[key]} to {_MAX_GOALS_PER_PLAYER}")
+                            merged[key] = _MAX_GOALS_PER_PLAYER
 
                     remapped_stats[jersey_num] = merged
                     extra = len(merge_candidates) - 1
