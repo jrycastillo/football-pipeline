@@ -20,7 +20,7 @@ HSV_COLOR_RANGES = {
     "Red": [(0, 15, 60, 255, 40, 255), (165, 180, 60, 255, 40, 255)],
     "Orange": [(15, 20, 80, 255, 60, 255)],
     "Gold": [(20, 25, 40, 255, 50, 255)],  # Fixed: H[20-25] to avoid overlap with Yellow
-    "Yellow": [(25, 35, 60, 255, 40, 255)], # Narrowed to make room for Gold/Lime
+    "Yellow": [(25, 35, 120, 255, 40, 255)], # Raised S threshold 60->120 to prevent white jerseys with yellow tint from classifying as Yellow
     "Lime": [(35, 55, 40, 255, 40, 255)], # The requested "Light Green"
     "Green": [(55, 85, 40, 255, 20, 255)], # Shifted up
     "Teal": [(80, 95, 40, 255, 30, 150)],
@@ -369,13 +369,21 @@ class KitCoordinator:
 
         # Round 17: Find referee dominant color to exclude from team discovery
         # Referees typically wear yellow/green/pink — these should NOT be team colors
+        # BUT: do not exclude a color if it's also a GK color (GKs wear unique colors too)
         referee_color = None
         if self.counts[3]:
             referee_color = self.counts[3].most_common(1)[0][0]
 
         # Top 2 GK colors
+        gk_colors = set()
         for color, _ in self.counts[1].most_common(2):
             res["goalkeepers"].append(color)
+            gk_colors.add(color)
+
+        # Don't exclude referee color if it's also a GK color
+        if referee_color and referee_color in gk_colors:
+            print(f"[KitCoordinator] Referee color '{referee_color}' is also a GK color — NOT excluded")
+            referee_color = None
 
         # Top 2 Player colors, excluding referee color
         for color, _ in self.counts[2].most_common(4):

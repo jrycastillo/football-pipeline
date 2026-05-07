@@ -1,5 +1,7 @@
 
 import os
+import string
+import sys
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
@@ -103,60 +105,134 @@ class ResNetRecognizerV2:
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.classes = [str(i) for i in range(100)] # 0-99
         self.pending_queue = [] # Queue for JNR
+        self.idx_to_jersey = None  # None = identity mapping (old 100-class models)
+        # Torso crop bounds (fraction of bounding-box height)
+        self.torso_top = 0.0   # overridden for new-format models
+        self.torso_bot = 0.60  # legacy: top 60%
 
-        # Phase 227: Initialize Model based on path (RGB vs Grayscale)
-        # Check if we are using RGB model (color-aware) or Grayscale model
-        if "rgb" in weights_path.lower():
-             # RGB Model (Phase 227)
-             from torchvision import models
-             self.model = models.resnet34(weights=None)
-             self.model.fc = nn.Linear(self.model.fc.in_features, 100)
-             self.is_grayscale = False
-             self.size = 128
-             # ImageNet RGB Norm
-             self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
-             print("✅ [JNR] Using RGB Color-Aware Model")
-        elif "resnet34" in weights_path or "grayscale" in weights_path:
-             self.model = create_resnet34_grayscale(num_classes=100)
-             self.is_grayscale = True
-             self.size = 128
-             # Grayscale Norm
-             self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5], std=[0.5]) # 1 channel
-            ])
-        else:
-             # Legacy ResNet32 RGB
-             self.model = resnet32(num_classes=100)
-             self.is_grayscale = False
-             self.size = 224
-             # ImageNet RGB Norm
-             self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
-        
+        # --- Peek at checkpoint to detect new-format models ---
+        checkpoint = None
         if os.path.exists(weights_path):
-            checkpoint = torch.load(weights_path, map_location=self.device)
-            # Handle both raw state_dict and checkpoint dict
-            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-                self.model.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                self.model.load_state_dict(checkpoint)
-            print(f"✅ Loaded JNR Model from {weights_path}")
+            checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
+
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            # New format saved by train_resnet_reshuffled.py / train on clean data
+            n_classes      = checkpoint.get("n_classes", 54)
+            idx_to_jersey  = checkpoint.get("idx_to_jersey", {})
+            # Keys may be ints or strings depending on how torch serialised them
+            self.idx_to_jersey = {int(k): int(v) for k, v in idx_to_jersey.items()}
+
+            from torchvision import models as _tvm
+            self.model = _tvm.resnet34(weights=None)
+            self.model.fc = nn.Linear(self.model.fc.in_features, n_classes)
+            self.is_grayscale = False
+            self.size = 128
+            # ImageNet RGB normalisation (matches training)
+            self.transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            # Training used torso_crop(top=0.15, bot=0.52) on the full bounding-box crop
+            self.torso_top = 0.15
+            self.torso_bot = 0.52
+
+            self.model.load_state_dict(checkpoint["state_dict"])
+            val_acc = checkpoint.get("val_acc", None)
+            val_str = f"{val_acc:.1f}%" if val_acc is not None else "?"
+            print(f"✅ [JNR] Loaded clean ResNet34 ({n_classes} classes, val={val_str}) from {weights_path}")
+
         else:
-            print(f"⚠️ Warning: Weights not found at {weights_path}. Model unsupervised.")
-            
+            # Legacy path-name-based detection
+            if "rgb" in weights_path.lower():
+                 # RGB Model (Phase 227)
+                 from torchvision import models as _tvm
+                 self.model = _tvm.resnet34(weights=None)
+                 self.model.fc = nn.Linear(self.model.fc.in_features, 100)
+                 self.is_grayscale = False
+                 self.size = 128
+                 self.transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                ])
+                 print("✅ [JNR] Using RGB Color-Aware Model")
+            elif "resnet34" in weights_path or "grayscale" in weights_path:
+                 self.model = create_resnet34_grayscale(num_classes=100)
+                 self.is_grayscale = True
+                 self.size = 128
+                 self.transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5], std=[0.5])
+                ])
+            else:
+                 # Legacy ResNet32 RGB
+                 self.model = resnet32(num_classes=100)
+                 self.is_grayscale = False
+                 self.size = 224
+                 self.transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                ])
+
+            if checkpoint is not None:
+                if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                    self.model.load_state_dict(checkpoint["model_state_dict"])
+                elif isinstance(checkpoint, dict) and "state_dict" not in checkpoint:
+                    # raw state_dict
+                    self.model.load_state_dict(checkpoint)
+                # else already handled above
+                print(f"✅ Loaded JNR Model from {weights_path}")
+            else:
+                print(f"⚠️ Warning: Weights not found at {weights_path}. Model unsupervised.")
+
         self.model.to(self.device)
         self.model.eval()
+
+        # --- Legibility gate ---
+        self.leg_model = None
+        self.leg_threshold = 0.65
+        self.leg_transform = transforms.Compose([
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        self._init_legibility_model()
 
         # Phase 219: OpenCV DNN Super Resolution for tiny crops
         self.upscaler = None
         self._init_upscaler()
     
+    def _init_legibility_model(self, path="models/legibility_resnet18.pt"):
+        """Load ResNet18 binary legibility classifier (0=not_legible, 1=legible)."""
+        if not os.path.exists(path):
+            print(f"⚠️ [JNR] Legibility model not found at {path} — gate disabled")
+            return
+        from torchvision import models as _tvm
+        leg = _tvm.resnet18(weights=None)
+        leg.fc = nn.Linear(512, 2)
+        leg.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+        leg.eval()
+        self.leg_model = leg.to(self.device)
+        print(f"✅ [JNR] Legibility gate loaded from {path}")
+
+    def _legibility_scores(self, torso_crops_bgr):
+        """
+        Score a list of BGR torso crops for legibility.
+        Returns list of float (prob of being legible, 0-1).
+        """
+        if self.leg_model is None:
+            return [1.0] * len(torso_crops_bgr)  # gate disabled → pass all through
+        tensors = []
+        for crop in torso_crops_bgr:
+            try:
+                pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                tensors.append(self.leg_transform(pil))
+            except Exception:
+                tensors.append(torch.zeros(3, 128, 128))
+        batch = torch.stack(tensors).to(self.device)
+        with torch.no_grad():
+            probs = torch.softmax(self.leg_model(batch), dim=1)
+        return probs[:, 1].cpu().tolist()  # prob of class 1 = legible
+
     def _init_upscaler(self):
         """Initialize OpenCV DNN 4x upscaler (ESPCN - fast and effective)."""
         try:
@@ -243,14 +319,15 @@ class ResNetRecognizerV2:
         if img_bgr is None or img_bgr.size == 0: return None
         
         h, w = img_bgr.shape[:2]
-        
-        # Phase 218: TORSO CROPPING - focus on upper body where jersey numbers appear
-        # Take top 60% of the crop (chest/back area) instead of full body
-        torso_ratio = 0.6
-        torso_h = int(h * torso_ratio)
-        if torso_h > 20:  # Only if the torso region is meaningful
-            img_bgr = img_bgr[:torso_h, :]
-            h = torso_h
+
+        # Torso crop: use bounds set at init time to match training distribution
+        # New model: 15-52% (excludes head, keeps jersey area)
+        # Legacy model: 0-60% (top 60%)
+        y1 = int(h * self.torso_top)
+        y2 = int(h * self.torso_bot)
+        if y2 - y1 > 20:
+            img_bgr = img_bgr[y1:y2, :]
+            h = y2 - y1
         
         # 0. Minimum crop size filter - reject crops too small to recognize
         if min(h, w) < 15:  # Very small crops are hopeless
@@ -290,33 +367,58 @@ class ResNetRecognizerV2:
             List of dicts: {"number": int, "confidence": float, "raw_text": str}
         """
         if not images: return []
-        
+
+        # --- Step 1: extract raw torso crops for legibility gate ---
+        raw_torsos = []   # parallel to images; None if unusable
+        for img in images:
+            if isinstance(img, list):
+                img = img[-1]
+            if not isinstance(img, np.ndarray) or img.size == 0:
+                raw_torsos.append(None)
+                continue
+            h = img.shape[0]
+            y1, y2 = int(h * self.torso_top), int(h * self.torso_bot)
+            torso = img[y1:y2, :] if (y2 - y1) > 6 else img
+            raw_torsos.append(torso if torso.size > 0 else None)
+
+        # --- Step 2: batch legibility check ---
+        valid_torsos    = [(i, t) for i, t in enumerate(raw_torsos) if t is not None]
+        leg_scores      = [0.0] * len(images)
+        if valid_torsos:
+            idxs, torsos = zip(*valid_torsos)
+            scores = self._legibility_scores(list(torsos))
+            for i, s in zip(idxs, scores):
+                leg_scores[i] = s
+
+        # --- Step 3: build JNR batch (legible crops only) ---
         batch_tensors = []
         valid_indices = []
-        
+
         for i, img in enumerate(images):
+            # Skip crops the legibility model flagged as unreadable
+            if leg_scores[i] < self.leg_threshold:
+                continue
+
             try:
-                if isinstance(img, list): # Temporal sequence
-                    img = img[-1] # Take last frame (most clear usually or most recent)
-                
+                if isinstance(img, list):
+                    img = img[-1]
+
                 if not isinstance(img, np.ndarray) or img.size == 0:
                     continue
-                    
+
                 # --- Smart Pre-processing (Low Res -> Super Res -> Contrast) ---
                 img_proc = self._preprocess_crop(img)
                 if img_proc is None: continue
 
                 # Conversion to PIL
                 if self.is_grayscale:
-                    # img_proc is already single channel grayscale from preprocess_crop
                     img_pil = Image.fromarray(img_proc, mode="L")
                 else:
                     img_pil = Image.fromarray(cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB))
-                
+
                 # Resize / Pad
-                # Note: Training used simple Resize (Stretch). _smart_pad now uses Resize directly.
                 img_padded = self._smart_pad(img_pil)
-                
+
                 # Transform
                 batch_tensors.append(self.transform(img_padded))
                 valid_indices.append(i)
@@ -332,12 +434,18 @@ class ResNetRecognizerV2:
             except Exception as e:
                 print(f"Error processing image {i}: {e}")
                 
+        # Pre-fill results: crops that failed legibility gate get status="not_legible"
+        results = []
+        for i in range(len(images)):
+            if leg_scores[i] < self.leg_threshold:
+                results.append({"number": None, "confidence": 0.0, "status": "not_legible"})
+            else:
+                results.append({"number": None, "confidence": 0.0})
+
         if not batch_tensors:
-            return [{"number": None, "confidence": 0.0}] * len(images)
-            
+            return results
+
         batch_stack = torch.stack(batch_tensors).to(self.device)
-        
-        results = [{"number": None, "confidence": 0.0} for _ in range(len(images))]
         
         with torch.no_grad():
             outputs = self.model(batch_stack)
@@ -362,11 +470,17 @@ class ResNetRecognizerV2:
             CLASS_PENALTIES = {1: 0.10} 
             
             for idx, conf, pred, ent, prob_row in zip(valid_indices, confs, preds, entropy, probs):
-                num = int(pred.item())
+                pred_idx = int(pred.item())
                 confidence = float(conf.item())
                 ent_val = float(ent.item())
-                
-                # Apply slight penalty
+
+                # Map class index → actual jersey number (new-format models only)
+                if self.idx_to_jersey is not None:
+                    num = self.idx_to_jersey.get(pred_idx, pred_idx)
+                else:
+                    num = pred_idx
+
+                # Apply slight penalty to jersey #1 (historically over-predicted)
                 if num in CLASS_PENALTIES:
                      confidence *= (1.0 - CLASS_PENALTIES[num])
 
@@ -387,5 +501,126 @@ class ResNetRecognizerV2:
                         "entropy": ent_val,
                         "raw_text": str(num)
                     }
-                
+
         return results
+
+
+class PARSeqRecognizer:
+    """
+    Drop-in replacement for ResNetRecognizerV2 using PARSeq scene-text model.
+    Same queue_request / get_results interface as ResNetRecognizerV2.
+    """
+
+    TORSO_TOP = 0.15
+    TORSO_BOT = 0.52
+
+    def __init__(self, weights_path="models/parseq_local_v5.pt", device=None):
+        self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pending_queue = []
+
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        parseq_dir = os.path.join(base, "parseq")
+        if parseq_dir not in sys.path:
+            sys.path.insert(0, parseq_dir)
+
+        from strhub.models.utils import create_model
+        from strhub.data.module import SceneTextDataModule
+
+        ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
+        model = create_model("parseq", pretrained=False,
+                             charset_train=string.digits, charset_test=string.digits,
+                             max_label_length=2)
+        model.load_state_dict(ckpt, strict=False)
+        model.eval()
+        self.model = model.to(self.device)
+        self.transform = SceneTextDataModule.get_transform((32, 128))
+
+        self.leg_model = None
+        self.leg_threshold = 0.65
+        self.leg_transform = transforms.Compose([
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        self._init_legibility_model(os.path.join(base, "models/legibility_resnet18.pt"))
+        print(f"✅ [JNR] PARSeq loaded from {weights_path}")
+
+    def _init_legibility_model(self, path):
+        if not os.path.exists(path):
+            print(f"⚠️ [JNR] Legibility model not found at {path} — gate disabled")
+            return
+        leg = models.resnet18(weights=None)
+        leg.fc = nn.Linear(512, 2)
+        leg.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+        leg.eval()
+        self.leg_model = leg.to(self.device)
+        print(f"✅ [JNR] Legibility gate loaded from {path}")
+
+    def _torso(self, img_bgr):
+        h = img_bgr.shape[0]
+        y1, y2 = int(h * self.TORSO_TOP), int(h * self.TORSO_BOT)
+        return img_bgr[y1:y2, :] if y2 - y1 >= 6 else img_bgr
+
+    def queue_request(self, track_id, crop, frame_idx):
+        self.pending_queue.append((track_id, crop, frame_idx))
+
+    def get_results(self):
+        if not self.pending_queue:
+            return []
+        batch = self.pending_queue[:]
+        self.pending_queue = []
+        crops = [x[1] for x in batch]
+        tids  = [x[0] for x in batch]
+        preds = self.predict_batch(crops)
+        for i, pred in enumerate(preds):
+            pred["track_id"] = tids[i]
+        return preds
+
+    def predict_batch(self, images):
+        if not images:
+            return []
+
+        torsos = [self._torso(img) for img in images]
+
+        leg_scores = [1.0] * len(torsos)
+        if self.leg_model is not None:
+            tensors = []
+            for t in torsos:
+                pil = Image.fromarray(cv2.cvtColor(t, cv2.COLOR_BGR2RGB))
+                tensors.append(self.leg_transform(pil))
+            with torch.no_grad():
+                leg_scores = torch.softmax(
+                    self.leg_model(torch.stack(tensors).to(self.device)), dim=1
+                )[:, 1].tolist()
+
+        valid_idx = [i for i, s in enumerate(leg_scores) if s >= self.leg_threshold]
+
+        if not valid_idx:
+            return [{"number": None, "confidence": 0.0, "status": "not_legible"}] * len(images)
+
+        tensors = []
+        for i in valid_idx:
+            pil = Image.fromarray(cv2.cvtColor(torsos[i], cv2.COLOR_BGR2RGB))
+            tensors.append(self.transform(pil))
+
+        with torch.no_grad():
+            logits = self.model(torch.stack(tensors).to(self.device))
+            probs  = logits[:, :3, :11].softmax(-1)
+            preds_text, _ = self.model.tokenizer.decode(probs)
+            confs = probs.max(-1).values.min(-1).values.tolist()
+
+        parseq_results = {}
+        for rank, i in enumerate(valid_idx):
+            pred = preds_text[rank].strip()
+            conf = confs[rank]
+            if pred.isdigit() and 1 <= int(pred) <= 99 and conf >= 0.65:
+                parseq_results[i] = {"number": int(pred), "confidence": conf,
+                                     "status": "valid", "raw_text": pred}
+            else:
+                parseq_results[i] = {"number": None, "confidence": 0.0,
+                                     "status": "unknown", "raw_text": pred}
+
+        return [
+            parseq_results.get(i, {"number": None, "confidence": 0.0, "status": "not_legible"})
+            for i in range(len(images))
+        ]

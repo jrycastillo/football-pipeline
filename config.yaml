@@ -6,7 +6,7 @@ env:
   SRC_VIDEO: "test_videos/g5718885-fullhd.mp4"
   DET_WEIGHTS: "models/yolo_player.pt"
   POSE_WEIGHTS: "models/yolo_pitch.pt"
-  JNR_WEIGHTS: "models/resnet34_rgb_jnr.pt"
+  JNR_WEIGHTS: "models/resnet34_clean.pt"
   BALL_MODEL_PATH: "models/yolo_ball.pt"
 
   # Output
@@ -27,7 +27,7 @@ env:
 # Heuristics & Thresholds - OPTIMIZED FOR H100 (SPEED + QUALITY BALANCE)
 heuristics:
   # Detection - Reduced resolution for 2.4x faster inference with minimal accuracy loss
-  DET_CONF: 0.10
+  DET_CONF: 0.06
   DET_IOU: 0.50
   DET_IMG_SIZE: 640         # 640x640 vs 832x832 = 40% fewer pixels, ~2x faster detection
   VID_STRIDE: 3             # Process every 3rd frame (3x speedup, ByteTrack interpolates)

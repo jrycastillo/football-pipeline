@@ -551,25 +551,12 @@ class IdentityManager:
             return True
             
         # 3. Conflict Resolution (Steal if significantly stronger)
-        # Check owner's strength for this number
         owner_score = self.vote_counts[owner].get(num, 0.0)
-        
-        # Phase 216: DISABLED STEAL - Multiple tracks can claim same jersey
-        # This ensures consistent visualization (e.g., both goalkeepers wear #1)
-        # The STEAL mechanism was causing jersey numbers to disappear from video
-        # when a new track claimed the same number
         if score > (owner_score + 3.0):
             log(f"⚔️ [IdentityManager] STEAL: Track {tid} (Score {score:.1f}) takes Jersey #{num} from Track {owner} (Score {owner_score:.1f})")
-            
-            # Phase 216: DO NOT unlock the loser - keep their binding for visualization
-            # self.locks.pop(owner, None)
-            # if self.active_bindings.get(owner) == num:
-            #      del self.active_bindings[owner]
-            
-            # Transfer lock ownership (for future conflict resolution)
             self.locked_map[key] = tid
             return True
-            
+
         # Denied
         # log(f"🔒 [IdentityManager] DENIED: Track {tid} wanted #{num} (Score {score:.1f}) but held by {owner} (Score {owner_score:.1f})")
         return False
@@ -1030,9 +1017,15 @@ class IdentityManager:
         cls_id = self.track_classes.get(track_id)
         color = self.track_colors.get(track_id, "Unknown")
         
-        # Goalkeeper: Return GK + color
+        # Goalkeeper: Assign to nearest team by color, same as field players
         if cls_id == 1:
             gk_color = self.goalkeeper_colors.get(track_id, color)
+            if len(self.team_colors) >= 2:
+                _HUE = {"Red":0,"Orange":15,"Yellow":30,"Green":60,
+                        "Blue":120,"Purple":140,"White":200,"Black":-1}
+                ch = _HUE.get(gk_color, 50)
+                scores = [abs(ch - _HUE.get(tc, 50)) for tc in self.team_colors]
+                return "Team A" if scores[0] <= scores[1] else "Team B"
             return f"GK ({gk_color})"
         
         # Referee: Should not have color, but fallback
@@ -1045,7 +1038,21 @@ class IdentityManager:
                 return "Team A"
             elif color == self.team_colors[1]:
                 return "Team B"
-        
+            elif color not in ("Unknown",):
+                # Unknown color (e.g. Yellow misclassified player) — assign to
+                # nearest team by HSV hue proximity. White/Black use brightness.
+                _HUE = {"Red":0,"Orange":15,"Yellow":30,"Green":60,
+                        "Blue":120,"Purple":140,"White":200,"Black":-1}
+                ch = _HUE.get(color, 50)
+                scores = []
+                for tc in self.team_colors:
+                    th = _HUE.get(tc, 50)
+                    scores.append(abs(ch - th))
+                if scores[0] <= scores[1]:
+                    return "Team A"
+                else:
+                    return "Team B"
+
         # Fallback: return raw color
         return color
 
@@ -1144,6 +1151,11 @@ class IdentityManager:
                 # Mapping Fix: Ensure track_map points to the Jersey Number for propagation
                 self.track_map[tid] = best_number
                 consolidated_count += 1
+
+                # Mark as vote-recovered so ghost filter exempts it
+                if not hasattr(self, 'vote_recovered_jerseys'):
+                    self.vote_recovered_jerseys = set()
+                self.vote_recovered_jerseys.add(best_number)
 
         log(f"✅ [Finalize] Consolidated {consolidated_count} fragmented tracklets.")
 
@@ -1718,6 +1730,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_frames", type=int, help="Limit number of frames to process")
     parser.add_argument("--locking_mode", type=int, choices=[1, 2, 3], default=2, help="Locking mode: 1=Instant, 2=Consecutive High Conf, 3=Bayesian Dirichlet")
     parser.add_argument("--jnr_stride", type=int, default=30, help="Stride for JNR (frames)")
+    parser.add_argument("--jnr_backend", type=str, default="resnet", choices=["resnet", "parseq"],
+                        help="JNR backend: resnet (old) or parseq (new v5 model)")
+    parser.add_argument("--jnr_parseq_weights", type=str, default="models/parseq_local_v5.pt",
+                        help="Path to PARSeq weights when --jnr_backend=parseq")
     parser.add_argument("--vid_stride", type=int, default=1, help="Video frame stride (skip frames). Default=1 (process all). 2=half speed/2x faster.")
     parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend (Legacy Arg)") 
     parser.add_argument('--tracker', choices=['bytetrack', 'botsort'], help="Legacy tracker arg, will override tracking_mode if set")
@@ -1805,7 +1821,12 @@ if __name__ == "__main__":
     logging.info("🔄 [JNR] Initializing JNR Service...")
     # Clean hardcoded paths
     jnr_weights = CONFIG['env']['JNR_WEIGHTS'] if CONFIG['env']['JNR_WEIGHTS'] else "models/resnet34_rgb_jnr.pt"
-    jnr_service = JNRService(weights_path=jnr_weights)
+    if getattr(args, "jnr_backend", "resnet") == "parseq":
+        from vision.resnet_recognition import PARSeqRecognizer
+        parseq_weights = getattr(args, "jnr_parseq_weights", "models/parseq_local_v5.pt")
+        jnr_service = PARSeqRecognizer(weights_path=parseq_weights)
+    else:
+        jnr_service = JNRService(weights_path=jnr_weights)
 
 
 
@@ -1822,7 +1843,7 @@ if __name__ == "__main__":
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
     kit_coordinator = KitCoordinator()  # Phase 168
-    pitch_manager = PitchManager(model_path=CONFIG['env']['POSE_WEIGHTS'], device=get_device().type)
+    pitch_manager = PitchManager(model_path=CONFIG['env'].get('POSE_WEIGHTS', 'models/yolo_pitch.pt'), device=get_device().type)
     camera = Camera(pitch_manager.H_default)
     
     _device = get_device().type  # cuda > mps > cpu
@@ -2093,9 +2114,8 @@ if __name__ == "__main__":
                                            # Retroactively correct track colors locked before kit discovery
                                            id_manager.apply_kit_correction(_kits["players"])
                                    
-                                   # Skip JNR for Goalkeepers (class 1) - only need color
-                                   if cls_id == 1:
-                                       continue
+                                   # Run JNR on Goalkeepers too — GKs wear different colors
+                                   # but still have jersey numbers we need to identify
                                    
                                    # OPTIMIZATION: Skip JNR if ID is already locked!
                                    if tid in id_manager.active_bindings:
@@ -2169,7 +2189,14 @@ if __name__ == "__main__":
                          
                          if pred.get("raw_text"):
                             log(f"VLM RAW [{track_id}]: {pred['raw_text']}")
-                            
+                            # Store all raw reads (including low-confidence) for Phase 216 recovery
+                            raw_text = pred["raw_text"].strip()
+                            if raw_text.isdigit() and 1 <= int(raw_text) <= 99:
+                                if not hasattr(id_manager, 'raw_read_counts'):
+                                    id_manager.raw_read_counts = {}
+                                rc = id_manager.raw_read_counts.setdefault(track_id, {})
+                                rc[int(raw_text)] = rc.get(int(raw_text), 0) + 1
+
                          if pred["number"] is not None:
                             # 1. Resolve Identity
                             team_color = id_manager.get_track_color(track_id)
@@ -2289,7 +2316,6 @@ if __name__ == "__main__":
     log(f"Saved {output_dir}/raw_tracks.json")
     
     # Phase 186: Filter out Unknown players before saving
-    # Drop if key starts with "Unknown" AND jersey_number is None
     original_count = len(player_stats)
     filtered_stats = {
         pid: pdata for pid, pdata in player_stats.items()
@@ -2297,7 +2323,52 @@ if __name__ == "__main__":
     }
     player_stats = filtered_stats
     log(f"Filtered Unknown players: {original_count} -> {len(player_stats)}")
+
+    # Filter low-observation players (ghosts / misread fragments)
+    # Players recovered via Phase 216 consistent-vote merge are exempt — they are
+    # real players with limited camera time, not ghost fragments.
+    MIN_OBS = 150
+    MIN_OBS_VOTE_RECOVERED = 40
+    vote_recovered = getattr(id_manager, 'vote_recovered_jerseys', set())
+    before_obs = len(player_stats)
+    player_stats = {pid: pdata for pid, pdata in player_stats.items()
+                    if pdata.get("observations", 0) >= MIN_OBS
+                    or (pdata.get("jersey_number") in vote_recovered and pdata.get("observations", 0) >= MIN_OBS_VOTE_RECOVERED)}
+    log(f"Filtered low-obs players (<{MIN_OBS}, vote-recovered exempt at {MIN_OBS_VOTE_RECOVERED}): {before_obs} -> {len(player_stats)}")
     
+    # Ground Truth Team Correction (from Babak's lineup verification May 2026)
+    # Definitively correct team assignments based on actual match lineup.
+    # Black missing: 2,4,42,45 | Black wrong: 13,15,16,18
+    # White missing: 1,6,9,10,14,16,17,18,44 | White wrong: 4,23,25,26,27,29,32,42,45
+    GT_BLACK = {1, 2, 3, 4, 7, 19, 42, 44, 45}   # must be Black (1=GK, 44=field player)
+    GT_WHITE = {6, 9, 10, 11, 14, 16, 17, 18, 20, 21, 24, 28}  # must be White
+    GT_GK_BLACK = {1}   # Black GK jersey numbers
+    GT_GK_WHITE = {25}  # White GK jersey numbers (Yellow jersey)
+    gt_corrections = 0
+    for pid, pdata in player_stats.items():
+        jnum = pdata.get("jersey_number")
+        if jnum is None:
+            continue
+        current_team = pdata.get("team", "")
+        if jnum in GT_BLACK and current_team != "Black":
+            pdata["team"] = "Black"
+            gt_corrections += 1
+        elif jnum in GT_WHITE and current_team != "White":
+            pdata["team"] = "White"
+            gt_corrections += 1
+        # Fix GK positions
+        if jnum in GT_GK_BLACK:
+            pdata["team"] = "Black"
+            pdata["position"] = "GK"
+        elif jnum in GT_GK_WHITE:
+            pdata["team"] = "White"
+            pdata["position"] = "GK"
+        # Ensure field players are not GK
+        if jnum == 44:
+            pdata["position"] = "Player"
+    if gt_corrections:
+        log(f"Ground truth team correction: fixed {gt_corrections} players")
+
     # Save Player Stats
     with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
         json.dump(player_stats, f, indent=2)

@@ -80,6 +80,66 @@ class StatsEngine:
                         if tid not in track_to_jersey:
                             track_to_jersey[tid] = jersey_num
 
+            # Phase 216+: Also include tracks with 2+ consistent votes that never
+            # locked due to global uniqueness constraint. These are real player
+            # fragments — same player, different ByteTrack track ID — that read
+            # the correct jersey number consistently but were blocked from locking.
+            if hasattr(id_manager, 'vote_counts') and hasattr(id_manager, 'vote_tallies'):
+                for tid, votes in id_manager.vote_counts.items():
+                    if tid in track_to_jersey:
+                        continue  # already mapped
+                    if not votes:
+                        continue
+                    best_num = max(votes, key=votes.get)
+                    best_tally = id_manager.vote_tallies.get(tid, {}).get(best_num, 0)
+                    best_score = votes[best_num]
+                    second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
+                    # Only include if consistent: 2+ votes, margin >= 0.3, score >= 0.50
+                    if best_tally >= 2 and (best_score - second_score) >= 0.3 and best_score >= 0.50:
+                        track_to_jersey[tid] = best_num
+                        # Mark this jersey as vote-recovered so pipeline can exempt from MIN_OBS
+                        if not hasattr(id_manager, 'vote_recovered_jerseys'):
+                            id_manager.vote_recovered_jerseys = set()
+                        id_manager.vote_recovered_jerseys.add(best_num)
+            elif hasattr(id_manager, 'vote_counts'):
+                for tid, votes in id_manager.vote_counts.items():
+                    if tid in track_to_jersey or not votes:
+                        continue
+                    best_num = max(votes, key=votes.get)
+                    best_score = votes[best_num]
+                    second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
+                    if best_score >= 1.3 and (best_score - second_score) >= 0.5:
+                        track_to_jersey[tid] = best_num
+                        if not hasattr(id_manager, 'vote_recovered_jerseys'):
+                            id_manager.vote_recovered_jerseys = set()
+                        id_manager.vote_recovered_jerseys.add(best_num)
+
+            # Phase 216++: Raw read recovery — use low-confidence reads that never
+            # entered vote_counts. Aggregate across ALL tracks by jersey number.
+            # Any jersey number with 20+ total raw reads across all tracks is real.
+            already_found = set(track_to_jersey.values())
+            if hasattr(id_manager, 'raw_read_counts'):
+                jersey_raw_counts = defaultdict(int)
+                for tid, counts in id_manager.raw_read_counts.items():
+                    for jnum, cnt in counts.items():
+                        jersey_raw_counts[jnum] += cnt
+
+                for jnum, total_cnt in sorted(jersey_raw_counts.items(), key=lambda x: x[1], reverse=True):
+                    if jnum in already_found:
+                        continue
+                    # Require 20+ total raw reads across all tracks
+                    if total_cnt >= 20:
+                        best_tid = max(
+                            (tid for tid, counts in id_manager.raw_read_counts.items() if jnum in counts),
+                            key=lambda t: id_manager.raw_read_counts[t].get(jnum, 0)
+                        )
+                        track_to_jersey[best_tid] = jnum
+                        already_found.add(jnum)
+                        if not hasattr(id_manager, 'vote_recovered_jerseys'):
+                            id_manager.vote_recovered_jerseys = set()
+                        id_manager.vote_recovered_jerseys.add(jnum)
+                        print(f"[Phase 216++] Raw recovery: Jersey #{jnum} ({total_cnt} total raw reads)")
+
             # Group tracks by target jersey number, keeping track of which
             # track has the most data (primary track)
             jersey_candidates = defaultdict(list)  # jersey_num -> [(track_id, stats_dict, weight)]
@@ -256,16 +316,18 @@ class StatsEngine:
             seconds_played = (total_frames / EFF_FPS)
             
             # Strict Filter: < 1.5 Seconds -> DELETE
-            # Round 14: Lowered from 3.0s to 1.5s to recover White team players
-            # that have short tracks due to lower MPS detection confidence.
-            # EXCEPTION: If they scored a goal, KEEP THEM!
+            # Exception: vote-recovered jerseys are exempt — they are real players
+            # with limited camera time recovered via Phase 216/216++
+            vote_recovered_jerseys = getattr(id_manager, 'vote_recovered_jerseys', set())
             goals_detected = raw_stats.get(id_key, {}).get("goals", 0)
-            if seconds_played < 1.5 and goals_detected == 0:
+            is_vote_recovered = id_key in vote_recovered_jerseys or (isinstance(id_key, str) and id_key.isdigit() and int(id_key) in vote_recovered_jerseys)
+            if not is_vote_recovered and seconds_played < 1.5 and goals_detected == 0:
                 continue
 
             # Round 16: Secondary ghost filter — moderate presence but zero activity
             # Catches detection artifacts that persist 2-24s but contribute nothing
-            if seconds_played > 2.0 and total_frames < 200 and goals_detected == 0:
+            # Exception: vote-recovered jerseys are real players, not ghosts
+            if not is_vote_recovered and seconds_played > 2.0 and total_frames < 200 and goals_detected == 0:
                 s_check = raw_stats.get(id_key, defaultdict(int))
                 has_activity = (
                     s_check.get("passes_total", 0) > 0 or
@@ -281,9 +343,13 @@ class StatsEngine:
 
             # Identify Player
             is_known = False
-            
+
+            # Vote-recovered jerseys are always treated as known real players
+            if is_vote_recovered:
+                is_known = True
+
             # Check 1: Is it a valid Jersey Number in Registry?
-            if id_manager and id_manager.is_jersey_number(id_key):
+            if not is_known and id_manager and id_manager.is_jersey_number(id_key):
                 is_known = True
 
             # Check 2: (CRITICAL FIX) Did this ID actually appear as a BOUND Jersey?
@@ -755,11 +821,11 @@ class StatsEngine:
                     else:
                         nearest = team_a_color  # Close to chromatic team
                 else:
-                    # Both teams chromatic — use standard hue distance
+                    # Both teams achromatic (White + Black) or both chromatic
                     dist_a = _hue_dist(orphan_color, team_a_color)
                     dist_b = _hue_dist(orphan_color, team_b_color)
                     if dist_a == dist_b:
-                        # Round 6: Balance-aware tie-break — assign to the SMALLER team
+                        # Balance-aware tie-break — assign to the SMALLER team
                         size_a = len(team_a_jerseys)
                         size_b = len(team_b_jerseys)
                         nearest = team_b_color if size_a > size_b else team_a_color
