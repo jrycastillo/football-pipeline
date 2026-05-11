@@ -148,12 +148,14 @@ class StatsEngine:
             for track_id, stats_dict in raw_stats.items():
                 jersey_num = track_to_jersey.get(track_id)
                 if jersey_num is not None and jersey_num != track_id:
-                    # Weight = total distance + touch frames (proxy for "most data")
                     weight = 0
                     for key in ("distance_m", "total_distance", "touch_frames", "ball_touches"):
                         if key in stats_dict:
                             weight += abs(stats_dict[key]) if isinstance(stats_dict[key], (int, float)) else 0
-                    jersey_candidates[jersey_num].append((track_id, stats_dict, weight))
+                    # Use (team, jersey) as key to support same jersey number on both teams
+                    track_team = stats_dict.get("team", id_manager.get_track_color(track_id) if id_manager else "Unknown")
+                    candidate_key = (track_team, jersey_num)
+                    jersey_candidates[candidate_key].append((track_id, stats_dict, weight))
                     remap_count += 1
                 else:
                     unmapped[track_id] = stats_dict
@@ -188,10 +190,11 @@ class StatsEngine:
             # R8 had no pick-primary and summed everything; pick-primary (R9-R12) was too aggressive
             # and discarded 95%+ of events. Top-N is the middle ground.
             _MERGE_TOP_N = 5  # Sum events from primary + top 4 fragments
-            for jersey_num, candidates in jersey_candidates.items():
+            for candidate_key, candidates in jersey_candidates.items():
+                jersey_num = candidate_key[1] if isinstance(candidate_key, tuple) else candidate_key
                 if len(candidates) == 1:
                     _, stats_dict, _ = candidates[0]
-                    remapped_stats[jersey_num] = stats_dict
+                    remapped_stats[candidate_key] = stats_dict
                 else:
                     # Sort by weight (most data first = primary)
                     candidates.sort(key=lambda x: x[2], reverse=True)
@@ -236,7 +239,7 @@ class StatsEngine:
                             print(f"[Phase 216] Jersey #{jersey_num}: capped {key} from {merged[key]} to {_MAX_GOALS_PER_PLAYER}")
                             merged[key] = _MAX_GOALS_PER_PLAYER
 
-                    remapped_stats[jersey_num] = merged
+                    remapped_stats[candidate_key] = merged
                     extra = len(merge_candidates) - 1
                     skipped = len(candidates) - len(merge_candidates)
                     print(f"[Phase 216] Jersey #{jersey_num}: top-{len(merge_candidates)} merged "

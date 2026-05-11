@@ -613,7 +613,7 @@ class PARSeqRecognizer:
         for rank, i in enumerate(valid_idx):
             pred = preds_text[rank].strip()
             conf = confs[rank]
-            if pred.isdigit() and 1 <= int(pred) <= 99 and conf >= 0.65:
+            if pred.isdigit() and 1 <= int(pred) <= 99 and conf >= 0.50:
                 parseq_results[i] = {"number": int(pred), "confidence": conf,
                                      "status": "valid", "raw_text": pred}
             else:

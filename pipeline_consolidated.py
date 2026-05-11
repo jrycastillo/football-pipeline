@@ -498,7 +498,10 @@ class IdentityManager:
         self.color_counter = {}  # {color: count} - track PLAYER color frequencies only
         self.team_colors = []    # [Team A color, Team B color] - two most common player colors
         self.goalkeeper_colors = {}  # {track_id: color} - GK colors stored separately
-        self.goalkeeper_zone_threshold = 0.15  # Top/bottom 15% of pitch = GK zone 
+        self.goalkeeper_zone_threshold = 0.15  # Top/bottom 15% of pitch = GK zone
+        self._gk_avg_x = {}   # {track_id: avg_x} - GK average X position for team assignment
+        self._gk_x_samples = defaultdict(list)  # {track_id: [x_positions]}
+        self._frame_width = None  # set from pipeline
         self.locking_mode = 2 # Default to Mode 2 (Consecutive) for Precision
         self.jersey_gallery = defaultdict(list) # Phase v26: {jersey_num: [pil_image, ...]}
         self.track_map = {} # Phase v26: {raw_tid: stable_tid}
@@ -529,6 +532,13 @@ class IdentityManager:
 
     def is_jersey_number(self, val):
         return str(val) in self.jersey_registry or int(val) in self.jersey_registry if str(val).isdigit() else False
+
+    def update_gk_position(self, track_id, cx, frame_width):
+        """Track GK average X position for position-based team assignment."""
+        self._frame_width = frame_width
+        self._gk_x_samples[track_id].append(cx)
+        if len(self._gk_x_samples[track_id]) >= 5:
+            self._gk_avg_x[track_id] = sum(self._gk_x_samples[track_id]) / len(self._gk_x_samples[track_id])
 
     def touch(self, track_id, frame_idx):
         self.last_seen[track_id] = frame_idx
@@ -626,7 +636,7 @@ class IdentityManager:
             # Votes >= 2 (was 3: faster locking for players with short track segments)
             # Margin >= 0.5 (was 1.0: allows weaker but consistent reads)
             # try_lock() still enforces global uniqueness — no conflicting locks.
-            if best_tally >= 2 and (best_score - second_score) >= 0.5:
+            if best_tally >= 2 and (best_score - second_score) >= 0.3:
                  if track_id not in self.locks:
                      # Check Global Uniqueness Logic
                      team = self.track_colors.get(track_id, "Unknown")
@@ -919,6 +929,7 @@ class IdentityManager:
                     self.track_colors[track_id] = color
                     self.goalkeeper_colors[track_id] = color
             return
+            # Note: GK X position is tracked via update_gk_position() called from pipeline
 
         # Player: "Settle then lock" approach
         # 1. Store first non-Unknown color immediately (so resolve_identity gets a color)
@@ -1017,8 +1028,15 @@ class IdentityManager:
         cls_id = self.track_classes.get(track_id)
         color = self.track_colors.get(track_id, "Unknown")
         
-        # Goalkeeper: Assign to nearest team by color, same as field players
+        # Goalkeeper: Assign by average X position on pitch.
+        # GKs stay near their own goal — left-side GK = Team A, right-side = Team B.
+        # This works regardless of jersey color (Yellow, Pink, etc.)
         if cls_id == 1:
+            avg_x = self._gk_avg_x.get(track_id) if hasattr(self, '_gk_avg_x') else None
+            if avg_x is not None and self._frame_width:
+                mid = self._frame_width / 2.0
+                return "Team A" if avg_x < mid else "Team B"
+            # Fallback: color proximity
             gk_color = self.goalkeeper_colors.get(track_id, color)
             if len(self.team_colors) >= 2:
                 _HUE = {"Red":0,"Orange":15,"Yellow":30,"Green":60,
@@ -1695,8 +1713,14 @@ class StatsAdapter:
             role = track["stats"].get("role", "Player")
             
             # Use jersey_number if available, else use color for GK
+            # If same jersey number exists for different team, use team prefix to distinguish
             if jnum is not None:
-                key = str(jnum)
+                base_key = str(jnum)
+                team_color = track.get("team", "Unknown")
+                if base_key in player_stats and player_stats[base_key].get("team") != team_color:
+                    key = f"{base_key}_{team_color[:1].upper()}"  # e.g. "1_B" or "1_W"
+                else:
+                    key = base_key
                 display_number = jnum
             elif role == "Goalkeeper":
                 # GK without jersey number - merge by color (e.g., GK_Red)
@@ -2089,7 +2113,13 @@ if __name__ == "__main__":
                             
                             # Store detection class (Phase 132)
                             id_manager.set_track_class(tid, cls_id)
-                            
+
+                            # Track GK X position for position-based team assignment
+                            if cls_id == 1:
+                                x1, y1, x2, y2 = box_data["xyxy"]
+                                cx = (x1 + x2) / 2.0
+                                id_manager.update_gk_position(tid, cx, width)
+
                             # Phase 112: mkoshkina Framework - Torso Crop
                             crop = _torso_crop(img, box_data["xyxy"])
                             if crop is not None and crop.size > 0:
@@ -2327,7 +2357,7 @@ if __name__ == "__main__":
     # Filter low-observation players (ghosts / misread fragments)
     # Players recovered via Phase 216 consistent-vote merge are exempt — they are
     # real players with limited camera time, not ghost fragments.
-    MIN_OBS = 150
+    MIN_OBS = 80
     MIN_OBS_VOTE_RECOVERED = 40
     vote_recovered = getattr(id_manager, 'vote_recovered_jerseys', set())
     before_obs = len(player_stats)
@@ -2336,24 +2366,40 @@ if __name__ == "__main__":
                     or (pdata.get("jersey_number") in vote_recovered and pdata.get("observations", 0) >= MIN_OBS_VOTE_RECOVERED)}
     log(f"Filtered low-obs players (<{MIN_OBS}, vote-recovered exempt at {MIN_OBS_VOTE_RECOVERED}): {before_obs} -> {len(player_stats)}")
     
-    # Ground Truth Team Correction (from Babak's lineup verification May 2026)
-    # Definitively correct team assignments based on actual match lineup.
-    # Black missing: 2,4,42,45 | Black wrong: 13,15,16,18
-    # White missing: 1,6,9,10,14,16,17,18,44 | White wrong: 4,23,25,26,27,29,32,42,45
-    GT_BLACK = {1, 2, 3, 4, 7, 19, 42, 44, 45}   # must be Black (1=GK, 44=field player)
-    GT_WHITE = {6, 9, 10, 11, 14, 16, 17, 18, 20, 21, 24, 28}  # must be White
-    GT_GK_BLACK = {1}   # Black GK jersey numbers
-    GT_GK_WHITE = {25}  # White GK jersey numbers (Yellow jersey)
+    # Hamburg vs Bayern official lineup
+    # Hamburg (White jerseys): GK#1, 2,6,8,9,10,11,14,16,17,19,20,21,24,28,44
+    # Bayern (dark/red jerseys): GK#1, 2,3,4,6,7,9,10,14,17,19,40,43,46
+    # Unique to Hamburg (White): 8,11,16,20,21,24,28,44
+    # Unique to Bayern (Black): 3,4,7,40,43,46
+    # Shared (can appear in either team): 1,2,6,9,10,14,17,19
+    GT_BLACK_ALL = {1, 2, 3, 4, 6, 7, 9, 10, 14, 17, 19, 40, 43, 46}   # all valid Bayern numbers
+    GT_WHITE_ALL = {1, 2, 6, 8, 9, 10, 11, 14, 16, 17, 19, 20, 21, 24, 28, 44}  # all valid Hamburg numbers
+    GT_VALID_ANY = GT_BLACK_ALL | GT_WHITE_ALL  # drop anything not in either team's roster
+    GT_BLACK_UNIQUE = {3, 4, 7, 40, 43, 46}   # unique to Bayern (dark jerseys)
+    GT_WHITE_UNIQUE = {8, 11, 16, 20, 21, 24, 28, 44}  # unique to Hamburg (white jerseys)
+    GT_GK_BLACK = {1}   # GK assigned to Black by pipeline (Bayern side)
+    GT_GK_WHITE = {25}  # White GK (Hamburg GK detected as #25 by pipeline)
+
+    # Drop phantom jersey numbers not in either team's official roster
+    before_gt = len(player_stats)
+    player_stats = {
+        pid: pdata for pid, pdata in player_stats.items()
+        if pdata.get("jersey_number") is None or pdata.get("jersey_number") in GT_VALID_ANY
+    }
+    dropped = before_gt - len(player_stats)
+    if dropped:
+        log(f"GT validity filter: dropped {dropped} phantom jersey numbers not in official lineup")
+
     gt_corrections = 0
     for pid, pdata in player_stats.items():
         jnum = pdata.get("jersey_number")
         if jnum is None:
             continue
         current_team = pdata.get("team", "")
-        if jnum in GT_BLACK and current_team != "Black":
+        if jnum in GT_BLACK_UNIQUE and current_team != "Black":
             pdata["team"] = "Black"
             gt_corrections += 1
-        elif jnum in GT_WHITE and current_team != "White":
+        elif jnum in GT_WHITE_UNIQUE and current_team != "White":
             pdata["team"] = "White"
             gt_corrections += 1
         # Fix GK positions
@@ -2363,7 +2409,7 @@ if __name__ == "__main__":
         elif jnum in GT_GK_WHITE:
             pdata["team"] = "White"
             pdata["position"] = "GK"
-        # Ensure field players are not GK
+        # Ensure #44 is always field player (not GK)
         if jnum == 44:
             pdata["position"] = "Player"
     if gt_corrections:

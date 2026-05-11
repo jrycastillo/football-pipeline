@@ -202,18 +202,19 @@ class TeamColorClassifier:
         return "Red"                  # Pink -> Red
     
     def predict(self, crop, track_id=None):
-        """Predict jersey color from image crop using HSV analysis."""
+        """Predict jersey color from image crop using whole-jersey K-means clustering."""
         if crop is None or crop.size == 0:
             return "Unknown"
-        
+
         h, w = crop.shape[:2]
         if h < 20 or w < 20:
             return "Unknown"
-        
-        # Step 1: Get torso region
+
+        # Step 1: Get torso region (whole jersey area, not just shoulders)
         torso = self._get_torso_roi(crop)
         if torso.size == 0:
             torso = crop
+
         
         # Step 2: Convert to HSV
         hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
