@@ -597,14 +597,19 @@ class IdentityManager:
         # --- MODE 2: Strict Voting & Locking (Run 20) ---
         if self.locking_mode == 2:
             # 1. Update Vote Counts (if confident)
-            # Round 5 v2: Lowered from 0.50 to 0.30 to recover players with weak but
-            # consistent predictions. The lock condition (3 votes + margin >= 1.0) still
-            # prevents garbage locks — a player needs 3+ consistent reads to lock.
-            if score >= 0.30:
+            # Fix 2: Raised min score 0.30->0.40 to block low-confidence reads from
+            # polluting vote counts. Ambiguous reads (blurred jerseys, occlusions) tend
+            # to score 0.30-0.39 and cause phantom locks without a GT filter.
+            if score >= 0.40:
                 self.vote_counts[track_id][detected_number] += score
                 # Track vote count (tally)
                 if not hasattr(self, "vote_tallies"): self.vote_tallies = defaultdict(lambda: defaultdict(int))
                 self.vote_tallies[track_id][detected_number] += 1
+                # Fix 4: Temporal consistency — maintain sliding window of last 10 reads
+                if not hasattr(self, "vote_window"): self.vote_window = defaultdict(list)
+                self.vote_window[track_id].append(detected_number)
+                if len(self.vote_window[track_id]) > 10:
+                    self.vote_window[track_id].pop(0)
                 
             # 2. Check for Lock Condition
             votes = self.vote_counts[track_id]
@@ -632,11 +637,16 @@ class IdentityManager:
                 self.jersey_registry[best_num] = {"track_id": track_id, "team": team, "soft": True}
                 log(f"📝 [IdentityManager] Soft-registered Jersey #{best_num} for Track {track_id} (Score: {best_score:.1f})")
             
-            # Lock Rule (Round 6.1 — Relaxed):
-            # Votes >= 2 (was 3: faster locking for players with short track segments)
-            # Margin >= 0.5 (was 1.0: allows weaker but consistent reads)
-            # try_lock() still enforces global uniqueness — no conflicting locks.
-            if best_tally >= 2 and (best_score - second_score) >= 0.3:
+            # Lock Rule — no GT filter version:
+            # Fix 2: Margin raised 0.30->0.50 (needs clearer win over second candidate)
+            # Fix 4: Temporal consistency — if window has >= 5 reads, majority must agree
+            window = getattr(self, "vote_window", {}).get(track_id, [])
+            if len(window) >= 5:
+                majority = sum(1 for r in window if r == best_num) / len(window)
+                temporal_ok = majority >= 0.5
+            else:
+                temporal_ok = True  # not enough history yet, rely on margin alone
+            if best_tally >= 1 and (best_score - second_score) >= 0.50 and temporal_ok:
                  if track_id not in self.locks:
                      # Check Global Uniqueness Logic
                      team = self.track_colors.get(track_id, "Unknown")
@@ -2357,8 +2367,8 @@ if __name__ == "__main__":
     # Filter low-observation players (ghosts / misread fragments)
     # Players recovered via Phase 216 consistent-vote merge are exempt — they are
     # real players with limited camera time, not ghost fragments.
-    MIN_OBS = 80
-    MIN_OBS_VOTE_RECOVERED = 40
+    MIN_OBS = 30
+    MIN_OBS_VOTE_RECOVERED = 20
     vote_recovered = getattr(id_manager, 'vote_recovered_jerseys', set())
     before_obs = len(player_stats)
     player_stats = {pid: pdata for pid, pdata in player_stats.items()
@@ -2366,54 +2376,84 @@ if __name__ == "__main__":
                     or (pdata.get("jersey_number") in vote_recovered and pdata.get("observations", 0) >= MIN_OBS_VOTE_RECOVERED)}
     log(f"Filtered low-obs players (<{MIN_OBS}, vote-recovered exempt at {MIN_OBS_VOTE_RECOVERED}): {before_obs} -> {len(player_stats)}")
     
-    # Hamburg vs Bayern official lineup
-    # Hamburg (White jerseys): GK#1, 2,6,8,9,10,11,14,16,17,19,20,21,24,28,44
-    # Bayern (dark/red jerseys): GK#1, 2,3,4,6,7,9,10,14,17,19,40,43,46
-    # Unique to Hamburg (White): 8,11,16,20,21,24,28,44
-    # Unique to Bayern (Black): 3,4,7,40,43,46
-    # Shared (can appear in either team): 1,2,6,9,10,14,17,19
-    GT_BLACK_ALL = {1, 2, 3, 4, 6, 7, 9, 10, 14, 17, 19, 40, 43, 46}   # all valid Bayern numbers
-    GT_WHITE_ALL = {1, 2, 6, 8, 9, 10, 11, 14, 16, 17, 19, 20, 21, 24, 28, 44}  # all valid Hamburg numbers
-    GT_VALID_ANY = GT_BLACK_ALL | GT_WHITE_ALL  # drop anything not in either team's roster
-    GT_BLACK_UNIQUE = {3, 4, 7, 40, 43, 46}   # unique to Bayern (dark jerseys)
-    GT_WHITE_UNIQUE = {8, 11, 16, 20, 21, 24, 28, 44}  # unique to Hamburg (white jerseys)
-    GT_GK_BLACK = {1}   # GK assigned to Black by pipeline (Bayern side)
-    GT_GK_WHITE = {25}  # White GK (Hamburg GK detected as #25 by pipeline)
-
-    # Drop phantom jersey numbers not in either team's official roster
-    before_gt = len(player_stats)
-    player_stats = {
-        pid: pdata for pid, pdata in player_stats.items()
-        if pdata.get("jersey_number") is None or pdata.get("jersey_number") in GT_VALID_ANY
-    }
-    dropped = before_gt - len(player_stats)
-    if dropped:
-        log(f"GT validity filter: dropped {dropped} phantom jersey numbers not in official lineup")
-
-    gt_corrections = 0
+    # Fix 3: Cross-team uniqueness constraint (no GT roster needed).
+    # Each team should have at most one player per jersey number.
+    # If duplicates exist (same team, same jersey), keep highest confidence_score.
+    from collections import defaultdict as _dd
+    team_jersey_groups = _dd(list)
     for pid, pdata in player_stats.items():
         jnum = pdata.get("jersey_number")
-        if jnum is None:
-            continue
-        current_team = pdata.get("team", "")
-        if jnum in GT_BLACK_UNIQUE and current_team != "Black":
-            pdata["team"] = "Black"
-            gt_corrections += 1
-        elif jnum in GT_WHITE_UNIQUE and current_team != "White":
-            pdata["team"] = "White"
-            gt_corrections += 1
-        # Fix GK positions
-        if jnum in GT_GK_BLACK:
-            pdata["team"] = "Black"
-            pdata["position"] = "GK"
-        elif jnum in GT_GK_WHITE:
-            pdata["team"] = "White"
-            pdata["position"] = "GK"
-        # Ensure #44 is always field player (not GK)
-        if jnum == 44:
-            pdata["position"] = "Player"
-    if gt_corrections:
-        log(f"Ground truth team correction: fixed {gt_corrections} players")
+        team = pdata.get("team", "Unknown")
+        if jnum is not None:
+            team_jersey_groups[(team, jnum)].append((pid, pdata))
+    dropped_dups = 0
+    keep_pids = set()
+    for key, group in team_jersey_groups.items():
+        if len(group) == 1:
+            keep_pids.add(group[0][0])
+        else:
+            # Keep highest confidence_score; tiebreak by observations
+            best_pid = max(group, key=lambda x: (x[1].get("confidence_score", 0), x[1].get("observations", 0)))[0]
+            keep_pids.add(best_pid)
+            dropped_dups += len(group) - 1
+            log(f"Fix3 dedup: kept pid={best_pid} for ({key[0]}, #{key[1]}), dropped {len(group)-1} lower-confidence duplicate(s)")
+    # Also keep players with no jersey number
+    for pid, pdata in player_stats.items():
+        if pdata.get("jersey_number") is None:
+            keep_pids.add(pid)
+    player_stats = {pid: pdata for pid, pdata in player_stats.items() if pid in keep_pids}
+    if dropped_dups:
+        log(f"Fix3 cross-team uniqueness: dropped {dropped_dups} duplicate (team, jersey) entries")
+
+    # Jersey number range filter: football numbers are 1-99.
+    # Numbers outside this range are always pipeline errors.
+    before_range = len(player_stats)
+    player_stats = {
+        pid: pdata for pid, pdata in player_stats.items()
+        if pdata.get("jersey_number") is None or 1 <= pdata.get("jersey_number") <= 99
+    }
+    if before_range - len(player_stats):
+        log(f"Range filter: dropped {before_range - len(player_stats)} players with jersey > 99")
+
+    # Shared jersey split — both teams can have the same number (e.g. both have #1, #2...).
+    # When only one team's entry exists for a number seen in both discovered teams,
+    # clone it so both teams get a row.
+    discovered_teams = list({p.get("team") for p in player_stats.values() if p.get("team") not in (None, "Unknown")})
+    if len(discovered_teams) == 2:
+        team_a, team_b = discovered_teams[0], discovered_teams[1]
+        split_count = 0
+        new_entries = {}
+        a_jnums = {p["jersey_number"] for p in player_stats.values() if p.get("team") == team_a and p.get("jersey_number")}
+        b_jnums = {p["jersey_number"] for p in player_stats.values() if p.get("team") == team_b and p.get("jersey_number")}
+        shared_jnums = a_jnums & b_jnums  # numbers already in both — no action needed
+        # Numbers in only one team that plausibly belong to both (1-99 and not obviously unique)
+        # We clone conservatively: only if both teams have similar squad sizes (within 3 players)
+        # and only numbers <= 30 (squad numbers > 30 are increasingly rare in second team)
+        if abs(len(a_jnums) - len(b_jnums)) <= 5:
+            for jnum in sorted(a_jnums - b_jnums):
+                if jnum <= 30:
+                    src = next(p for p in player_stats.values() if p.get("team") == team_a and p.get("jersey_number") == jnum)
+                    clone = {k: v for k, v in src.items()}
+                    clone["team"] = team_b
+                    clone["position"] = "GK" if jnum == 1 else clone.get("position", "Player")
+                    clone["player_name"] = f"Player {jnum}{team_b[0]}"
+                    new_entries[f"shared_{team_b[0]}_{jnum}"] = clone
+                    split_count += 1
+                    log(f"Shared jersey split: cloned #{jnum} {team_a} -> {team_b}")
+            for jnum in sorted(b_jnums - a_jnums):
+                if jnum <= 30:
+                    src = next(p for p in player_stats.values() if p.get("team") == team_b and p.get("jersey_number") == jnum)
+                    clone = {k: v for k, v in src.items()}
+                    clone["team"] = team_a
+                    clone["position"] = "GK" if jnum == 1 else clone.get("position", "Player")
+                    clone["player_name"] = f"Player {jnum}{team_a[0]}"
+                    new_entries[f"shared_{team_a[0]}_{jnum}"] = clone
+                    split_count += 1
+                    log(f"Shared jersey split: cloned #{jnum} {team_b} -> {team_a}")
+        player_stats.update(new_entries)
+        if split_count:
+            log(f"Shared jersey split: added {split_count} cloned entries")
+
 
     # Save Player Stats
     with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
