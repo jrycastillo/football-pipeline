@@ -162,10 +162,11 @@ class StatsEngine:
 
             # For each jersey, MERGE stats from all fragments:
             # - Event stats (discrete occurrences): SUM across all fragments
-            #   (each fragment covers different time periods, so events are additive)
-            # - Accumulative stats (distance, frames): keep PRIMARY only
-            #   (overlapping fragments would double-count continuous metrics)
+            # - Distance/touch: also SUM — ByteTrack fragments cover non-overlapping
+            #   time periods so distance is additive (unlike events which could double-count
+            #   if same event appears in multiple fragments, distance physically cannot)
             _EVENT_KEYS = {
+                "distance_m", "touch_frames",  # accumulative but additive across non-overlapping fragments
                 "tackles", "tackles_successful", "shots_on_target",
                 "dribbles", "dribbles_successful",
                 "passes_total", "passes_complete",
@@ -256,7 +257,19 @@ class StatsEngine:
         # 3. Final Formatting
         formatted_stats = {}
         
-        # Get all distinct IDs from stats + jersey registry
+        # Get all distinct IDs from stats + jersey registry.
+        # Phase 216 remap produces tuple keys (team, jersey). Unwrap them so
+        # the formatting loop can look up stats correctly.
+        tuple_stats = {k: v for k, v in raw_stats.items() if isinstance(k, tuple)}
+        plain_stats = {k: v for k, v in raw_stats.items() if not isinstance(k, tuple)}
+        # For tuple keys: promote to plain jersey key, merge if collision
+        for (team, jnum), v in tuple_stats.items():
+            if jnum not in plain_stats:
+                plain_stats[jnum] = v
+                plain_stats[jnum]["team"] = team
+            # else: keep existing plain entry (registry-based already correct)
+        raw_stats = plain_stats
+
         all_ids = set(raw_stats.keys())
         if id_manager:
             all_ids.update(id_manager.jersey_registry.keys())
@@ -377,10 +390,14 @@ class StatsEngine:
             if is_known:
                 final_key = str(id_key)
                 jersey_num = int(id_key)
-                
+
+                # Use team stored on stat dict from Phase 216 remap first
+                team_from_stats = raw_stats.get(id_key, {}).get("team") if isinstance(raw_stats.get(id_key), dict) else None
                 # Use Clustered Team Map if available
                 if hasattr(self, "team_map") and final_key in self.team_map:
                     team_name = self.team_map[final_key]
+                elif team_from_stats and team_from_stats not in ("Unknown", None):
+                    team_name = team_from_stats
                 else:
                     team_name = id_manager.get_player_color(jersey_num) if id_manager else "Unknown"
                     if team_name == "Unknown": team_name = "Unknown"

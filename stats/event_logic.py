@@ -162,8 +162,11 @@ class AdvancedEventDetector:
             dist = math.hypot(goal_x - start_pos[0], GOAL_CENTER_Y - start_pos[1])
             if dist < 0.5: dist = 0.5
             angle_rad = math.atan2(7.32, dist)
-            # Logistic: coefficients calibrated to real xG distributions
-            log_odds = -1.75 - 0.10 * dist + 1.80 * angle_rad
+            # Logistic recalibrated against Wyscout GT (Hamburg 2-2 Bayern):
+            # Real match xG: Hamburg 2.01, Bayern 1.74 (total 3.75)
+            # Old model gave 0.32 total (~12x too low), intercept raised accordingly
+            # Targets: 5m->~0.55, 11m->~0.18, 18m->~0.07, 25m->~0.03
+            log_odds = 1.80 - 0.10 * dist + 1.80 * angle_rad
             xg = 1.0 / (1.0 + math.exp(-log_odds))
             if header: xg *= 0.6
             if under_pressure: xg *= 0.75
@@ -236,6 +239,7 @@ class AdvancedEventDetector:
         # P2 fix: Require ball carrier movement for dribble detection
         dribble_debug_count = 0
         _tackle_frames_s1 = set()  # frames where tackles were credited in this section
+        _last_tackle_s1 = {}  # pid -> last frame, cooldown for section 1 tackles
         last_dribble_frame = {}  # pid -> last frame counted as dribble
         dribble_lookback = max(1, int(EFF_FPS * 0.5))  # 0.5 second lookback for movement check
         for t, pid in enumerate(ownership):
@@ -274,9 +278,12 @@ class AdvancedEventDetector:
                         else:
                             # Dribble Failed -> Challenge Won by Opponent
                             stats[opp_id]["challenges_won_total"] += 1
-                            stats[opp_id]["tackles"] += 1
-                            stats[opp_id]["tackles_successful"] += 1
-                            _tackle_frames_s1.add(t)  # P0: track for dedup
+                            last_s1 = _last_tackle_s1.get(opp_id, -999)
+                            if t - last_s1 > int(EFF_FPS * 30):
+                                stats[opp_id]["tackles"] += 1
+                                stats[opp_id]["tackles_successful"] += 1
+                                _last_tackle_s1[opp_id] = t
+                                _tackle_frames_s1.add(t)  # P0: track for dedup
 
         # 2. Passing (Change of Ownership)
         # Segment ownership
@@ -302,7 +309,7 @@ class AdvancedEventDetector:
         # Round 15: Minimum ownership duration to count as pass origin
         # Rapid ownership switching in crowded areas creates false passes
         # Lowered from 0.3s to 0.15s to recover real short passes
-        MIN_OWN_FRAMES = max(2, int(EFF_FPS * 0.15))  # ~1-2 frames at stride=3
+        MIN_OWN_FRAMES = max(1, int(EFF_FPS * 0.08))  # ~1 frame at stride=3 — count very brief touches
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
@@ -449,7 +456,7 @@ class AdvancedEventDetector:
                             # duration and mitigate inflation from team clustering errors)
                             int_frame = seg_b["start"]
                             last_int = _last_interception_frame.get(p_b, -999)
-                            if int_frame - last_int > int(EFF_FPS * 10):
+                            if int_frame - last_int > int(EFF_FPS * 60):
                                 _last_interception_frame[p_b] = int_frame
                                 stats[p_b]["interceptions"] += 1
                                 stats[p_b]["ball_interceptions_total"] += 1
@@ -771,11 +778,31 @@ class AdvancedEventDetector:
                  # Round 17: Tackle cooldown 10s per player
                  # With correct camera, proximity events are more frequent
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
-                 if end_frame - last_tkl < int(EFF_FPS * 10):
+                 if end_frame - last_tkl < int(EFF_FPS * 30):
                      continue
-                 # Round 17: Proximity 3m — true 3m with corrected camera
-                 # Old effective range was ~2.7m (5m * 0.055/0.1), so 3m is close
-                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=3.0):
+                 # Require physical proximity AND ball speed drop after transition
+                 # A real tackle: opponent is close AND ball slows/changes direction
+                 # Check ball speed before vs after the transition frame
+                 ball_speed_drop = False
+                 if ball_track and end_frame >= 2 and end_frame + 2 < len(ball_track):
+                     b_before = ball_track[end_frame - 2]
+                     b_at     = ball_track[end_frame]
+                     b_after  = ball_track[end_frame + 2]
+                     if b_before and b_at and b_after:
+                         m_before = self.camera.project_point(b_before[0], b_before[1])
+                         m_at     = self.camera.project_point(b_at[0], b_at[1])
+                         m_after  = self.camera.project_point(b_after[0], b_after[1])
+                         spd_before = math.hypot(m_at[0]-m_before[0], m_at[1]-m_before[1])
+                         spd_after  = math.hypot(m_after[0]-m_at[0], m_after[1]-m_at[1])
+                         # Ball slowed by >=40% or changed direction -> physical contest
+                         if spd_before > 0.3 and (spd_after < spd_before * 0.6):
+                             ball_speed_drop = True
+                         # Direction change: dot product negative
+                         dx1, dy1 = m_at[0]-m_before[0], m_at[1]-m_before[1]
+                         dx2, dy2 = m_after[0]-m_at[0], m_after[1]-m_at[1]
+                         if (dx1*dx2 + dy1*dy2) < 0:
+                             ball_speed_drop = True
+                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=2.5) and ball_speed_drop:
                      _last_tackle_frame_s3[p_b] = end_frame
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1
