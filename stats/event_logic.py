@@ -76,7 +76,7 @@ class AdvancedEventDetector:
             if smoothed[i] is not None:
                 last = smoothed[i]
                 gap = 0
-            elif last is not None and gap < int(1.5 * EFF_FPS):  # ~1.5 seconds of gap fill (ball often undetected during passes)
+            elif last is not None and gap < int(2.5 * EFF_FPS):  # 2.5s gap fill — ball undetected during passes/flights (industry: 2-3s)
                 smoothed[i] = last
                 gap += 1
         return smoothed
@@ -159,14 +159,23 @@ class AdvancedEventDetector:
                 dist_to_left = abs(start_pos[0] - 0.0)
                 goal_x = GOAL_X if dist_to_right < dist_to_left else 0.0
 
-            dist = math.hypot(goal_x - start_pos[0], GOAL_CENTER_Y - start_pos[1])
-            if dist < 0.5: dist = 0.5
-            angle_rad = math.atan2(7.32, dist)
-            # Logistic recalibrated against Wyscout GT (Hamburg 2-2 Bayern):
-            # Real match xG: Hamburg 2.01, Bayern 1.74 (total 3.75)
-            # Old model gave 0.32 total (~12x too low), intercept raised accordingly
-            # Targets: 5m->~0.55, 11m->~0.18, 18m->~0.07, 25m->~0.03
-            log_odds = 1.80 - 0.10 * dist + 1.80 * angle_rad
+            # X = distance from goal line, C = lateral offset from center
+            X = abs(start_pos[0] - goal_x)
+            C = abs(start_pos[1] - GOAL_CENTER_Y)
+            if X < 0.5: X = 0.5
+            angle_rad = math.atan2(7.32 * X, X * X + C * C - GOAL_WIDTH_HALF ** 2)
+            if angle_rad < 0: angle_rad += math.pi
+
+            # Soccermatics open-source model (Wyscout data, 105x68m pitch).
+            # Penalty (X=11,C=0)->0.77, 6yd box (X=5.5,C=0)->0.58, box edge (X=16.5,C=0)->0.12
+            log_odds = (0.5103
+                        + 0.6338 * angle_rad
+                        - 0.2798 * math.hypot(X, C)
+                        + 0.1243 * X
+                        - 0.0300 * C
+                        + 0.0014 * X * X
+                        + 0.0041 * C * C
+                        - 0.1251 * angle_rad * X)
             xg = 1.0 / (1.0 + math.exp(-log_odds))
             if header: xg *= 0.6
             if under_pressure: xg *= 0.75
@@ -306,10 +315,10 @@ class AdvancedEventDetector:
         # Round 2 fix: Interception debounce — max 1 per player per 3-second window
         _last_interception_frame = {}  # pid -> last frame an interception was credited
 
-        # Round 15: Minimum ownership duration to count as pass origin
-        # Rapid ownership switching in crowded areas creates false passes
-        # Lowered from 0.3s to 0.15s to recover real short passes
-        MIN_OWN_FRAMES = max(1, int(EFF_FPS * 0.08))  # ~1 frame at stride=3 — count very brief touches
+        # Minimum ownership duration before a possession counts as a pass origin.
+        # Industry (Tryolabs): 0.4s mode window at 25fps. At stride=3, EFF_FPS~8.3,
+        # so 3 frames ≈ 0.36s — prevents single-frame noise blips from registering as passes.
+        MIN_OWN_FRAMES = max(3, int(EFF_FPS * 0.36))  # ~3 frames at stride=3
 
         for i in range(len(non_none_segments) - 1):
             seg_a = non_none_segments[i]
@@ -348,7 +357,7 @@ class AdvancedEventDetector:
                     p_a_c = bbox_center(p_a_box["xyxy"])
                     p_b_c = bbox_center(p_b_box["xyxy"])
                     prox = self.camera.calculate_distance(p_a_c, p_b_c)
-                    if prox < 2.0:  # Physical contact range → tackle, not pass
+                    if prox < 0.8:  # Only filter body-contact range (<0.8m); 2m was over-filtering short passes
                         _pass_debug["tackle_filtered"] += 1
                         continue
 
@@ -451,12 +460,14 @@ class AdvancedEventDetector:
                     # --- INTERCEPTION LOGIC & ADVANCED DEFENSE ---
                     if not is_complete:
                         if team_map and team_a and team_b and team_a != team_b:
-                            # Round 3 fix: Debounce — max 1 interception per player per 10s window
-                            # (was 3s in Round 2; increased to match typical possession sequence
-                            # duration and mitigate inflation from team clustering errors)
                             int_frame = seg_b["start"]
                             last_int = _last_interception_frame.get(p_b, -999)
-                            if int_frame - last_int > int(EFF_FPS * 60):
+                            # Industry (Opta/StatsBomb): interception requires ball was in flight
+                            # (directed toward someone else, then cut off). Minimum ball travel
+                            # distance of 1.5m filters stationary loose-ball recoveries and tackles.
+                            ball_was_in_flight = dist > 1.5
+                            # Debounce: 15s per player (was 60s — too aggressive, blocked real interceptions)
+                            if int_frame - last_int > int(EFF_FPS * 15) and ball_was_in_flight:
                                 _last_interception_frame[p_b] = int_frame
                                 stats[p_b]["interceptions"] += 1
                                 stats[p_b]["ball_interceptions_total"] += 1
@@ -775,14 +786,29 @@ class AdvancedEventDetector:
                  already_counted = any(abs(end_frame - tf) < EFF_FPS for tf in _tackle_frames_s1)
                  if already_counted:
                      continue
-                 # Round 17: Tackle cooldown 10s per player
-                 # With correct camera, proximity events are more frequent
+
+                 # Industry (Opta): tackle requires CONTROLLED possession — passer must have
+                 # held the ball for at least 5 effective frames (~0.6s at stride=3) before
+                 # being dispossessed. Filters loose balls and deflections.
+                 seg_a_dur = seg_a["end"] - seg_a["start"]
+                 if seg_a_dur < 5:
+                     continue
+
+                 # Industry: tackle is always a cross-team event (defender dispossesses attacker)
+                 if team_map:
+                     team_a = team_map.get(str(p_a))
+                     team_b = team_map.get(str(p_b))
+                     if team_a and team_b and team_a != "Unknown" and team_b != "Unknown":
+                         if team_a == team_b:
+                             continue  # Same team — not a tackle
+
+                 # Per-player cooldown: 30s
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
                  if end_frame - last_tkl < int(EFF_FPS * 30):
                      continue
-                 # Require physical proximity AND ball speed drop after transition
-                 # A real tackle: opponent is close AND ball slows/changes direction
-                 # Check ball speed before vs after the transition frame
+
+                 # Require physical proximity AND ball speed drop/direction change.
+                 # A real tackle: defender is close AND ball reacts (slows or deflects).
                  ball_speed_drop = False
                  if ball_track and end_frame >= 2 and end_frame + 2 < len(ball_track):
                      b_before = ball_track[end_frame - 2]
@@ -794,10 +820,8 @@ class AdvancedEventDetector:
                          m_after  = self.camera.project_point(b_after[0], b_after[1])
                          spd_before = math.hypot(m_at[0]-m_before[0], m_at[1]-m_before[1])
                          spd_after  = math.hypot(m_after[0]-m_at[0], m_after[1]-m_at[1])
-                         # Ball slowed by >=40% or changed direction -> physical contest
                          if spd_before > 0.3 and (spd_after < spd_before * 0.6):
                              ball_speed_drop = True
-                         # Direction change: dot product negative
                          dx1, dy1 = m_at[0]-m_before[0], m_at[1]-m_before[1]
                          dx2, dy2 = m_after[0]-m_at[0], m_after[1]-m_at[1]
                          if (dx1*dx2 + dy1*dy2) < 0:
