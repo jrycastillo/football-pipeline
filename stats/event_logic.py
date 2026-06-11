@@ -288,7 +288,7 @@ class AdvancedEventDetector:
                             # Dribble Failed -> Challenge Won by Opponent
                             stats[opp_id]["challenges_won_total"] += 1
                             last_s1 = _last_tackle_s1.get(opp_id, -999)
-                            if t - last_s1 > int(EFF_FPS * 30):
+                            if t - last_s1 > int(EFF_FPS * 60):
                                 stats[opp_id]["tackles"] += 1
                                 stats[opp_id]["tackles_successful"] += 1
                                 _last_tackle_s1[opp_id] = t
@@ -606,24 +606,51 @@ class AdvancedEventDetector:
                                          if opp_id == shooter: continue
                                          pass
 
-                                    # --- GOAL DETECTION (Phase 85) ---
-                                    # Check if ball continues INTO net
-                                    # Look ahead ~2 seconds (enough for ball to reach goal from 16m at 8m/s)
-                                    goal_lookahead = max(10, int(2.0 * EFF_FPS))
+                                    # --- GOAL DETECTION ---
+                                    # Two methods: (1) trajectory extrapolation to goal line,
+                                    # (2) ball reaching near goal zone and disappearing.
+                                    # Linear homography can't reliably project the far goal line,
+                                    # so we use the shot vector to predict where the ball crosses.
                                     goal_confirmed = False
-                                    for k in range(i, min(i + goal_lookahead, len(ball_track))):
-                                        if ball_track[k]:
-                                            mk = self.camera.project_point(ball_track[k][0], ball_track[k][1])
-                                            # Check correct goal based on shot direction
-                                            # Round 17: Tolerance for goal line — with correct camera scaling,
-                                            # pitch boundaries are exact (0-105m), ball can't exceed them.
-                                            # Also widened Y range for goal mouth detection.
-                                            if moving_right and mk[0] > 103.0 and (28.0 < mk[1] < 40.0):
+                                    GOAL_Y_MIN = 30.34   # goal post Y in meters (34 - 7.32/2)
+                                    GOAL_Y_MAX = 37.66   # goal post Y in meters (34 + 7.32/2)
+                                    target_goal_x = goal_x  # 105.0 or 0.0 from shot direction
+
+                                    # Method 1: Extrapolate shot trajectory to goal line
+                                    if abs(m2[0] - m1[0]) > 0.05:
+                                        slope = (m2[1] - m1[1]) / (m2[0] - m1[0])
+                                        y_at_goal = m2[1] + slope * (target_goal_x - m2[0])
+                                        if GOAL_Y_MIN <= y_at_goal <= GOAL_Y_MAX:
+                                            # Ball is heading into the goal — confirm it stays
+                                            # on course for at least 1 more frame (not deflected)
+                                            lookahead = max(3, int(0.5 * EFF_FPS))
+                                            on_course = 0
+                                            for k in range(i+1, min(i+lookahead+1, len(ball_track))):
+                                                if ball_track[k]:
+                                                    mk2 = self.camera.project_point(ball_track[k][0], ball_track[k][1])
+                                                    y_proj = mk2[1] + slope * (target_goal_x - mk2[0])
+                                                    if GOAL_Y_MIN - 1.0 <= y_proj <= GOAL_Y_MAX + 1.0:
+                                                        on_course += 1
+                                            if on_course >= 1:
                                                 goal_confirmed = True
-                                                break
-                                            elif moving_left and mk[0] < 2.0 and (28.0 < mk[1] < 40.0):
+
+                                    # Method 2: Ball enters goal zone (within 5m of goal line, Y on target)
+                                    # and then disappears (no detection for 1+ second) — ball in net
+                                    if not goal_confirmed:
+                                        goal_lookahead = max(10, int(2.0 * EFF_FPS))
+                                        last_ball_in_zone = None
+                                        for k in range(i, min(i + goal_lookahead, len(ball_track))):
+                                            if ball_track[k]:
+                                                mk = self.camera.project_point(ball_track[k][0], ball_track[k][1])
+                                                near_goal = (mk[0] > 98.0) if moving_right else (mk[0] < 7.0)
+                                                if near_goal and (GOAL_Y_MIN - 1.5 <= mk[1] <= GOAL_Y_MAX + 1.5):
+                                                    last_ball_in_zone = k
+                                        if last_ball_in_zone is not None:
+                                            gap_start = last_ball_in_zone + 1
+                                            gap_end = min(last_ball_in_zone + int(EFF_FPS * 1.5), len(ball_track))
+                                            missing = sum(1 for k in range(gap_start, gap_end) if not ball_track[k])
+                                            if missing >= int(EFF_FPS * 0.8):
                                                 goal_confirmed = True
-                                                break
 
                                     if goal_confirmed:
                                         # Round 16: Validate shooter's team attacks this goal
@@ -788,10 +815,10 @@ class AdvancedEventDetector:
                      continue
 
                  # Industry (Opta): tackle requires CONTROLLED possession — passer must have
-                 # held the ball for at least 5 effective frames (~0.6s at stride=3) before
-                 # being dispossessed. Filters loose balls and deflections.
+                 # held ball for at least 15 effective frames (~1.8s at stride=3) before being
+                 # dispossessed. Filters loose ball recoveries and split-second deflections.
                  seg_a_dur = seg_a["end"] - seg_a["start"]
-                 if seg_a_dur < 5:
+                 if seg_a_dur < 15:
                      continue
 
                  # Industry: tackle is always a cross-team event (defender dispossesses attacker)
@@ -802,13 +829,14 @@ class AdvancedEventDetector:
                          if team_a == team_b:
                              continue  # Same team — not a tackle
 
-                 # Per-player cooldown: 30s
+                 # Per-player cooldown: 45s — real tackles are rare (2-3 per player per 90 min)
                  last_tkl = _last_tackle_frame_s3.get(p_b, -999)
-                 if end_frame - last_tkl < int(EFF_FPS * 30):
+                 if end_frame - last_tkl < int(EFF_FPS * 45):
                      continue
 
-                 # Require physical proximity AND ball speed drop/direction change.
-                 # A real tackle: defender is close AND ball reacts (slows or deflects).
+                 # Require physical proximity (1.5m) AND ball must have been moving before
+                 # the dispossession (spd_before > 1.0 m/s) — eliminates standing challenges.
+                 # Direction change OR speed drop ≥50% counts as a valid tackle reaction.
                  ball_speed_drop = False
                  if ball_track and end_frame >= 2 and end_frame + 2 < len(ball_track):
                      b_before = ball_track[end_frame - 2]
@@ -820,13 +848,14 @@ class AdvancedEventDetector:
                          m_after  = self.camera.project_point(b_after[0], b_after[1])
                          spd_before = math.hypot(m_at[0]-m_before[0], m_at[1]-m_before[1])
                          spd_after  = math.hypot(m_after[0]-m_at[0], m_after[1]-m_at[1])
-                         if spd_before > 0.3 and (spd_after < spd_before * 0.6):
+                         if spd_before > 1.0 and (spd_after < spd_before * 0.5):
                              ball_speed_drop = True
-                         dx1, dy1 = m_at[0]-m_before[0], m_at[1]-m_before[1]
-                         dx2, dy2 = m_after[0]-m_at[0], m_after[1]-m_at[1]
-                         if (dx1*dx2 + dy1*dy2) < 0:
-                             ball_speed_drop = True
-                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=2.5) and ball_speed_drop:
+                         if spd_before > 1.0:
+                             dx1, dy1 = m_at[0]-m_before[0], m_at[1]-m_before[1]
+                             dx2, dy2 = m_after[0]-m_at[0], m_after[1]-m_at[1]
+                             if (dx1*dx2 + dy1*dy2) < 0:
+                                 ball_speed_drop = True
+                 if self._is_opponent_near(end_frame, p_a, player_tracks, dist_m=1.5) and ball_speed_drop:
                      _last_tackle_frame_s3[p_b] = end_frame
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1
