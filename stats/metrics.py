@@ -160,6 +160,30 @@ class StatsEngine:
                 else:
                     unmapped[track_id] = stats_dict
 
+            # R18.1: Consolidate same-jersey groups split by noisy per-fragment team
+            # labels. Fragments of one player often carry different team labels
+            # (Red/White/Unknown/None), which split the merge into separate small
+            # groups — the unwrap step then kept only one group and silently dropped
+            # the rest (e.g. #21 lost a 343-event group in favor of a 76-event one).
+            # Pool all fragments per jersey under the weight-dominant real team.
+            _by_jersey = defaultdict(list)
+            for (team, jnum), cands in jersey_candidates.items():
+                _by_jersey[jnum].append((team, cands))
+            _consolidated = {}
+            for jnum, groups in _by_jersey.items():
+                team_weights = defaultdict(float)
+                all_cands = []
+                for team, cands in groups:
+                    all_cands.extend(cands)
+                    if team and team != "Unknown":
+                        team_weights[team] += sum(c[2] for c in cands)
+                best_team = max(team_weights, key=team_weights.get) if team_weights else "Unknown"
+                if len(groups) > 1:
+                    print(f"[Phase 216] Jersey #{jnum}: consolidated {len(groups)} team-label groups "
+                          f"({len(all_cands)} fragments) under team '{best_team}'")
+                _consolidated[(best_team, jnum)] = all_cands
+            jersey_candidates = _consolidated
+
             # For each jersey, MERGE stats from all fragments:
             # - Event stats (discrete occurrences): SUM across all fragments
             # - Distance/touch: also SUM — ByteTrack fragments cover non-overlapping
@@ -262,12 +286,13 @@ class StatsEngine:
         # the formatting loop can look up stats correctly.
         tuple_stats = {k: v for k, v in raw_stats.items() if isinstance(k, tuple)}
         plain_stats = {k: v for k, v in raw_stats.items() if not isinstance(k, tuple)}
-        # For tuple keys: promote to plain jersey key, merge if collision
+        # R18.1: Jersey-mapped stats always win over an unmapped raw track that
+        # happens to share the same numeric ID (e.g. unmapped track 21 colliding
+        # with jersey #21). Previously the unmapped track won and the jersey's
+        # entire merged stats were silently dropped.
         for (team, jnum), v in tuple_stats.items():
-            if jnum not in plain_stats:
-                plain_stats[jnum] = v
-                plain_stats[jnum]["team"] = team
-            # else: keep existing plain entry (registry-based already correct)
+            v["team"] = team
+            plain_stats[jnum] = v
         raw_stats = plain_stats
 
         all_ids = set(raw_stats.keys())

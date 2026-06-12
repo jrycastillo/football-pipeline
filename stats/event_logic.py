@@ -263,7 +263,7 @@ class AdvancedEventDetector:
                     if t >= dribble_lookback and ball_track[t] and ball_track[t - dribble_lookback]:
                         move_dist = self.camera.calculate_distance(
                             ball_track[t], ball_track[t - dribble_lookback])
-                        if move_dist > 1.0:  # Moved > 1m in 0.5 seconds
+                        if move_dist > 1.5:  # R18.1: raised 1.0 -> 1.5m in 0.5s
                             moved = True
                     elif t < dribble_lookback:
                         moved = True  # Not enough history, benefit of doubt
@@ -271,9 +271,10 @@ class AdvancedEventDetector:
                     if not moved:
                         continue  # Standing still with opponent near → not a dribble
 
-                    # Round 13: Dribble cooldown 1s per player (R8 baseline)
+                    # R18.1: Dribble cooldown raised 1s -> 3s — a take-on is a discrete
+                    # event, not something that recurs every second of a carry
                     last_frame = last_dribble_frame.get(pid, -999)
-                    if t - last_frame > EFF_FPS * 1:  # 1 second gap between dribble events
+                    if t - last_frame > EFF_FPS * 3:
                         last_dribble_frame[pid] = t
                         stats[pid]["dribbles"] += 1
                         dribble_debug_count += 1
@@ -463,11 +464,12 @@ class AdvancedEventDetector:
                             int_frame = seg_b["start"]
                             last_int = _last_interception_frame.get(p_b, -999)
                             # Industry (Opta/StatsBomb): interception requires ball was in flight
-                            # (directed toward someone else, then cut off). Minimum ball travel
-                            # distance of 1.5m filters stationary loose-ball recoveries and tackles.
-                            ball_was_in_flight = dist > 1.5
-                            # Debounce: 15s per player (was 60s — too aggressive, blocked real interceptions)
-                            if int_frame - last_int > int(EFF_FPS * 15) and ball_was_in_flight:
+                            # (directed toward someone else, then cut off). R18.1: minimum travel
+                            # raised 1.5m -> 3.0m — short transitions in crowded areas are ownership
+                            # mapping noise, not cut-out passes.
+                            ball_was_in_flight = dist > 3.0
+                            # R18.1: debounce 15s -> 30s per player
+                            if int_frame - last_int > int(EFF_FPS * 30) and ball_was_in_flight:
                                 _last_interception_frame[p_b] = int_frame
                                 stats[p_b]["interceptions"] += 1
                                 stats[p_b]["ball_interceptions_total"] += 1
@@ -802,12 +804,15 @@ class AdvancedEventDetector:
                                                          stats[gk_id]["jumping_saves"] += 1
 
         # 3. Defensive (Tackles)
-        # P0 fix: Deduplicate with section 1 tackles (dribble-based)
-        # Only count tackles here for transitions NOT already handled by dribble logic
-        # Round 11 fix: Increased debounce from 5s to 15s. At 5s, V4 (482K frames)
-        # produced 302 tackles (real match ~25-35 total). 15s limits to ~1 per 15s per player.
+        # R18.1: Transition-based tackles DISABLED. Every cross-team ownership flip
+        # fired this path; even with controlled-possession, proximity, and
+        # ball-reaction gates it overcounted 3-8x (ownership mapping noise in
+        # crowded areas). Tackles now come only from Section 1 (failed-dribble
+        # challenges), which matches the Opta definition: dispossessing a player
+        # who is in control of the ball.
+        _ENABLE_TRANSITION_TACKLES = False
         _last_tackle_frame_s3 = {}  # pid -> last frame a tackle was credited in section 3
-        for i in range(len(segments) - 1):
+        for i in (range(len(segments) - 1) if _ENABLE_TRANSITION_TACKLES else range(0)):
              seg_a = segments[i]
              seg_b = segments[i+1]
              p_a = seg_a["pid"]

@@ -1865,14 +1865,16 @@ if __name__ == "__main__":
 
 
 
-    # ReID Component (SigLIP)
+    # ReID Component — OSNet x0.25 (replaces SigLIP)
     siglip_classifier = None
+    osnet_reid = None
     if args.enable_reid:
-        log("🚀 [SigLIP] initializing for ReID...")
-        from vision.color_classifier import SigLIPTeamClassifier
-        siglip_classifier = SigLIPTeamClassifier()
+        log("🚀 [OSNetReID] Initializing OSNet x0.25 ReID...")
+        from vision.osnet_reid import OSNetReID
+        osnet_reid = OSNetReID.create()
+        log("✅ [OSNetReID] Ready")
     else:
-        log("💤 [SigLIP] ReID DISABLED (Lazy Load)")
+        log("💤 [OSNetReID] ReID DISABLED")
     
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
@@ -2137,9 +2139,12 @@ if __name__ == "__main__":
                                    color = color_classifier.predict_with_voting(crop, tid)
                                    id_manager.set_track_color(tid, color, cls_id=cls_id)
                                    
-                                   # Phase v28: SigLIP Observation
-                                   if siglip_classifier:
-                                       siglip_classifier.add_observation(tid, crop)
+                                   # OSNet ReID — update appearance memory per track
+                                   if osnet_reid:
+                                       x1r,y1r,x2r,y2r = [int(v) for v in box_data["xyxy"]]
+                                       full_crop = img[max(0,y1r):y2r, max(0,x1r):x2r]
+                                       emb = osnet_reid.extract_embedding(full_crop)
+                                       osnet_reid.update(tid, emb)
                                    
                                    # Phase 168: Global Kit Discovery
                                    kit_coordinator.observe(cls_id, color)
@@ -2415,44 +2420,11 @@ if __name__ == "__main__":
     if before_range - len(player_stats):
         log(f"Range filter: dropped {before_range - len(player_stats)} players with jersey > 99")
 
-    # Shared jersey split — both teams can have the same number (e.g. both have #1, #2...).
-    # When only one team's entry exists for a number seen in both discovered teams,
-    # clone it so both teams get a row.
-    discovered_teams = list({p.get("team") for p in player_stats.values() if p.get("team") not in (None, "Unknown")})
-    if len(discovered_teams) == 2:
-        team_a, team_b = discovered_teams[0], discovered_teams[1]
-        split_count = 0
-        new_entries = {}
-        a_jnums = {p["jersey_number"] for p in player_stats.values() if p.get("team") == team_a and p.get("jersey_number")}
-        b_jnums = {p["jersey_number"] for p in player_stats.values() if p.get("team") == team_b and p.get("jersey_number")}
-        shared_jnums = a_jnums & b_jnums  # numbers already in both — no action needed
-        # Numbers in only one team that plausibly belong to both (1-99 and not obviously unique)
-        # We clone conservatively: only if both teams have similar squad sizes (within 3 players)
-        # and only numbers <= 30 (squad numbers > 30 are increasingly rare in second team)
-        if abs(len(a_jnums) - len(b_jnums)) <= 5:
-            for jnum in sorted(a_jnums - b_jnums):
-                if jnum <= 30:
-                    src = next(p for p in player_stats.values() if p.get("team") == team_a and p.get("jersey_number") == jnum)
-                    clone = {k: v for k, v in src.items()}
-                    clone["team"] = team_b
-                    clone["position"] = "GK" if jnum == 1 else clone.get("position", "Player")
-                    clone["player_name"] = f"Player {jnum}{team_b[0]}"
-                    new_entries[f"shared_{team_b[0]}_{jnum}"] = clone
-                    split_count += 1
-                    log(f"Shared jersey split: cloned #{jnum} {team_a} -> {team_b}")
-            for jnum in sorted(b_jnums - a_jnums):
-                if jnum <= 30:
-                    src = next(p for p in player_stats.values() if p.get("team") == team_b and p.get("jersey_number") == jnum)
-                    clone = {k: v for k, v in src.items()}
-                    clone["team"] = team_a
-                    clone["position"] = "GK" if jnum == 1 else clone.get("position", "Player")
-                    clone["player_name"] = f"Player {jnum}{team_a[0]}"
-                    new_entries[f"shared_{team_a[0]}_{jnum}"] = clone
-                    split_count += 1
-                    log(f"Shared jersey split: cloned #{jnum} {team_b} -> {team_a}")
-        player_stats.update(new_entries)
-        if split_count:
-            log(f"Shared jersey split: added {split_count} cloned entries")
+    # R18.1: Shared jersey split REMOVED. It cloned a player's full stats to the
+    # other team for any number <= 30 present in only one team, fabricating up to
+    # 16 phantom entries per match and double-counting every stat they carried.
+    # If both teams genuinely share a number, each side's entry must come from
+    # its own tracked fragments, not a copy.
 
 
     # Save Player Stats
