@@ -186,11 +186,11 @@ class StatsEngine:
                 "fouls_total",
             }
 
-            # Round 13: Top-N merge — always sum events from top N fragments by weight.
-            # This recovers events from significant fragments without summing all 1500.
-            # R8 had no pick-primary and summed everything; pick-primary (R9-R12) was too aggressive
-            # and discarded 95%+ of events. Top-N is the middle ground.
-            _MERGE_TOP_N = 5  # Sum events from primary + top 4 fragments
+            # Round 13: Top-N merge — sum events from top N fragments by weight.
+            # R18: Raised from 5 to 20 — this video has ~67 fragments per player vs ~10
+            # on Hamburg/Bayern, so top-5 was only capturing ~7% of events per player.
+            # High-risk events (goals, tackles) are still capped after merge.
+            _MERGE_TOP_N = 20  # Sum events from primary + top 19 fragments
             for candidate_key, candidates in jersey_candidates.items():
                 jersey_num = candidate_key[1] if isinstance(candidate_key, tuple) else candidate_key
                 if len(candidates) == 1:

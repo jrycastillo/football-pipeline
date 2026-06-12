@@ -616,22 +616,28 @@ class AdvancedEventDetector:
                                     GOAL_Y_MAX = 37.66   # goal post Y in meters (34 + 7.32/2)
                                     target_goal_x = goal_x  # 105.0 or 0.0 from shot direction
 
-                                    # Method 1: Extrapolate shot trajectory to goal line
-                                    if abs(m2[0] - m1[0]) > 0.05:
+                                    # Method 1: Extrapolate shot trajectory to goal line.
+                                    # Gate: shot must originate from within 30m of target goal
+                                    # AND xG must be meaningful (>0.02) — eliminates long-range
+                                    # shots that happen to project near the center of the goal.
+                                    dist_shooter_to_goal = abs(m1[0] - target_goal_x)
+                                    xg_for_gate = calculate_xg(m1, goal_x=target_goal_x, under_pressure=False)
+                                    if (dist_shooter_to_goal <= 30.0 and xg_for_gate > 0.02
+                                            and abs(m2[0] - m1[0]) > 0.05):
                                         slope = (m2[1] - m1[1]) / (m2[0] - m1[0])
                                         y_at_goal = m2[1] + slope * (target_goal_x - m2[0])
                                         if GOAL_Y_MIN <= y_at_goal <= GOAL_Y_MAX:
                                             # Ball is heading into the goal — confirm it stays
-                                            # on course for at least 1 more frame (not deflected)
+                                            # on course for at least 2 more frames (not deflected)
                                             lookahead = max(3, int(0.5 * EFF_FPS))
                                             on_course = 0
                                             for k in range(i+1, min(i+lookahead+1, len(ball_track))):
                                                 if ball_track[k]:
                                                     mk2 = self.camera.project_point(ball_track[k][0], ball_track[k][1])
                                                     y_proj = mk2[1] + slope * (target_goal_x - mk2[0])
-                                                    if GOAL_Y_MIN - 1.0 <= y_proj <= GOAL_Y_MAX + 1.0:
+                                                    if GOAL_Y_MIN - 0.5 <= y_proj <= GOAL_Y_MAX + 0.5:
                                                         on_course += 1
-                                            if on_course >= 1:
+                                            if on_course >= 2:
                                                 goal_confirmed = True
 
                                     # Method 2: Ball enters goal zone (within 5m of goal line, Y on target)
@@ -815,10 +821,10 @@ class AdvancedEventDetector:
                      continue
 
                  # Industry (Opta): tackle requires CONTROLLED possession — passer must have
-                 # held ball for at least 15 effective frames (~1.8s at stride=3) before being
+                 # held ball for at least 20 effective frames (~2.4s at stride=3) before being
                  # dispossessed. Filters loose ball recoveries and split-second deflections.
                  seg_a_dur = seg_a["end"] - seg_a["start"]
-                 if seg_a_dur < 15:
+                 if seg_a_dur < 20:
                      continue
 
                  # Industry: tackle is always a cross-team event (defender dispossesses attacker)
