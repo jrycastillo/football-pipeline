@@ -152,8 +152,15 @@ class StatsEngine:
                     for key in ("distance_m", "total_distance", "touch_frames", "ball_touches"):
                         if key in stats_dict:
                             weight += abs(stats_dict[key]) if isinstance(stats_dict[key], (int, float)) else 0
-                    # Use (team, jersey) as key to support same jersey number on both teams
-                    track_team = stats_dict.get("team", id_manager.get_track_color(track_id) if id_manager else "Unknown")
+                    # Use (team, jersey) as key to support same jersey number on both teams.
+                    # R18.2: team from the clustered team_map (the two discovered kits),
+                    # not per-fragment raw color — raw colors include noise labels
+                    # (Blue/Green) that aren't actual teams.
+                    track_team = None
+                    if team_map_ref:
+                        track_team = team_map_ref.get(str(track_id)) or team_map_ref.get(str(jersey_num))
+                    if not track_team or track_team == "Unknown":
+                        track_team = stats_dict.get("team", id_manager.get_track_color(track_id) if id_manager else "Unknown")
                     candidate_key = (track_team, jersey_num)
                     jersey_candidates[candidate_key].append((track_id, stats_dict, weight))
                     remap_count += 1
@@ -169,6 +176,9 @@ class StatsEngine:
             _by_jersey = defaultdict(list)
             for (team, jnum), cands in jersey_candidates.items():
                 _by_jersey[jnum].append((team, cands))
+            # R18.2: only the two clustered kit teams are valid labels — raw color
+            # noise (Blue/Green on a Red/White match) must not win the team vote
+            _valid_teams = set(team_map_ref.values()) - {"Unknown", None} if team_map_ref else None
             _consolidated = {}
             for jnum, groups in _by_jersey.items():
                 team_weights = defaultdict(float)
@@ -176,6 +186,8 @@ class StatsEngine:
                 for team, cands in groups:
                     all_cands.extend(cands)
                     if team and team != "Unknown":
+                        if _valid_teams and team not in _valid_teams:
+                            continue
                         team_weights[team] += sum(c[2] for c in cands)
                 best_team = max(team_weights, key=team_weights.get) if team_weights else "Unknown"
                 if len(groups) > 1:
@@ -270,6 +282,33 @@ class StatsEngine:
                     print(f"[Phase 216] Jersey #{jersey_num}: top-{len(merge_candidates)} merged "
                           f"(primary={primary_tid}, recovered {recovered_events} events from {extra} fragment(s), "
                           f"{skipped} minor fragments skipped)")
+
+            # R18.2: Rate-based sanity caps, scaled to observed match duration.
+            # Event cooldowns in the engine are per track fragment, so pooling N
+            # fragments under one jersey multiplies every cooldown-limited stat
+            # (e.g. #21 with 78 fragments reached 61 tackles / 19km distance).
+            # Caps reflect the high end of real per-player per-90 numbers.
+            _RATE_CAPS_PER_90 = {
+                "tackles": 6, "tackles_successful": 6,
+                "interceptions": 9, "ball_interceptions_total": 9,
+                "dribbles": 12, "dribbles_successful": 8,
+                "challenges_total": 18, "challenges_won_total": 12,
+                "shots_on_target": 8,
+                "passes_total": 100, "passes_complete": 90,
+                "crosses_total": 12, "crosses_complete": 8,
+                "distance_m": 13000.0,
+            }
+            match_minutes = (len(all_frames) / EFF_FPS) / 60.0 if all_frames else 90.0
+            _dur_ratio = max(0.05, match_minutes / 90.0)
+            for ck, merged_stats in remapped_stats.items():
+                jnum_log = ck[1] if isinstance(ck, tuple) else ck
+                for key, per90 in _RATE_CAPS_PER_90.items():
+                    cap = per90 * _dur_ratio if key == "distance_m" else max(1, round(per90 * _dur_ratio))
+                    val = merged_stats.get(key, 0)
+                    if isinstance(val, (int, float)) and val > cap:
+                        print(f"[Phase 216] Jersey #{jnum_log}: capped {key} {val} -> {cap} "
+                              f"(rate cap, {match_minutes:.0f} min)")
+                        merged_stats[key] = cap
 
             # Keep unmapped tracks as-is
             for track_id, stats_dict in unmapped.items():

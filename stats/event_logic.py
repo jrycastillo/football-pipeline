@@ -23,7 +23,7 @@ EFF_FPS = FPS / VID_STRIDE
 # Constants (Meters) - Phase 190/195: Relaxed thresholds
 DIST_TOUCH = 5.0  # Increased for better possession detection
 DIST_DRIBBLE_OPP = 3.0  # Phase 195: Increased from 2.0 to 3.0m for more dribble detection
-DIST_PASS_MIN = 1.0  # Reduced to 1m to capture short/lateral passes (was 2.0m)
+DIST_PASS_MIN = 3.0  # R18.2: raised 1.0 -> 3.0m. Sub-3m ownership flips are mapping noise in crowded areas, not real passes (engine fired ~49 transitions/min at 1m).
 TIME_DRIBBLE_RETAIN = 1.5  # Phase 195: Reduced from 2.0s to 1.5s for quicker dribble success
 SHOT_SPEED_THRESHOLD = 16.0  # Round 19: 16 m/s (58 km/h) — filters passes/clearances, keeps real shots
 
