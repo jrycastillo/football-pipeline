@@ -327,22 +327,24 @@ class StatsEngine:
                           f"(primary={primary_tid}, recovered {recovered_events} events from {extra} fragment(s), "
                           f"{skipped} minor fragments skipped)")
 
-            # Rate-based sanity caps, scaled to observed match duration.
-            # With Option A (identities resolved before stats), these should
-            # almost never fire — events are now counted once per player, not
-            # once per fragment. Kept as a loose backstop against any residual
-            # unresolved-fragment leakage. Values are the high end of real
-            # per-player per-90 numbers; frequent firing here signals Option A
-            # missed some fragments and warrants investigation, not reliance.
+            # Far-outlier guard, scaled to observed match duration.
+            # With Option A (identities resolved before stats), events are now
+            # counted once per player, so real per-player variation is valid and
+            # must NOT be flattened. These ceilings are deliberately ~2.5x the
+            # realistic top-of-range so they fire ONLY on clearly-broken values
+            # (e.g. a fragment-leak explosion of 40+ tackles), never on a genuine
+            # busy player. A previous tighter version (tackles 6/90 -> cap 2 for a
+            # 30-min clip) was clamping everyone to identical values and hiding
+            # the real spread.
             _RATE_CAPS_PER_90 = {
-                "tackles": 6, "tackles_successful": 6,
-                "interceptions": 9, "ball_interceptions_total": 9,
-                "dribbles": 12, "dribbles_successful": 8,
-                "challenges_total": 18, "challenges_won_total": 12,
-                "shots_on_target": 8,
-                "passes_total": 100, "passes_complete": 90,
-                "crosses_total": 12, "crosses_complete": 8,
-                "distance_m": 13000.0,
+                "tackles": 18, "tackles_successful": 18,
+                "interceptions": 25, "ball_interceptions_total": 25,
+                "dribbles": 30, "dribbles_successful": 24,
+                "challenges_total": 45, "challenges_won_total": 35,
+                "shots_on_target": 14,
+                "passes_total": 160, "passes_complete": 150,
+                "crosses_total": 25, "crosses_complete": 18,
+                "distance_m": 14500.0,
             }
             match_minutes = (len(all_frames) / EFF_FPS) / 60.0 if all_frames else 90.0
             _dur_ratio = max(0.05, match_minutes / 90.0)
