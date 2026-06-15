@@ -2293,7 +2293,10 @@ if __name__ == "__main__":
             annotated_img = visualizer.draw_hud(img.copy(), frame_data, id_manager)
             if writer:
                 writer.write(annotated_img)
-            all_frames.append(frame_data)
+            # NOTE: frame_data is already appended to all_frames at the end of the
+            # detection block above (~line 2272). A second append here duplicated
+            # every frame, doubling all_frames length (30k for a 15k-frame stride-3
+            # pass) and inflating ownership/distance/duration by 2x. Removed.
 
     except KeyboardInterrupt:
         print("Pipeline interrupted by user.")
