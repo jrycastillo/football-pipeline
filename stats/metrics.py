@@ -6,6 +6,80 @@ class StatsEngine:
     def __init__(self, frame_width=None, frame_height=None):
         self.detector = AdvancedEventDetector(frame_width=frame_width, frame_height=frame_height)
         
+    def _build_track_to_jersey(self, id_manager):
+        """Build the canonical track_id -> jersey_number map.
+
+        Combines locked bindings, the jersey registry, consistent-vote
+        recoveries, and raw-read recoveries — the same resolution logic
+        Phase 216 used inline. Extracted so it can run BEFORE the stats
+        engine (Option A: resolve identities up front so each player is a
+        single ID and events are never summed across fragments).
+        """
+        track_to_jersey = {}
+        if not id_manager:
+            return track_to_jersey
+
+        if hasattr(id_manager, 'active_bindings'):
+            track_to_jersey.update(id_manager.active_bindings)
+        if hasattr(id_manager, 'jersey_registry'):
+            for jersey_num, info in id_manager.jersey_registry.items():
+                if isinstance(info, dict) and 'track_id' in info:
+                    tid = info['track_id']
+                    if tid not in track_to_jersey:
+                        track_to_jersey[tid] = jersey_num
+
+        # Consistent-vote recovery: fragments that read the right number but
+        # never locked due to the global-uniqueness constraint.
+        if hasattr(id_manager, 'vote_counts') and hasattr(id_manager, 'vote_tallies'):
+            for tid, votes in id_manager.vote_counts.items():
+                if tid in track_to_jersey or not votes:
+                    continue
+                best_num = max(votes, key=votes.get)
+                best_tally = id_manager.vote_tallies.get(tid, {}).get(best_num, 0)
+                best_score = votes[best_num]
+                second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
+                if best_tally >= 2 and (best_score - second_score) >= 0.3 and best_score >= 0.50:
+                    track_to_jersey[tid] = best_num
+                    if not hasattr(id_manager, 'vote_recovered_jerseys'):
+                        id_manager.vote_recovered_jerseys = set()
+                    id_manager.vote_recovered_jerseys.add(best_num)
+        elif hasattr(id_manager, 'vote_counts'):
+            for tid, votes in id_manager.vote_counts.items():
+                if tid in track_to_jersey or not votes:
+                    continue
+                best_num = max(votes, key=votes.get)
+                best_score = votes[best_num]
+                second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
+                if best_score >= 1.3 and (best_score - second_score) >= 0.5:
+                    track_to_jersey[tid] = best_num
+                    if not hasattr(id_manager, 'vote_recovered_jerseys'):
+                        id_manager.vote_recovered_jerseys = set()
+                    id_manager.vote_recovered_jerseys.add(best_num)
+
+        # Raw-read recovery: low-confidence reads that never entered vote_counts.
+        already_found = set(track_to_jersey.values())
+        if hasattr(id_manager, 'raw_read_counts'):
+            jersey_raw_counts = defaultdict(int)
+            for tid, counts in id_manager.raw_read_counts.items():
+                for jnum, cnt in counts.items():
+                    jersey_raw_counts[jnum] += cnt
+            for jnum, total_cnt in sorted(jersey_raw_counts.items(), key=lambda x: x[1], reverse=True):
+                if jnum in already_found:
+                    continue
+                if total_cnt >= 20:
+                    best_tid = max(
+                        (tid for tid, counts in id_manager.raw_read_counts.items() if jnum in counts),
+                        key=lambda t: id_manager.raw_read_counts[t].get(jnum, 0)
+                    )
+                    track_to_jersey[best_tid] = jnum
+                    already_found.add(jnum)
+                    if not hasattr(id_manager, 'vote_recovered_jerseys'):
+                        id_manager.vote_recovered_jerseys = set()
+                    id_manager.vote_recovered_jerseys.add(jnum)
+                    print(f"[Phase 216++] Raw recovery: Jersey #{jnum} ({total_cnt} total raw reads)")
+
+        return track_to_jersey
+
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
         """
         Process full video history to generate stats.
@@ -49,6 +123,31 @@ class StatsEngine:
 
             self._cluster_teams(id_manager, player_dominant_classes, match_kits=match_kits, siglip_teams=siglip_teams)
 
+        # Option A: Resolve identities BEFORE the stats engine runs.
+        # Remap every box's track ID to its final jersey number so each player
+        # is a single ID for ownership/event detection. This eliminates the
+        # fragment over-count at its source — events are detected once per
+        # player instead of once per ByteTrack fragment, so Phase 216 no longer
+        # has to sum (and over-sum) across overlapping fragments.
+        _pre_resolved_jerseys = set()
+        if id_manager:
+            _ttj = self._build_track_to_jersey(id_manager)
+            if _ttj:
+                _remapped_boxes = 0
+                for f in all_frames:
+                    for b in f.get("boxes", []):
+                        tid = b.get("id")
+                        if tid is None:
+                            continue
+                        jnum = _ttj.get(tid)
+                        if jnum is not None and jnum != tid:
+                            b["id"] = jnum
+                            _remapped_boxes += 1
+                _pre_resolved_jerseys = set(_ttj.values())
+                print(f"[Option A] Pre-resolved {len(_ttj)} track IDs to "
+                      f"{len(_pre_resolved_jerseys)} jerseys "
+                      f"({_remapped_boxes} box IDs remapped before stats)")
+
         # 1. Map Possession
         ownership = self.detector.calculate_ownership(player_tracks, ball_track)
         owned_frames = sum(1 for o in ownership if o is not None)
@@ -69,85 +168,30 @@ class StatsEngine:
             remapped_stats = {}
             remap_count = 0
 
-            # Build reverse lookup: track_id -> jersey_number
-            track_to_jersey = {}
-            if hasattr(id_manager, 'active_bindings'):
-                track_to_jersey.update(id_manager.active_bindings)
-            if hasattr(id_manager, 'jersey_registry'):
-                for jersey_num, info in id_manager.jersey_registry.items():
-                    if isinstance(info, dict) and 'track_id' in info:
-                        tid = info['track_id']
-                        if tid not in track_to_jersey:
-                            track_to_jersey[tid] = jersey_num
-
-            # Phase 216+: Also include tracks with 2+ consistent votes that never
-            # locked due to global uniqueness constraint. These are real player
-            # fragments — same player, different ByteTrack track ID — that read
-            # the correct jersey number consistently but were blocked from locking.
-            if hasattr(id_manager, 'vote_counts') and hasattr(id_manager, 'vote_tallies'):
-                for tid, votes in id_manager.vote_counts.items():
-                    if tid in track_to_jersey:
-                        continue  # already mapped
-                    if not votes:
-                        continue
-                    best_num = max(votes, key=votes.get)
-                    best_tally = id_manager.vote_tallies.get(tid, {}).get(best_num, 0)
-                    best_score = votes[best_num]
-                    second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
-                    # Only include if consistent: 2+ votes, margin >= 0.3, score >= 0.50
-                    if best_tally >= 2 and (best_score - second_score) >= 0.3 and best_score >= 0.50:
-                        track_to_jersey[tid] = best_num
-                        # Mark this jersey as vote-recovered so pipeline can exempt from MIN_OBS
-                        if not hasattr(id_manager, 'vote_recovered_jerseys'):
-                            id_manager.vote_recovered_jerseys = set()
-                        id_manager.vote_recovered_jerseys.add(best_num)
-            elif hasattr(id_manager, 'vote_counts'):
-                for tid, votes in id_manager.vote_counts.items():
-                    if tid in track_to_jersey or not votes:
-                        continue
-                    best_num = max(votes, key=votes.get)
-                    best_score = votes[best_num]
-                    second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
-                    if best_score >= 1.3 and (best_score - second_score) >= 0.5:
-                        track_to_jersey[tid] = best_num
-                        if not hasattr(id_manager, 'vote_recovered_jerseys'):
-                            id_manager.vote_recovered_jerseys = set()
-                        id_manager.vote_recovered_jerseys.add(best_num)
-
-            # Phase 216++: Raw read recovery — use low-confidence reads that never
-            # entered vote_counts. Aggregate across ALL tracks by jersey number.
-            # Any jersey number with 20+ total raw reads across all tracks is real.
-            already_found = set(track_to_jersey.values())
-            if hasattr(id_manager, 'raw_read_counts'):
-                jersey_raw_counts = defaultdict(int)
-                for tid, counts in id_manager.raw_read_counts.items():
-                    for jnum, cnt in counts.items():
-                        jersey_raw_counts[jnum] += cnt
-
-                for jnum, total_cnt in sorted(jersey_raw_counts.items(), key=lambda x: x[1], reverse=True):
-                    if jnum in already_found:
-                        continue
-                    # Require 20+ total raw reads across all tracks
-                    if total_cnt >= 20:
-                        best_tid = max(
-                            (tid for tid, counts in id_manager.raw_read_counts.items() if jnum in counts),
-                            key=lambda t: id_manager.raw_read_counts[t].get(jnum, 0)
-                        )
-                        track_to_jersey[best_tid] = jnum
-                        already_found.add(jnum)
-                        if not hasattr(id_manager, 'vote_recovered_jerseys'):
-                            id_manager.vote_recovered_jerseys = set()
-                        id_manager.vote_recovered_jerseys.add(jnum)
-                        print(f"[Phase 216++] Raw recovery: Jersey #{jnum} ({total_cnt} total raw reads)")
+            # Option A: box IDs were already remapped to jersey numbers before
+            # the engine ran, so most stats come back keyed by jersey. The map
+            # is rebuilt here only to catch any residual raw track IDs (e.g.
+            # frames before a player's identity resolved). With Option A active,
+            # each jersey typically has a single candidate and the merge below
+            # no longer sums across overlapping fragments.
+            track_to_jersey = self._build_track_to_jersey(id_manager)
 
             # Group tracks by target jersey number, keeping track of which
             # track has the most data (primary track)
             jersey_candidates = defaultdict(list)  # jersey_num -> [(track_id, stats_dict, weight)]
             unmapped = {}  # tracks with no jersey mapping
 
+            # Set of jersey numbers known to id_manager — used to recognize
+            # stats keys that are ALREADY jersey numbers (Option A pre-resolved
+            # boxes produce jersey-keyed stats, so key == jersey, not a track ID).
+            _known_jerseys = set(track_to_jersey.values()) | _pre_resolved_jerseys
+
             for track_id, stats_dict in raw_stats.items():
                 jersey_num = track_to_jersey.get(track_id)
-                if jersey_num is not None and jersey_num != track_id:
+                # Option A: key is already a resolved jersey number
+                if jersey_num is None and track_id in _known_jerseys:
+                    jersey_num = track_id
+                if jersey_num is not None:
                     weight = 0
                     for key in ("distance_m", "total_distance", "touch_frames", "ball_touches"):
                         if key in stats_dict:
@@ -283,11 +327,13 @@ class StatsEngine:
                           f"(primary={primary_tid}, recovered {recovered_events} events from {extra} fragment(s), "
                           f"{skipped} minor fragments skipped)")
 
-            # R18.2: Rate-based sanity caps, scaled to observed match duration.
-            # Event cooldowns in the engine are per track fragment, so pooling N
-            # fragments under one jersey multiplies every cooldown-limited stat
-            # (e.g. #21 with 78 fragments reached 61 tackles / 19km distance).
-            # Caps reflect the high end of real per-player per-90 numbers.
+            # Rate-based sanity caps, scaled to observed match duration.
+            # With Option A (identities resolved before stats), these should
+            # almost never fire — events are now counted once per player, not
+            # once per fragment. Kept as a loose backstop against any residual
+            # unresolved-fragment leakage. Values are the high end of real
+            # per-player per-90 numbers; frequent firing here signals Option A
+            # missed some fragments and warrants investigation, not reliance.
             _RATE_CAPS_PER_90 = {
                 "tackles": 6, "tackles_successful": 6,
                 "interceptions": 9, "ball_interceptions_total": 9,
