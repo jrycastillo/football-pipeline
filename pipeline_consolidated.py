@@ -2002,7 +2002,14 @@ if __name__ == "__main__":
                         tracker.args.match_thresh = 0.65       # User: 0.65
                         tracker.args.track_high_thresh = 0.45  # User: 0.45
                         tracker.args.track_low_thresh = 0.08   # User: 0.08
-                        tracker.args.new_track_thresh = 0.85   # User: 0.85
+                        # new_track_thresh: spawn a track only above this detection
+                        # confidence. 0.85 suits broadcast footage (large, high-conf
+                        # players) but starves non-broadcast/elevated footage where
+                        # real players detect at lower confidence (median ~0.77),
+                        # leaving most players untracked. Config-driven; default 0.85
+                        # preserves the validated match behavior.
+                        tracker.args.new_track_thresh = float(
+                            CONFIG["heuristics"].get("NEW_TRACK_THRESH", 0.85))
                         tracker.args.track_buffer = 240
                         
                     # ByteTrack generally handles detection objects or numpy arrays
