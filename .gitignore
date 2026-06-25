@@ -1,0 +1,74 @@
+# --- System & Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+!.env.example
+.venv/
+venv/
+env/
+
+# --- Logs & Debug ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+processing_*.log
+*.err
+*.txt
+!requirements.txt
+
+# --- Large Data & Media ---
+data/
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.zip
+*.tar.gz
+*.csv
+
+# --- Models & Weights ---
+models/
+output_models/
+weights/
+*.pt
+*.pth
+*.onnx
+hf_cache/
+
+# --- Output Directories ---
+output/
+output_*/
+runs/
+out/
+temp_crops/
+wandb/
+test_stats_fix/
+test_color_histogram/
+temp_*.jpg
+*_results.json
+chatgpt_*
+evaluation_images/
+*.png
+
+# --- Archive & Backup ---
+archive/
+archive_*/
+backups/
+backup_*/
+*.bak
+*.ipynb
+
+# --- IDE & Config ---
+.vscode/
+.idea/
+*.swp
+
+# --- Exceptions (Do not ignore) ---
+!config.yaml
+!schemas.py
+
+# Never track real env file
+.env
