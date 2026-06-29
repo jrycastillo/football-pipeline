@@ -2266,10 +2266,23 @@ if __name__ == "__main__":
                          if pred["number"] is not None:
                             # 1. Resolve Identity
                             team_color = id_manager.get_track_color(track_id)
-                            stable_id = id_manager.resolve_identity(track_id, pred["number"], team_color)
-                            
-                            log(f"DEBUG: Track {track_id} (Resolved: {stable_id}) => {pred['number']} (Color: {pred.get('color')}, Conf: {pred['confidence']})")
-                            id_manager.process_detection(stable_id, pred["number"], "auto", pred["confidence"], detected_color=pred.get("color"))
+
+                            # Phase 3 (user-input): soft roster constraint. Snap a
+                            # misread number to the nearest valid roster number for
+                            # the track's team; admit genuinely off-roster reads as-is.
+                            jnum = pred["number"]
+                            if roster_prior is not None:
+                                team_name = roster_prior.canonical_color_to_team.get(team_color)
+                                jnum, status = roster_prior.snap(jnum, pred["confidence"], team_name)
+                                if status == "snapped":
+                                    log(f"[Roster] Track {track_id}: snapped read {pred['number']} -> {jnum}")
+                                elif status == "off_roster":
+                                    log(f"[Roster] Track {track_id}: off-roster read {jnum} admitted (not in roster)")
+
+                            stable_id = id_manager.resolve_identity(track_id, jnum, team_color)
+
+                            log(f"DEBUG: Track {track_id} (Resolved: {stable_id}) => {jnum} (Color: {pred.get('color')}, Conf: {pred['confidence']})")
+                            id_manager.process_detection(stable_id, jnum, "auto", pred["confidence"], detected_color=pred.get("color"))
 
                         
                         # NEW DEBUG LOG (Phase v26.2)

@@ -49,8 +49,9 @@ class RosterPrior:
 
     def __init__(self, data):
         self._data = data
-        self.teams = {}          # team_name -> {"color": str, "roster": set[int]}
-        self.color_to_team = {}  # color -> team_name
+        self.teams = {}                   # team_name -> {"color": str, "roster": set[int]}
+        self.color_to_team = {}           # raw user color -> team_name
+        self.canonical_color_to_team = {} # canonical color (Red/White...) -> team_name
         self._all_numbers = set()
 
         for name, info in (data.get("teams") or {}).items():
@@ -64,6 +65,9 @@ class RosterPrior:
             self.teams[name] = {"color": color, "roster": roster}
             if color:
                 self.color_to_team[color] = name
+                ccol = canonical_color(color)
+                if ccol:
+                    self.canonical_color_to_team[ccol] = name
             self._all_numbers |= roster
 
         self.known_facts = data.get("known_facts", {}) or {}
@@ -94,6 +98,55 @@ class RosterPrior:
         if team_name is not None and team_name in self.teams:
             return num in self.teams[team_name]["roster"]
         return num in self._all_numbers
+
+    # Digit pairs that are commonly confused when reading blurred/angled jersey
+    # numbers. Snapping only fires on these, so a genuinely different off-roster
+    # number (e.g. 50) is admitted rather than force-corrected to 10.
+    _CONFUSABLE = {
+        frozenset("17"), frozenset("38"), frozenset("39"), frozenset("89"),
+        frozenset("08"), frozenset("06"), frozenset("68"), frozenset("56"),
+        frozenset("59"), frozenset("27"), frozenset("49"), frozenset("58"),
+    }
+
+    @classmethod
+    def _plausible_misread(cls, num, cand):
+        """True if cand is a plausible OCR misread of num: same digit count,
+        exactly one differing digit, and that digit pair is visually confusable
+        (e.g. 21<->27 via 1/7, 38<->88 via 3/8)."""
+        a, b = str(num), str(cand)
+        if len(a) != len(b):
+            return False
+        diffs = [(x, y) for x, y in zip(a, b) if x != y]
+        if len(diffs) != 1:
+            return False
+        return frozenset(diffs[0]) in cls._CONFUSABLE
+
+    def _nearest_roster(self, num, valid):
+        """Nearest roster number that is a plausible misread of num, or None."""
+        cands = [c for c in valid if self._plausible_misread(num, c)]
+        if not cands:
+            return None
+        return min(cands, key=lambda c: abs(c - num))
+
+    def snap(self, num, conf=None, team_name=None):
+        """Soft roster constraint. Returns (mapped_num, status):
+          - 'on_roster'  : read is a valid roster number (full trust)
+          - 'snapped'    : read corrected to a near roster number (OCR misread)
+          - 'off_roster' : no close roster match; kept as-is (admitted, unverified)
+        Constrains to team_name's roster when known, else to all numbers."""
+        try:
+            num = int(num)
+        except (TypeError, ValueError):
+            return num, "off_roster"
+        valid = self.numbers_for_team(team_name) if (team_name and team_name in self.teams) else self._all_numbers
+        if not valid:
+            return num, "off_roster"
+        if num in valid:
+            return num, "on_roster"
+        cand = self._nearest_roster(num, valid)
+        if cand is not None:
+            return cand, "snapped"
+        return num, "off_roster"
 
     def summary(self):
         parts = []
