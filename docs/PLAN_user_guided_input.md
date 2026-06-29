@@ -89,23 +89,26 @@ backward-compatible.**
 
 ## 5. Implementation phases (incremental, each testable)
 
-**Phase 1 — Input plumbing (low risk)**
-- Define the JSON schema + loader; add `--roster_file` CLI flag.
-- Validate and log what was loaded. No behavior change yet.
+**Phase 1 — Input plumbing — DONE (commit a6d7755)**
+- `vision/roster.py` (RosterPrior loader + validation) and `--roster_file` flag.
+- Backward-compatible: no file -> None -> fully automatic.
 
-**Phase 2 — Team colors as priors (medium)**
-- Feed user colors into team assignment; assign players to nearest given color
-  instead of K-means discovery. Fall back to discovery if not provided.
+**Phase 2 — Team colors as priors — DONE (commit b72cdbd)**
+- User colors override KitCoordinator discovery (`forced_player_colors`).
+- `canonical_color()` maps free-text colors to the classifier vocabulary.
 
-**Phase 3 — Roster-constrained jersey recognition (highest value)**
-- Constrain JNR locking to the known roster (closed-set). Map/reject reads
-  against the roster. Re-test the magnet bug under this constraint.
+**Phase 3 — Roster-constrained jersey recognition — DONE (commit 6bb780c)**
+- `RosterPrior.snap()`: misread JNR reads snap to the nearest valid roster
+  number (visually-confusable digit pairs only); off-roster reads admitted.
+- Wired at the JNR registration point in `pipeline_consolidated.py`.
 
-**Phase 4 — Validation & anchoring**
-- Compare output to known facts; surface mismatches. Wire the same input format
-  into the evaluation harness as ground truth.
+**Phase 4 — Validation & anchoring — PENDING**
+- Compare output to `known_facts` (e.g. final score vs detected goals); surface
+  mismatches. Wire the input format into the evaluation harness as ground truth.
+- Lower priority; depends on the evaluation harness.
 
-Each phase is independently testable on the 14-min clip and the 30-min match.
+Phases 1-3 unit-tested and deployed to the worker. Next: end-to-end run with a
+roster file on numbered match footage to validate live behavior.
 
 ---
 
