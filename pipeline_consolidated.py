@@ -1888,6 +1888,11 @@ if __name__ == "__main__":
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
     kit_coordinator = KitCoordinator()  # Phase 168
+    # Phase 2 (user-input): if the user supplied team colors, force them as the
+    # two player kits instead of discovering via K-means.
+    if roster_prior is not None:
+        kit_coordinator.forced_player_colors = list(roster_prior.canonical_team_colors().values())
+        log(f"[Roster] Forcing player team colors from user roster: {kit_coordinator.forced_player_colors}")
     pitch_manager = PitchManager(model_path=CONFIG['env'].get('POSE_WEIGHTS', 'models/yolo_pitch.pt'), device=get_device().type)
     camera = Camera(pitch_manager.H_default)
     

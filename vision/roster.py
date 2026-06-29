@@ -22,6 +22,27 @@ Schema:
 import json
 import os
 
+# Map free-text user colors onto the classifier's canonical football vocabulary
+# (Red, Blue, Green, Yellow, White, Black). Mirrors color_classifier._FOOTBALL_MERGE
+# plus common spelling variants the user might type.
+_COLOR_SYNONYMS = {
+    "maroon": "Red", "pink": "Red", "orange": "Red", "crimson": "Red",
+    "navy": "Blue", "cyan": "Blue", "teal": "Blue", "sky": "Blue", "skyblue": "Blue",
+    "lime": "Green",
+    "gold": "Yellow",
+    "silver": "White", "gray": "White", "grey": "White",
+}
+
+
+def canonical_color(c):
+    """Normalize a user-typed color to the classifier's canonical label."""
+    c = (c or "").strip().lower()
+    if not c:
+        return None
+    if c in _COLOR_SYNONYMS:
+        return _COLOR_SYNONYMS[c]
+    return c.capitalize()  # red->Red, white->White, black->Black, ...
+
 
 class RosterPrior:
     """Holds the user-provided team colors and per-team jersey rosters."""
@@ -50,8 +71,12 @@ class RosterPrior:
     # --- helpers used by later phases (team assignment, JNR constraint) ---
 
     def team_colors(self):
-        """{team_name: color} for seeding team assignment (Phase 2)."""
+        """{team_name: color} as typed by the user."""
         return {name: t["color"] for name, t in self.teams.items()}
+
+    def canonical_team_colors(self):
+        """{team_name: canonical_color} mapped to the classifier vocabulary (Phase 2)."""
+        return {name: canonical_color(t["color"]) for name, t in self.teams.items()}
 
     def all_numbers(self):
         """Set of every valid jersey number across both teams (Phase 3)."""

@@ -353,6 +353,9 @@ class KitCoordinator:
     def __init__(self):
         # 1=GK, 2=Player, 3=Referee
         self.counts = {1: Counter(), 2: Counter(), 3: Counter()}
+        # Phase 2 (user-input): when set to a list of canonical colors, these
+        # OVERRIDE the discovered player team colors (user-provided ground truth).
+        self.forced_player_colors = None
 
     def observe(self, cls_id, color):
         """Register a color observation for a class."""
@@ -367,6 +370,17 @@ class KitCoordinator:
             "goalkeepers": [],
             "players": []
         }
+
+        # Phase 2 (user-input): user-provided team colors override discovery.
+        # GK colors are still discovered from observations below.
+        if self.forced_player_colors:
+            forced = [c for c in self.forced_player_colors if c][:2]
+            if forced:
+                res["players"] = forced
+                for color, _ in self.counts[1].most_common(2):
+                    res["goalkeepers"].append(color)
+                print(f"[KitCoordinator] Player team colors FORCED from user roster: {forced}")
+                return res
 
         # Round 17: Find referee dominant color to exclude from team discovery
         # Referees typically wear yellow/green/pink — these should NOT be team colors
