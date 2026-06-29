@@ -1775,13 +1775,22 @@ if __name__ == "__main__":
     parser.add_argument('--audit_rejections', type=bool, default=False, help="Enable Tracklet audit logging")
     parser.add_argument('--resize_h', type=int, default=None, help="Downsample height (e.g. 720) for speed")
     parser.add_argument('--start_frame', type=int, default=0, help="Start processing from this frame number")
+    parser.add_argument('--roster_file', type=str, default=None,
+                        help="Optional JSON of user-provided team colors + jersey rosters "
+                             "(ground-truth priors). See docs/PLAN_user_guided_input.md. "
+                             "If omitted, the pipeline runs fully automatically.")
     args = parser.parse_args()
-    
+
     # Handle legacy argument mapping
     if args.tracker:
         args.tracking_mode = args.tracker
     else:
         args.tracker = args.tracking_mode
+
+    # Phase 1: load optional user-provided roster/team-color priors.
+    # Returns None when no file is given -> pipeline behaves exactly as before.
+    from vision.roster import RosterPrior
+    roster_prior = RosterPrior.load(args.roster_file)
 
     # Determine video path
     video_path = args.video or os.environ.get("PIPELINE_VIDEO") or CONFIG.get('env', {}).get('SRC_VIDEO') or "/home/ubuntu/football/121364_0.mp4"
