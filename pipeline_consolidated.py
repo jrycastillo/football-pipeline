@@ -1775,13 +1775,22 @@ if __name__ == "__main__":
     parser.add_argument('--audit_rejections', type=bool, default=False, help="Enable Tracklet audit logging")
     parser.add_argument('--resize_h', type=int, default=None, help="Downsample height (e.g. 720) for speed")
     parser.add_argument('--start_frame', type=int, default=0, help="Start processing from this frame number")
+    parser.add_argument('--roster_file', type=str, default=None,
+                        help="Optional JSON of user-provided team colors + jersey rosters "
+                             "(ground-truth priors). See docs/PLAN_user_guided_input.md. "
+                             "If omitted, the pipeline runs fully automatically.")
     args = parser.parse_args()
-    
+
     # Handle legacy argument mapping
     if args.tracker:
         args.tracking_mode = args.tracker
     else:
         args.tracker = args.tracking_mode
+
+    # Phase 1: load optional user-provided roster/team-color priors.
+    # Returns None when no file is given -> pipeline behaves exactly as before.
+    from vision.roster import RosterPrior
+    roster_prior = RosterPrior.load(args.roster_file)
 
     # Determine video path
     video_path = args.video or os.environ.get("PIPELINE_VIDEO") or CONFIG.get('env', {}).get('SRC_VIDEO') or "/home/ubuntu/football/121364_0.mp4"
@@ -1879,6 +1888,11 @@ if __name__ == "__main__":
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
     kit_coordinator = KitCoordinator()  # Phase 168
+    # Phase 2 (user-input): if the user supplied team colors, force them as the
+    # two player kits instead of discovering via K-means.
+    if roster_prior is not None:
+        kit_coordinator.forced_player_colors = list(roster_prior.canonical_team_colors().values())
+        log(f"[Roster] Forcing player team colors from user roster: {kit_coordinator.forced_player_colors}")
     pitch_manager = PitchManager(model_path=CONFIG['env'].get('POSE_WEIGHTS', 'models/yolo_pitch.pt'), device=get_device().type)
     camera = Camera(pitch_manager.H_default)
     
@@ -2252,10 +2266,23 @@ if __name__ == "__main__":
                          if pred["number"] is not None:
                             # 1. Resolve Identity
                             team_color = id_manager.get_track_color(track_id)
-                            stable_id = id_manager.resolve_identity(track_id, pred["number"], team_color)
-                            
-                            log(f"DEBUG: Track {track_id} (Resolved: {stable_id}) => {pred['number']} (Color: {pred.get('color')}, Conf: {pred['confidence']})")
-                            id_manager.process_detection(stable_id, pred["number"], "auto", pred["confidence"], detected_color=pred.get("color"))
+
+                            # Phase 3 (user-input): soft roster constraint. Snap a
+                            # misread number to the nearest valid roster number for
+                            # the track's team; admit genuinely off-roster reads as-is.
+                            jnum = pred["number"]
+                            if roster_prior is not None:
+                                team_name = roster_prior.canonical_color_to_team.get(team_color)
+                                jnum, status = roster_prior.snap(jnum, pred["confidence"], team_name)
+                                if status == "snapped":
+                                    log(f"[Roster] Track {track_id}: snapped read {pred['number']} -> {jnum}")
+                                elif status == "off_roster":
+                                    log(f"[Roster] Track {track_id}: off-roster read {jnum} admitted (not in roster)")
+
+                            stable_id = id_manager.resolve_identity(track_id, jnum, team_color)
+
+                            log(f"DEBUG: Track {track_id} (Resolved: {stable_id}) => {jnum} (Color: {pred.get('color')}, Conf: {pred['confidence']})")
+                            id_manager.process_detection(stable_id, jnum, "auto", pred["confidence"], detected_color=pred.get("color"))
 
                         
                         # NEW DEBUG LOG (Phase v26.2)
