@@ -32,7 +32,7 @@ numbers, and match events.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Models — download the 5 active weights into models/ (see MODELS.md)
+# Models — place the 5 weight files into a models/ directory (see Models section below)
 
 # Run on a video
 python pipeline_consolidated.py \
@@ -52,8 +52,16 @@ The video path can also be set in `config.yaml` under `env.SRC_VIDEO`.
 
 ## Models
 
-Model weights are not stored in this repo. See **[MODELS.md](MODELS.md)** for the
-download list and checksums, and **[MODEL_SETUP.md](MODEL_SETUP.md)** for setup.
+Model weights are not stored in this repo (too large). Place these 5 files into a
+local `models/` directory — ask the maintainer for the shared model folder:
+
+| File | Purpose |
+|------|---------|
+| `yolo_player.pt` | player / GK / referee detection |
+| `yolo_ball.pt` | ball detection |
+| `resnet34_clean.pt` | jersey number recognition |
+| `legibility_resnet18.pt` | legibility gate |
+| `osnet_x0_25.pth` | OSNet appearance ReID |
 
 ---
 
@@ -92,16 +100,6 @@ Video → YOLO detection → ByteTrack tracking → ResNet34 jersey recognition
 | Tracking | `vision/custom_bytetrack.py` |
 | Jersey recognition | `vision/resnet_recognition.py` |
 | Pitch projection | `vision/camera.py` |
-
----
-
-## Documentation
-
-- [docs/PIPELINE_USAGE.md](docs/PIPELINE_USAGE.md) — command-line reference
-- [docs/PIPELINE_GUIDE.md](docs/PIPELINE_GUIDE.md) — architecture and technical detail
-- [docs/QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md) — common commands
-- [docs/TRACKER_SELECTION_GUIDE.md](docs/TRACKER_SELECTION_GUIDE.md) — tracker options
-- [CLAUDE.md](CLAUDE.md) — project overview and known issues
 
 ---
 
