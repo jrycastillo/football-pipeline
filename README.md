@@ -100,12 +100,3 @@ Video → YOLO detection → ByteTrack tracking → ResNet34 jersey recognition
 | Tracking | `vision/custom_bytetrack.py` |
 | Jersey recognition | `vision/resnet_recognition.py` |
 | Pitch projection | `vision/camera.py` |
-
----
-
-## Known limitations (in progress)
-
-- Per-player stat calibration (tackles, passes) still being validated vs ground truth
-- `camera.py` uses a flat linear pixel→meter scale, not a true pitch homography —
-  affects distance and shot geometry
-- Best suited to broadcast 11v11 match footage with numbered jerseys
