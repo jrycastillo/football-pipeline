@@ -133,17 +133,31 @@ class RosterPrior:
           - 'on_roster'  : read is a valid roster number (full trust)
           - 'snapped'    : read corrected to a near roster number (OCR misread)
           - 'off_roster' : no close roster match; kept as-is (admitted, unverified)
-        Constrains to team_name's roster when known, else to all numbers."""
+
+        A read valid for ANY team is accepted as on_roster even if the track's
+        (possibly wrong/unsettled) color points at a different team. The
+        team-specific roster only *prefers* a snap target. This avoids the
+        chicken-and-egg failure where an early color misclassification rejects a
+        perfectly valid number (e.g. Blue's #44 admitted as off-roster because
+        the track was momentarily coloured Green)."""
         try:
             num = int(num)
         except (TypeError, ValueError):
             return num, "off_roster"
-        valid = self.numbers_for_team(team_name) if (team_name and team_name in self.teams) else self._all_numbers
-        if not valid:
+        if not self._all_numbers:
             return num, "off_roster"
-        if num in valid:
+
+        # Valid for some team -> accept (the number itself is real, regardless
+        # of the current color assignment).
+        if num in self._all_numbers:
             return num, "on_roster"
-        cand = self._nearest_roster(num, valid)
+
+        # Not a real number anywhere -> try to snap. Prefer the assigned team's
+        # roster, then fall back to all numbers.
+        team_valid = self.numbers_for_team(team_name) if (team_name and team_name in self.teams) else set()
+        cand = self._nearest_roster(num, team_valid) if team_valid else None
+        if cand is None:
+            cand = self._nearest_roster(num, self._all_numbers)
         if cand is not None:
             return cand, "snapped"
         return num, "off_roster"
