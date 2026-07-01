@@ -2,6 +2,14 @@ from collections import defaultdict
 import math
 from .event_logic import AdvancedEventDetector, EFF_FPS
 
+# Layer 2 roster reconciliation is DISABLED. On unreliable-jersey footage it
+# dropped real players tracked under misread numbers (coverage collapse) while
+# false numbers survived via the locked jersey_registry path. Needs a deeper
+# rework (keep all tracks, relabel weak ones "unidentified" instead of dropping;
+# filter jersey_registry against the roster). Team-color forcing, soft-snap
+# (Phase 3), and the known_stats accuracy report (Phase 4) remain active.
+_ENABLE_ROSTER_RECONCILE = False
+
 class StatsEngine:
     def __init__(self, frame_width=None, frame_height=None):
         self.detector = AdvancedEventDetector(frame_width=frame_width, frame_height=frame_height)
@@ -33,6 +41,8 @@ class StatsEngine:
         # the noise filter via the vote-recovered exemption).
         _roster = getattr(self, "_roster_prior", None)
         def _roster_ok(num):
+            if not _ENABLE_ROSTER_RECONCILE:
+                return True
             return _roster is None or _roster.is_valid_number(num)
 
         # Consistent-vote recovery: fragments that read the right number but
@@ -219,7 +229,7 @@ class StatsEngine:
             # so off-roster false numbers are never committed into the pre-resolved
             # identities (Option A). Applying it later had no effect because the
             # box IDs were already rewritten to the false numbers.
-            if getattr(self, "_roster_prior", None) is not None and _ttj:
+            if _ENABLE_ROSTER_RECONCILE and getattr(self, "_roster_prior", None) is not None and _ttj:
                 _ttj = self._reconcile_roster(_ttj, id_manager, getattr(self, "team_map", None))
             if _ttj:
                 _remapped_boxes = 0
@@ -267,7 +277,7 @@ class StatsEngine:
 
             # Layer 2: if a user roster is provided, reconcile track identities
             # against it (closed-set, evidence-based) before grouping.
-            if getattr(self, "_roster_prior", None) is not None:
+            if _ENABLE_ROSTER_RECONCILE and getattr(self, "_roster_prior", None) is not None:
                 track_to_jersey = self._reconcile_roster(track_to_jersey, id_manager, team_map_ref)
 
             # Group tracks by target jersey number, keeping track of which
