@@ -28,6 +28,13 @@ class StatsEngine:
                     if tid not in track_to_jersey:
                         track_to_jersey[tid] = jersey_num
 
+        # Roster gate: when a roster is provided, never recover/mark a number
+        # that isn't on it (off-roster recovery is what let false numbers survive
+        # the noise filter via the vote-recovered exemption).
+        _roster = getattr(self, "_roster_prior", None)
+        def _roster_ok(num):
+            return _roster is None or _roster.is_valid_number(num)
+
         # Consistent-vote recovery: fragments that read the right number but
         # never locked due to the global-uniqueness constraint.
         if hasattr(id_manager, 'vote_counts') and hasattr(id_manager, 'vote_tallies'):
@@ -35,6 +42,8 @@ class StatsEngine:
                 if tid in track_to_jersey or not votes:
                     continue
                 best_num = max(votes, key=votes.get)
+                if not _roster_ok(best_num):
+                    continue
                 best_tally = id_manager.vote_tallies.get(tid, {}).get(best_num, 0)
                 best_score = votes[best_num]
                 second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
@@ -48,6 +57,8 @@ class StatsEngine:
                 if tid in track_to_jersey or not votes:
                     continue
                 best_num = max(votes, key=votes.get)
+                if not _roster_ok(best_num):
+                    continue
                 best_score = votes[best_num]
                 second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
                 if best_score >= 1.3 and (best_score - second_score) >= 0.5:
@@ -65,6 +76,8 @@ class StatsEngine:
                     jersey_raw_counts[jnum] += cnt
             for jnum, total_cnt in sorted(jersey_raw_counts.items(), key=lambda x: x[1], reverse=True):
                 if jnum in already_found:
+                    continue
+                if not _roster_ok(jnum):
                     continue
                 if total_cnt >= 20:
                     best_tid = max(
@@ -97,12 +110,17 @@ class StatsEngine:
 
         rrc = getattr(id_manager, "raw_read_counts", {}) or {}
         vc = getattr(id_manager, "vote_counts", {}) or {}
-        MIN_EVIDENCE = 2.0          # minimum support to claim a roster slot
         CONFUSABLE_WEIGHT = 0.5     # partial credit for a confusable misread
 
         out = {}
         reassigned = dropped = kept = 0
         for tid, jnum in track_to_jersey.items():
+            # Coverage-preserving: a track already on a valid roster number is
+            # kept as-is. Only OFF-roster tracks (false numbers) are touched.
+            if roster.is_valid_number(jnum):
+                out[tid] = jnum; kept += 1
+                continue
+
             # team for this track (from clustered team map), then -> roster team
             track_team = None
             if team_map_ref:
@@ -118,36 +136,28 @@ class StatsEngine:
                 try: counts[int(n)] = counts.get(int(n), 0) + float(sc)
                 except (TypeError, ValueError): pass
 
-            if not counts:
-                # locked/bound track with no read history — keep iff on roster
-                if roster.is_valid_number(jnum):
-                    out[tid] = jnum; kept += 1
-                else:
-                    dropped += 1
-                continue
-
-            # score each valid roster number by direct + confusable support
+            # off-roster read: only rescue it if there is CONFUSABLE support for a
+            # real roster number (an OCR misread of a real player). Otherwise drop
+            # it — a genuinely off-roster number is a false detection.
             valid = roster.numbers_for_team(team_name) if team_name else set()
             if not valid:
                 valid = roster.all_numbers()
             best_r, best_s = None, 0.0
             for r in valid:
-                s = float(counts.get(r, 0))
+                s = float(counts.get(r, 0))   # direct roster-number reads
                 for c, cc in counts.items():
                     if c != r and roster._plausible_misread(c, r):
                         s += CONFUSABLE_WEIGHT * cc
                 if s > best_s:
                     best_s, best_r = s, r
 
-            if best_r is not None and best_s >= MIN_EVIDENCE:
-                out[tid] = best_r
-                if best_r != jnum: reassigned += 1
-                else: kept += 1
+            if best_r is not None and best_s >= 1.0:
+                out[tid] = best_r; reassigned += 1
             else:
-                dropped += 1   # weak/off-roster -> unidentified (anti-magnet)
+                dropped += 1   # off-roster false number -> dropped
 
-        print(f"[Roster reconcile] tracks={len(track_to_jersey)} kept={kept} "
-              f"reassigned={reassigned} dropped(weak/off-roster)={dropped}")
+        print(f"[Roster reconcile] tracks={len(track_to_jersey)} kept(valid)={kept} "
+              f"reassigned(off->roster)={reassigned} dropped(false)={dropped}")
         return out
 
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None):
