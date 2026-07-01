@@ -72,6 +72,61 @@ class RosterPrior:
 
         self.known_facts = data.get("known_facts", {}) or {}
 
+        # Phase 4: optional user-provided ground-truth stats per team, e.g.
+        #   "known_stats": {"passes": {"Blue": 62, "Green": 74}, "fouls": {...}}
+        # Used to auto-generate an accuracy report after analysis.
+        self.known_stats = data.get("known_stats", {}) or {}
+
+    # Map ground-truth metric names -> pipeline stat field(s). A field of None
+    # means it's derived (see compare_stats).
+    _STAT_FIELD_MAP = {
+        "passes": "passes_total",
+        "passes_accurate": "passes_accurate",
+        "interceptions": "ball_interceptions_total",
+        "shots_on_target": "shots_on_target_total",
+        "shots": None,   # on_target + wide
+        "crosses": "crosses_total",
+        "fouls": "fouls_total",
+        "goals": "goals_total",
+        "dribbles": "dribbles_total",
+        "tackles": "tackles_total",
+    }
+
+    def gt_total(self, metric):
+        """Sum of the ground-truth values across teams for a metric, or None."""
+        vals = self.known_stats.get(metric)
+        if not isinstance(vals, dict):
+            return None
+        return sum(v for v in vals.values() if isinstance(v, (int, float)))
+
+    def compare_stats(self, player_stats):
+        """Compare pipeline output to the user-provided known_stats.
+
+        player_stats: {player_key: {"stats": {...}, ...}}.
+        Returns a list of dicts: {metric, pipeline, ground_truth, accuracy_pct}.
+        Empty if no known_stats were provided.
+        """
+        if not self.known_stats:
+            return []
+
+        def field_total(field):
+            return sum(p.get("stats", {}).get(field, 0) or 0 for p in player_stats.values())
+
+        rows = []
+        for metric, gt in self.known_stats.items():
+            gtt = self.gt_total(metric)
+            if gtt is None:
+                continue
+            field = self._STAT_FIELD_MAP.get(metric, metric + "_total")
+            if metric == "shots":
+                pv = field_total("shots_on_target_total") + field_total("shots_wide_total")
+            else:
+                pv = field_total(field)
+            acc = round(100.0 * pv / gtt, 1) if gtt else (0.0 if pv else 100.0)
+            rows.append({"metric": metric, "pipeline": round(pv, 2),
+                         "ground_truth": gtt, "accuracy_pct": acc})
+        return rows
+
     # --- helpers used by later phases (team assignment, JNR constraint) ---
 
     def team_colors(self):

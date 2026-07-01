@@ -2,6 +2,14 @@ from collections import defaultdict
 import math
 from .event_logic import AdvancedEventDetector, EFF_FPS
 
+# Layer 2 roster reconciliation is DISABLED. On unreliable-jersey footage it
+# dropped real players tracked under misread numbers (coverage collapse) while
+# false numbers survived via the locked jersey_registry path. Needs a deeper
+# rework (keep all tracks, relabel weak ones "unidentified" instead of dropping;
+# filter jersey_registry against the roster). Team-color forcing, soft-snap
+# (Phase 3), and the known_stats accuracy report (Phase 4) remain active.
+_ENABLE_ROSTER_RECONCILE = False
+
 class StatsEngine:
     def __init__(self, frame_width=None, frame_height=None):
         self.detector = AdvancedEventDetector(frame_width=frame_width, frame_height=frame_height)
@@ -28,6 +36,15 @@ class StatsEngine:
                     if tid not in track_to_jersey:
                         track_to_jersey[tid] = jersey_num
 
+        # Roster gate: when a roster is provided, never recover/mark a number
+        # that isn't on it (off-roster recovery is what let false numbers survive
+        # the noise filter via the vote-recovered exemption).
+        _roster = getattr(self, "_roster_prior", None)
+        def _roster_ok(num):
+            if not _ENABLE_ROSTER_RECONCILE:
+                return True
+            return _roster is None or _roster.is_valid_number(num)
+
         # Consistent-vote recovery: fragments that read the right number but
         # never locked due to the global-uniqueness constraint.
         if hasattr(id_manager, 'vote_counts') and hasattr(id_manager, 'vote_tallies'):
@@ -35,6 +52,8 @@ class StatsEngine:
                 if tid in track_to_jersey or not votes:
                     continue
                 best_num = max(votes, key=votes.get)
+                if not _roster_ok(best_num):
+                    continue
                 best_tally = id_manager.vote_tallies.get(tid, {}).get(best_num, 0)
                 best_score = votes[best_num]
                 second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
@@ -48,6 +67,8 @@ class StatsEngine:
                 if tid in track_to_jersey or not votes:
                     continue
                 best_num = max(votes, key=votes.get)
+                if not _roster_ok(best_num):
+                    continue
                 best_score = votes[best_num]
                 second_score = sorted(votes.values())[-2] if len(votes) > 1 else 0
                 if best_score >= 1.3 and (best_score - second_score) >= 0.5:
@@ -66,6 +87,8 @@ class StatsEngine:
             for jnum, total_cnt in sorted(jersey_raw_counts.items(), key=lambda x: x[1], reverse=True):
                 if jnum in already_found:
                     continue
+                if not _roster_ok(jnum):
+                    continue
                 if total_cnt >= 20:
                     best_tid = max(
                         (tid for tid, counts in id_manager.raw_read_counts.items() if jnum in counts),
@@ -80,10 +103,80 @@ class StatsEngine:
 
         return track_to_jersey
 
-    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
+    def _reconcile_roster(self, track_to_jersey, id_manager, team_map_ref):
+        """Layer 2 — roster-anchored identity reconciliation.
+
+        Re-derive each track's jersey from its FULL read evidence, constrained to
+        the user roster (closed set). This (a) eliminates false numbers that
+        aren't on the roster, and (b) shrinks the 'magnet' by mapping each track
+        to its own strongest roster number instead of a single noisy read, and
+        dropping weak-evidence tracks so they cannot pool into a popular number.
+
+        Returns a new {track_id: jersey_num} map. No-op without a roster.
+        """
+        roster = getattr(self, "_roster_prior", None)
+        if roster is None:
+            return track_to_jersey
+
+        rrc = getattr(id_manager, "raw_read_counts", {}) or {}
+        vc = getattr(id_manager, "vote_counts", {}) or {}
+        CONFUSABLE_WEIGHT = 0.5     # partial credit for a confusable misread
+
+        out = {}
+        reassigned = dropped = kept = 0
+        for tid, jnum in track_to_jersey.items():
+            # Coverage-preserving: a track already on a valid roster number is
+            # kept as-is. Only OFF-roster tracks (false numbers) are touched.
+            if roster.is_valid_number(jnum):
+                out[tid] = jnum; kept += 1
+                continue
+
+            # team for this track (from clustered team map), then -> roster team
+            track_team = None
+            if team_map_ref:
+                track_team = team_map_ref.get(str(tid)) or team_map_ref.get(str(jnum))
+            team_name = roster.canonical_color_to_team.get(track_team) if track_team else None
+
+            # pool this track's read evidence (raw reads + weighted votes)
+            counts = {}
+            for n, c in (rrc.get(tid, {}) or {}).items():
+                try: counts[int(n)] = counts.get(int(n), 0) + c
+                except (TypeError, ValueError): pass
+            for n, sc in (vc.get(tid, {}) or {}).items():
+                try: counts[int(n)] = counts.get(int(n), 0) + float(sc)
+                except (TypeError, ValueError): pass
+
+            # off-roster read: only rescue it if there is CONFUSABLE support for a
+            # real roster number (an OCR misread of a real player). Otherwise drop
+            # it — a genuinely off-roster number is a false detection.
+            valid = roster.numbers_for_team(team_name) if team_name else set()
+            if not valid:
+                valid = roster.all_numbers()
+            best_r, best_s = None, 0.0
+            for r in valid:
+                s = float(counts.get(r, 0))   # direct roster-number reads
+                for c, cc in counts.items():
+                    if c != r and roster._plausible_misread(c, r):
+                        s += CONFUSABLE_WEIGHT * cc
+                if s > best_s:
+                    best_s, best_r = s, r
+
+            if best_r is not None and best_s >= 1.0:
+                out[tid] = best_r; reassigned += 1
+            else:
+                dropped += 1   # off-roster false number -> dropped
+
+        print(f"[Roster reconcile] tracks={len(track_to_jersey)} kept(valid)={kept} "
+              f"reassigned(off->roster)={reassigned} dropped(false)={dropped}")
+        return out
+
+    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None):
         """
         Process full video history to generate stats.
         """
+        # Layer 2 (roster reconciliation): authoritative roster used to constrain
+        # and assign track identities. None -> behaves exactly as before.
+        self._roster_prior = roster_prior
         player_tracks = all_frames
         
         # Extract Ball Track
@@ -132,6 +225,12 @@ class StatsEngine:
         _pre_resolved_jerseys = set()
         if id_manager:
             _ttj = self._build_track_to_jersey(id_manager)
+            # Layer 2: reconcile against the roster HERE, before remapping boxes,
+            # so off-roster false numbers are never committed into the pre-resolved
+            # identities (Option A). Applying it later had no effect because the
+            # box IDs were already rewritten to the false numbers.
+            if _ENABLE_ROSTER_RECONCILE and getattr(self, "_roster_prior", None) is not None and _ttj:
+                _ttj = self._reconcile_roster(_ttj, id_manager, getattr(self, "team_map", None))
             if _ttj:
                 _remapped_boxes = 0
                 for f in all_frames:
@@ -175,6 +274,11 @@ class StatsEngine:
             # each jersey typically has a single candidate and the merge below
             # no longer sums across overlapping fragments.
             track_to_jersey = self._build_track_to_jersey(id_manager)
+
+            # Layer 2: if a user roster is provided, reconcile track identities
+            # against it (closed-set, evidence-based) before grouping.
+            if _ENABLE_ROSTER_RECONCILE and getattr(self, "_roster_prior", None) is not None:
+                track_to_jersey = self._reconcile_roster(track_to_jersey, id_manager, team_map_ref)
 
             # Group tracks by target jersey number, keeping track of which
             # track has the most data (primary track)
