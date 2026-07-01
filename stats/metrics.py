@@ -205,6 +205,12 @@ class StatsEngine:
         _pre_resolved_jerseys = set()
         if id_manager:
             _ttj = self._build_track_to_jersey(id_manager)
+            # Layer 2: reconcile against the roster HERE, before remapping boxes,
+            # so off-roster false numbers are never committed into the pre-resolved
+            # identities (Option A). Applying it later had no effect because the
+            # box IDs were already rewritten to the false numbers.
+            if getattr(self, "_roster_prior", None) is not None and _ttj:
+                _ttj = self._reconcile_roster(_ttj, id_manager, getattr(self, "team_map", None))
             if _ttj:
                 _remapped_boxes = 0
                 for f in all_frames:
