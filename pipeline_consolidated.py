@@ -1644,10 +1644,10 @@ class StatsAdapter:
         from stats.metrics import StatsEngine
         self.engine = StatsEngine(frame_width=frame_width, frame_height=frame_height)
 
-    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None):
         # Delegate to new engine
         # returns (formatted_stats, events)
-        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits, siglip_teams=siglip_teams)
+        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits, siglip_teams=siglip_teams, roster_prior=roster_prior)
         
         # Return in order expected by pipeline: raw_tracks, player_stats
         return events, formatted_stats
@@ -2390,7 +2390,7 @@ if __name__ == "__main__":
     # --- 9. STATS GENERATION (Entity Resolution) ---
     stats_adapter = StatsAdapter(camera, pitch_manager, frame_width=width, frame_height=height)
     kits = kit_coordinator.get_discovery_result()
-    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams)
+    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams, roster_prior=roster_prior)
     
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
