@@ -1,15 +1,16 @@
 {
   "teams": {
-    "Red": {
-      "color": "red",
-      "roster": [1, 2, 4, 5, 6, 7, 10, 11, 14, 21, 23]
-    },
-    "White": {
-      "color": "white",
-      "roster": [1, 3, 6, 9, 10, 14, 16, 21, 22, 26, 29]
-    }
+    "Blue":  { "color": "blue",  "roster": [3, 6, 7, 8, 10, 11, 12, 13, 16, 17] },
+    "Green": { "color": "green", "roster": [4, 6, 7, 8, 11, 14] }
   },
-  "known_facts": {
-    "final_score": {"Red": 2, "White": 1}
-  }
+  "known_stats": {
+    "passes":        {"Blue": 62, "Green": 74},
+    "interceptions": {"Blue": 9,  "Green": 7},
+    "shots":         {"Blue": 2,  "Green": 4},
+    "shots_on_target": {"Blue": 2, "Green": 2},
+    "crosses":       {"Blue": 0,  "Green": 2},
+    "fouls":         {"Blue": 3,  "Green": 1},
+    "goals":         {"Blue": 1,  "Green": 0}
+  },
+  "known_facts": { "final_score": {"Blue": 1, "Green": 0}, "scorer": 10 }
 }

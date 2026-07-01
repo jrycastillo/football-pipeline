@@ -2468,7 +2468,20 @@ if __name__ == "__main__":
     with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
         json.dump(player_stats, f, indent=2)
     log(f"Saved {output_dir}/player_stats.json")
-    
+
+    # Phase 4: if the user supplied known_stats in the roster, auto-generate an
+    # accuracy report (pipeline vs ground truth).
+    if roster_prior is not None and getattr(roster_prior, "known_stats", None):
+        acc_rows = roster_prior.compare_stats(player_stats)
+        if acc_rows:
+            with open(os.path.join(output_dir, "accuracy_report.json"), "w") as f:
+                json.dump(acc_rows, f, indent=2)
+            log("=== Accuracy vs user-provided ground truth ===")
+            log(f"{'Metric':16}{'Pipeline':>10}{'GT':>8}{'Acc%':>8}")
+            for r in acc_rows:
+                log(f"{r['metric']:16}{r['pipeline']:>10}{r['ground_truth']:>8}{r['accuracy_pct']:>7}%")
+            log(f"Saved {output_dir}/accuracy_report.json")
+
     # Phase 168: Save Discovered Kits
     kits = kit_coordinator.get_discovery_result()
     with open(os.path.join(output_dir, "match_kits.json"), "w") as f:
