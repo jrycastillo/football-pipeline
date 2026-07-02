@@ -1779,6 +1779,12 @@ if __name__ == "__main__":
                         help="Optional JSON of user-provided team colors + jersey rosters "
                              "(ground-truth priors). See docs/PLAN_user_guided_input.md. "
                              "If omitted, the pipeline runs fully automatically.")
+    parser.add_argument('--clip_events', type=str, default=None,
+                        help="Comma-separated event types to clip after analysis "
+                             "(e.g. 'goal,shot,save'). Writes ±clip_pad_s clips + "
+                             "clips_manifest.json for the admin verification flow.")
+    parser.add_argument('--clip_pad_s', type=float, default=3.0,
+                        help="Seconds of video kept on each side of a clipped event.")
     args = parser.parse_args()
 
     # Handle legacy argument mapping
@@ -2436,6 +2442,21 @@ if __name__ == "__main__":
         json.dump(verification_summary, f, indent=2)
     log(f"Saved {output_dir}/verification_summary.json "
         f"(events: {verification_summary['unverified_events']} unverified, bands: {conf_bands})")
+
+    # Event clipping (verification workflow): extract short clips around the
+    # requested event types so the admin can review them. Non-fatal — a
+    # clipping failure must never lose a finished analysis.
+    if args.clip_events:
+        try:
+            from stats.event_clipper import clip_events
+            clip_types = tuple(t.strip() for t in args.clip_events.split(",") if t.strip())
+            clip_manifest = clip_events(video_path, raw_tracks, output_dir,
+                                        vid_stride=max(1, args.vid_stride),
+                                        pad_s=args.clip_pad_s, event_types=clip_types)
+            log(f"Event clipping: {len(clip_manifest)} clip(s) → {output_dir}/clips "
+                f"(types: {', '.join(clip_types)})")
+        except Exception as e:
+            log(f"Event clipping failed (non-fatal): {e}")
     
     # Phase 186: Filter out Unknown players before saving
     original_count = len(player_stats)
