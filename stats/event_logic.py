@@ -916,7 +916,11 @@ class AdvancedEventDetector:
         # long ball / clearance, the main false-positive source for ownership
         # gaps). Indirect evidence — confidence deliberately lands in the
         # admin-review band rather than auto-trust territory.
-        FOUL_CONTACT_M = 1.2        # body-contact range at possession loss
+        # Duel range on bbox-center distances: true body contact reads as
+        # 0.4-2.5m here (center-to-center offset, flat pixel->meter scale, and
+        # 150ms between processed frames can miss the tightest instant).
+        # 1.2m killed every real candidate on the Babak GT clip (3/55 passed).
+        FOUL_CONTACT_M = 2.5
         FOUL_STOP_FRAMES = int(EFF_FPS * 1.0)  # on top of the 2.5s smoothing fill
         FOUL_BALL_STILL_M = 10.0    # dead ball stays near the spot
         _last_foul_frame = {}       # fouler pid -> frame (60s per-player cooldown)
