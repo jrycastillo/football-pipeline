@@ -31,6 +31,14 @@ def bbox_center(xyxy):
     x1, y1, x2, y2 = xyxy
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
+def _clamp_conf(v):
+    """Clamp a heuristic event confidence to [0.05, 0.98] for JSON output.
+
+    Never 1.0 — these are rule-based estimates, not verified results; the
+    ceiling keeps downstream consumers from treating any event as certain.
+    """
+    return round(max(0.05, min(0.98, v)), 2)
+
 class AdvancedEventDetector:
     def __init__(self, frame_width=None, frame_height=None):
         self.camera = Camera(frame_width=frame_width, frame_height=frame_height)
@@ -256,10 +264,11 @@ class AdvancedEventDetector:
                 stats[pid]["touch_frames"] += 1
 
                 # Check Dribble (Opponent within range)
-                opp_id = self._is_opponent_near(t, pid, player_tracks, dist_m=DIST_DRIBBLE_OPP)
+                opp_id, opp_dist = self._nearest_opponent(t, pid, player_tracks, dist_m=DIST_DRIBBLE_OPP)
                 if opp_id is not None:
                     # P2 fix: Require ball carrier to have moved (standing still ≠ dribble)
                     moved = False
+                    move_dist = 0.0
                     if t >= dribble_lookback and ball_track[t] and ball_track[t - dribble_lookback]:
                         move_dist = self.camera.calculate_distance(
                             ball_track[t], ball_track[t - dribble_lookback])
@@ -282,8 +291,19 @@ class AdvancedEventDetector:
                         # Credit Challenge to Opponent (Phase 85)
                         stats[opp_id]["challenges_total"] += 1
 
+                        # Confidence signals: how decisively the ball moved past
+                        # the 1.5m gate, and how tight the opponent was (a take-on
+                        # against a distant opponent is more likely mapping noise).
+                        move_margin = min(1.0, max(0.0, (move_dist - 1.5) / 2.0))
+                        opp_prox = 1.0 - min(1.0, opp_dist / DIST_DRIBBLE_OPP)
+                        dribble_conf = _clamp_conf(0.35 + 0.35 * move_margin + 0.30 * opp_prox)
+
                         # Check Success (Retain for 1.5s)
-                        if self._retains_possession(t, pid, ownership, duration_s=TIME_DRIBBLE_RETAIN):
+                        retained = self._retains_possession(t, pid, ownership, duration_s=TIME_DRIBBLE_RETAIN)
+                        events.append({"type": "dribble", "player": pid, "against": opp_id,
+                                       "frame": t, "successful": retained,
+                                       "confidence": dribble_conf})
+                        if retained:
                              stats[pid]["dribbles_successful"] += 1
                         else:
                             # Dribble Failed -> Challenge Won by Opponent
@@ -294,6 +314,12 @@ class AdvancedEventDetector:
                                 stats[opp_id]["tackles_successful"] += 1
                                 _last_tackle_s1[opp_id] = t
                                 _tackle_frames_s1.add(t)  # P0: track for dedup
+                                # Tackle inferred indirectly (dribbler lost the ball
+                                # near an opponent), so cap below the dribble's own
+                                # confidence.
+                                tackle_conf = _clamp_conf(0.30 + 0.30 * opp_prox + 0.20 * move_margin)
+                                events.append({"type": "tackle", "by": opp_id, "on": pid,
+                                               "frame": t, "confidence": tackle_conf})
 
         # 2. Passing (Change of Ownership)
         # Segment ownership
@@ -367,6 +393,10 @@ class AdvancedEventDetector:
             # Ball is often undetected during passes (in flight) so we search backwards/forwards
             start_pos = ball_track[seg_a["end"]]
             end_pos = ball_track[seg_b["start"]]
+            # Confidence signal: endpoints found at the exact transition frames
+            # are stronger evidence than positions recovered by searching nearby.
+            start_direct = start_pos is not None
+            end_direct = end_pos is not None
 
             if not start_pos:
                 for offset in range(1, 8):
@@ -414,9 +444,21 @@ class AdvancedEventDetector:
                             # Assume complete to avoid 0 stats if clustering fails.
                             is_complete = True
                     
+                    # Heuristic confidence: how long the passer controlled the
+                    # ball, how clean the A->B handover gap is, and whether the
+                    # endpoints are raw ball detections rather than interpolated
+                    # or searched positions.
+                    hold_norm = min(1.0, seg_a_duration / (EFF_FPS * 1.5))
+                    gap_norm = 1.0 - min(1.0, gap_frames / (EFF_FPS * 3))
+                    endpoint_ev = (0.5 if start_direct else 0.2) + (0.5 if end_direct else 0.2)
+                    raw_ev = ((seg_a["end"] in raw_ball_frames) + (seg_b["start"] in raw_ball_frames)) / 2.0
+                    pass_conf = _clamp_conf(0.25 * hold_norm + 0.25 * gap_norm
+                                            + 0.30 * endpoint_ev + 0.20 * raw_ev)
+
                     if is_complete:
                         stats[p_a]["passes_complete"] += 1
-                        events.append({"type": "pass", "from": p_a, "to": p_b, "frame": seg_a["end"]})
+                    events.append({"type": "pass", "from": p_a, "to": p_b, "frame": seg_a["end"],
+                                   "complete": is_complete, "confidence": pass_conf})
 
                     # 3. Check Crosses (Side Channel to Box)
                     # Side Channel: |y - 34| > 25 -> y < 9 or y > 59
@@ -432,7 +474,8 @@ class AdvancedEventDetector:
                         stats[p_a]["crosses_total"] += 1
                         if is_complete:
                             stats[p_a]["crosses_complete"] += 1
-                        events.append({"type": "cross", "from": p_a, "to": p_b, "frame": seg_a["end"]})
+                        events.append({"type": "cross", "from": p_a, "to": p_b, "frame": seg_a["end"],
+                                       "complete": is_complete, "confidence": pass_conf})
 
                     # --- ADVANCED STATS (Phase 86) ---
                     # 1. Packing (Opponents bypassed)
@@ -484,7 +527,13 @@ class AdvancedEventDetector:
                                 elif end_m[0] < 52.5:
                                      stats[p_b]["ball_recoveries_own_half"] += 1
 
-                                events.append({"type": "interception", "by": p_b, "frame": int_frame})
+                                # Confidence grows with how far the ball travelled
+                                # past the 3m in-flight gate (short flips are
+                                # ownership-mapping noise).
+                                flight_norm = min(1.0, (dist - 3.0) / 7.0)
+                                int_conf = _clamp_conf(0.35 + 0.40 * flight_norm + 0.25 * raw_ev)
+                                events.append({"type": "interception", "by": p_b, "frame": int_frame,
+                                               "confidence": int_conf})
 
 
 
@@ -498,6 +547,21 @@ class AdvancedEventDetector:
               f"gap_filtered: {_pass_debug['gap_filtered']}, tackle_filtered: {_pass_debug['tackle_filtered']}, "
               f"no_ball: {_pass_debug['no_ball']}, too_short: {_pass_debug['too_short']}, "
               f"counted: {_pass_debug['counted']}")
+
+        # Ball-touch events: one per continuous ownership segment lasting at
+        # least MIN_OWN_FRAMES (same noise gate as pass origins). Confidence
+        # from possession duration and the share of the segment backed by raw
+        # ball detections (vs interpolated / gap-filled positions).
+        for seg in non_none_segments:
+            seg_dur = seg["end"] - seg["start"] + 1
+            if seg_dur < MIN_OWN_FRAMES:
+                continue
+            raw_share = sum(1 for k in range(seg["start"], seg["end"] + 1)
+                            if k in raw_ball_frames) / seg_dur
+            dur_norm = min(1.0, seg_dur / EFF_FPS)
+            touch_conf = _clamp_conf(0.30 + 0.40 * dur_norm + 0.30 * raw_share)
+            events.append({"type": "touch", "player": seg["pid"], "frame": seg["start"],
+                           "end_frame": seg["end"], "confidence": touch_conf})
 
         # 5. Shot Detection (Trajectory Analysis)
         # Round 2 fix: Only compute velocity on raw ball detections (not interpolated)
@@ -555,6 +619,9 @@ class AdvancedEventDetector:
                             # Attribute to last possessor
                             # Find who had ball last
                             shooter = ownership[i] if i < len(ownership) else None
+                            # Confidence signal: shooter owned the ball at the shot
+                            # frame vs recovered from a 5-frame lookback
+                            shot_attrib_direct = shooter is not None
                             if not shooter and i >= 5:
                                 shooter = ownership[i-5]  # Look back
                             # FIX: Skip if shooter is a GK (cls_id=1) - goal kicks/punts shouldn't count as shots
@@ -592,13 +659,24 @@ class AdvancedEventDetector:
                                             stats[assister]["expected_assists"] += xg
                                             self.last_pass_info["xg_assigned"] = True
 
+                                    # Confidence: speed margin over the shot gate,
+                                    # proximity to goal, how central the projected
+                                    # trajectory hits the goal mouth, and shooter
+                                    # attribution quality.
+                                    speed_norm = min(1.0, (speed_mps - SHOT_SPEED_THRESHOLD) / SHOT_SPEED_THRESHOLD)
+                                    prox_norm = 1.0 - min(1.0, dist_to_goal / 35.0)
+                                    center_norm = 1.0 - min(1.0, abs(y_at_goal - 34.0) / GOAL_WIDTH_HALF)
+                                    attrib_norm = 1.0 if shot_attrib_direct else 0.5
+                                    shot_conf = _clamp_conf(0.20 + 0.30 * speed_norm + 0.20 * prox_norm
+                                                            + 0.15 * center_norm + 0.15 * attrib_norm)
                                     events.append({
                                         "type": "shot",
                                         "player": shooter,
                                         "frame": i,
                                         "xg": round(xg, 2),
                                         "speed": round(speed_mps, 1),
-                                        "direction": "right" if moving_right else "left"
+                                        "direction": "right" if moving_right else "left",
+                                        "confidence": shot_conf
                                     })
 
                                     # --- BLOCKED SHOT LOGIC ---
@@ -614,6 +692,8 @@ class AdvancedEventDetector:
                                     # Linear homography can't reliably project the far goal line,
                                     # so we use the shot vector to predict where the ball crosses.
                                     goal_confirmed = False
+                                    goal_method = None       # 1=trajectory, 2=disappearance (confidence input)
+                                    goal_on_course = 0       # trajectory-consistent lookahead frames
                                     GOAL_Y_MIN = 30.34   # goal post Y in meters (34 - 7.32/2)
                                     GOAL_Y_MAX = 37.66   # goal post Y in meters (34 + 7.32/2)
                                     target_goal_x = goal_x  # 105.0 or 0.0 from shot direction
@@ -641,6 +721,8 @@ class AdvancedEventDetector:
                                                         on_course += 1
                                             if on_course >= 2:
                                                 goal_confirmed = True
+                                                goal_method = 1
+                                                goal_on_course = on_course
 
                                     # Method 2: Ball enters goal zone (within 5m of goal line, Y on target)
                                     # and then disappears (no detection for 1+ second) — ball in net
@@ -659,6 +741,7 @@ class AdvancedEventDetector:
                                             missing = sum(1 for k in range(gap_start, gap_end) if not ball_track[k])
                                             if missing >= int(EFF_FPS * 0.8):
                                                 goal_confirmed = True
+                                                goal_method = 2
 
                                     if goal_confirmed:
                                         # Round 16: Validate shooter's team attacks this goal
@@ -698,7 +781,19 @@ class AdvancedEventDetector:
                                         if not recent_team_goal:
                                             stats[correct_shooter]["goals"] += 1
                                             stats[correct_shooter]["goals_total"] += 1
-                                            events.append({"type": "goal", "player": correct_shooter, "frame": i, "assist": None})
+                                            # Trajectory extrapolation (method 1) is stronger
+                                            # evidence than ball-disappearance (method 2);
+                                            # more on-course lookahead frames add certainty.
+                                            # Attribution corrections lower confidence.
+                                            if goal_method == 1:
+                                                goal_conf_base = 0.55 + 0.08 * min(goal_on_course, 4)
+                                            else:
+                                                goal_conf_base = 0.45
+                                            if correct_shooter != shooter:
+                                                goal_conf_base -= 0.10
+                                            goal_conf = _clamp_conf(goal_conf_base)
+                                            events.append({"type": "goal", "player": correct_shooter, "frame": i,
+                                                           "assist": None, "confidence": goal_conf})
                                             print(f"[Goal] Confirmed: Player #{correct_shooter} (team={goal_team}) at frame {i}")
                                         else:
                                             print(f"[Goal] Debounced: Player #{correct_shooter} (team={goal_team}) at frame {i} — duplicate within 30s")
@@ -763,14 +858,22 @@ class AdvancedEventDetector:
                                      dist_next = math.hypot(m_next[0]-m2[0], m_next[1]-m2[1])
                                      speed_next = dist_next / (3.0 / EFF_FPS)
                                      
-                                     if speed_next < 5.0 or (np.sign(v_next_x) != np.sign(m2[0]-m1[0])):
+                                     save_flipped = np.sign(v_next_x) != np.sign(m2[0]-m1[0])
+                                     if speed_next < 5.0 or save_flipped:
                                           # SAVE DETECTED!
                                           # Use a debounce to avoid multi-counting same save (~1 second)
                                           save_debounce = max(20, int(EFF_FPS))
                                           recent_saves = [e for e in events if e["type"] == "save" and abs(e["frame"] - i) < save_debounce]
                                           if not recent_saves:
                                                stats[gk_id]["shots_saved_total"] += 1
-                                               events.append({"type": "save", "player": gk_id, "frame": i})
+                                               # Confidence: GK proximity to the ball plus the
+                                               # strength of the ball's reaction (a direction
+                                               # flip is decisive; a mere slowdown is weaker).
+                                               gk_prox_norm = 1.0 - min(1.0, d_gk / 2.0)
+                                               reaction_norm = 1.0 if save_flipped else max(0.0, 1.0 - speed_next / 5.0)
+                                               save_conf = _clamp_conf(0.30 + 0.35 * gk_prox_norm + 0.35 * reaction_norm)
+                                               events.append({"type": "save", "player": gk_id, "frame": i,
+                                                              "confidence": save_conf})
                                                
                                                # Classify Range
                                                # Origin of shot? We need to trace back to last "kick"
@@ -870,7 +973,10 @@ class AdvancedEventDetector:
                      _last_tackle_frame_s3[p_b] = end_frame
                      stats[p_b]["tackles"] += 1
                      stats[p_b]["tackles_successful"] += 1
-                     events.append({"type": "tackle", "by": p_b, "on": p_a, "frame": end_frame})
+                     # Transition tackles are indirect evidence (ownership flip +
+                     # ball reaction), so confidence stays mid-range.
+                     events.append({"type": "tackle", "by": p_b, "on": p_a, "frame": end_frame,
+                                    "confidence": _clamp_conf(0.55)})
                      
         # 4. Penalty Box Touch Tracking (xG REMOVED — Round 3 fix)
         # Round 3 fix: Section 4 was accumulating xG for every ownership segment ending
@@ -895,20 +1001,41 @@ class AdvancedEventDetector:
     def _is_opponent_near(self, frame_idx, pid, player_tracks, dist_m=2.0):
         if frame_idx >= len(player_tracks): return False
         boxes = player_tracks[frame_idx].get("boxes", [])
-        
+
         my_box = next((b for b in boxes if b["id"] == pid), None)
         if not my_box: return None
-        
+
         my_c = bbox_center(my_box["xyxy"])
-        
+
         for b in boxes:
             if b["id"] == pid or b["id"] is None: continue
-            
+
             c = bbox_center(b["xyxy"])
             d = self.camera.calculate_distance(my_c, c)
             if d < dist_m:
                 return b["id"] # Return Opponent ID
         return None
+
+    def _nearest_opponent(self, frame_idx, pid, player_tracks, dist_m=2.0):
+        """Like _is_opponent_near, but returns (opp_id, distance_m) of the
+        CLOSEST other player within dist_m — the distance feeds event
+        confidence. Returns (None, dist_m) when nobody is in range."""
+        if frame_idx >= len(player_tracks):
+            return None, dist_m
+        boxes = player_tracks[frame_idx].get("boxes", [])
+        my_box = next((b for b in boxes if b["id"] == pid), None)
+        if not my_box:
+            return None, dist_m
+        my_c = bbox_center(my_box["xyxy"])
+        best_id, best_d = None, dist_m
+        for b in boxes:
+            if b["id"] == pid or b["id"] is None:
+                continue
+            d = self.camera.calculate_distance(my_c, bbox_center(b["xyxy"]))
+            if d < best_d:
+                best_d = d
+                best_id = b["id"]
+        return best_id, best_d
 
         
     def _calculate_packing(self, start_idx, end_idx, passing_team, tracks, ball_tracks):
