@@ -926,6 +926,10 @@ class AdvancedEventDetector:
         _last_foul_frame = {}       # fouler pid -> frame (60s per-player cooldown)
         _fouls_found = 0
         _SMOOTH_FILL = int(EFF_FPS * 2.5)  # matches _smooth_ownership gap fill
+        # Gate counters: how many candidates PASS each successive gate — makes
+        # threshold tuning measurable instead of guesswork (cf. _pass_debug).
+        _foul_debug = {"stop_gap": 0, "possession": 0, "carrier_team": 0,
+                       "contact": 0, "ball_still": 0, "counted": 0}
         if team_map:
             for si in range(len(segments) - 1):
                 seg_last, seg_gap = segments[si], segments[si + 1]
@@ -934,6 +938,7 @@ class AdvancedEventDetector:
                 gap_len = seg_gap["end"] - seg_gap["start"] + 1
                 if gap_len < FOUL_STOP_FRAMES:
                     continue
+                _foul_debug["stop_gap"] += 1
                 # The last owner before the gap can be a 1-frame ownership blip
                 # (ball momentarily nearest to the fouler in the duel) inflated
                 # to segment size by the smoothing fill — which would invert
@@ -952,12 +957,14 @@ class AdvancedEventDetector:
                 # Carrier must have had controlled possession (same gate as passes)
                 if seg_own["end"] - seg_own["start"] < MIN_OWN_FRAMES:
                     continue
+                _foul_debug["possession"] += 1
                 f_end = seg_last["end"]
                 if f_end >= len(player_tracks):
                     continue
                 team_c = team_map.get(str(carrier))
                 if not team_c or team_c == "Unknown":
                     continue
+                _foul_debug["carrier_team"] += 1
 
                 # Nearest OPPONENT in contact range around possession loss.
                 # Ownership smoothing gap-fills up to 2.5s past the true loss,
@@ -987,6 +994,7 @@ class AdvancedEventDetector:
                             foul_frame = k
                 if foul_by is None:
                     continue
+                _foul_debug["contact"] += 1
 
                 # Dead ball stays near the foul spot; a travelled ball means
                 # the gap was a long pass/clearance, not a stoppage.
@@ -1004,6 +1012,7 @@ class AdvancedEventDetector:
                         max_disp = max(disps)
                         if max_disp > FOUL_BALL_STILL_M:
                             continue
+                _foul_debug["ball_still"] += 1
 
                 last_f = _last_foul_frame.get(foul_by, -999)
                 if f_end - last_f < int(EFF_FPS * 60):
@@ -1011,6 +1020,7 @@ class AdvancedEventDetector:
                 _last_foul_frame[foul_by] = f_end
                 stats[foul_by]["fouls_total"] += 1
                 _fouls_found += 1
+                _foul_debug["counted"] += 1
 
                 prox_norm = 1.0 - foul_dist / FOUL_CONTACT_M
                 stop_norm = min(1.0, gap_len / (EFF_FPS * 3))
@@ -1022,7 +1032,7 @@ class AdvancedEventDetector:
                                         + 0.25 * ball_ev)
                 events.append({"type": "foul", "by": foul_by, "on": carrier,
                                "frame": foul_frame, "confidence": foul_conf})
-        print(f"[FoulDebug] Heuristic fouls detected: {_fouls_found}")
+        print(f"[FoulDebug] Heuristic fouls detected: {_fouls_found} | gates passed: {_foul_debug}")
 
         # 3. Defensive (Tackles)
         # R18.1: Transition-based tackles DISABLED. Every cross-team ownership flip
