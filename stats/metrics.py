@@ -661,6 +661,10 @@ class StatsEngine:
                 # Phase 216: Confidence Metadata
                 "observations": total_frames,
                 "confidence_score": round(min(1.0, total_frames / 100.0), 2),  # Normalize to 0-1
+                # Verification workflow: AI-only output is "unverified" until an
+                # admin confirms the underlying events; stays authoritative in
+                # checker mode (never shown to users as verified).
+                "verification_status": "unverified",
                 "soft_registered": (id_manager.jersey_registry.get(jersey_num, {}).get("soft", False) if isinstance(id_manager.jersey_registry.get(jersey_num), dict) else False) if id_manager and jersey_num else False,
                 "stats": {
                     "total_distance": round(s["distance_m"], 2),

@@ -995,7 +995,13 @@ class AdvancedEventDetector:
 
             if ball_pos and self.camera.is_in_penalty_box(ball_pos):
                 stats[pid]["in_box_touches"] += 1
-                
+
+        # Verification workflow: every AI-detected event starts life
+        # unverified. The admin review flow (external to this repo) flips
+        # status to "verified" / "rejected" after a human watches the clip.
+        for e in events:
+            e.setdefault("status", "unverified")
+
         return events, stats
 
     def _is_opponent_near(self, frame_idx, pid, player_tracks, dist_m=2.0):

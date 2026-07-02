@@ -2396,6 +2396,46 @@ if __name__ == "__main__":
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
         json.dump(raw_tracks, f, indent=2)
     log(f"Saved {output_dir}/raw_tracks.json")
+
+    # Verification workflow: summarize event confidence for the admin flow.
+    # The threshold that routes events to the admin queue is a pending product
+    # decision; until it is set, every event is unverified and this summary
+    # just exposes the confidence distribution per event type.
+    conf_bands = {"high_0.75+": 0, "mid_0.50-0.75": 0, "low_<0.50": 0}
+    events_by_type = {}
+    for ev in raw_tracks:
+        if not isinstance(ev, dict):
+            continue
+        c = ev.get("confidence")
+        if c is not None:
+            if c >= 0.75:
+                conf_bands["high_0.75+"] += 1
+            elif c >= 0.50:
+                conf_bands["mid_0.50-0.75"] += 1
+            else:
+                conf_bands["low_<0.50"] += 1
+        etype = ev.get("type", "unknown")
+        bucket = events_by_type.setdefault(etype, {"count": 0, "_conf_sum": 0.0, "_conf_n": 0})
+        bucket["count"] += 1
+        if c is not None:
+            bucket["_conf_sum"] += c
+            bucket["_conf_n"] += 1
+    for bucket in events_by_type.values():
+        n = bucket.pop("_conf_n")
+        s = bucket.pop("_conf_sum")
+        bucket["avg_confidence"] = round(s / n, 3) if n else None
+    verification_summary = {
+        "verified_events": sum(1 for ev in raw_tracks
+                               if isinstance(ev, dict) and ev.get("status") == "verified"),
+        "unverified_events": sum(1 for ev in raw_tracks
+                                 if isinstance(ev, dict) and ev.get("status") != "verified"),
+        "confidence_bands": conf_bands,
+        "by_event_type": events_by_type,
+    }
+    with open(os.path.join(output_dir, "verification_summary.json"), "w") as f:
+        json.dump(verification_summary, f, indent=2)
+    log(f"Saved {output_dir}/verification_summary.json "
+        f"(events: {verification_summary['unverified_events']} unverified, bands: {conf_bands})")
     
     # Phase 186: Filter out Unknown players before saving
     original_count = len(player_stats)
