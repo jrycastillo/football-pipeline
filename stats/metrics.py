@@ -446,6 +446,7 @@ class StatsEngine:
                 "dribbles": 30, "dribbles_successful": 24,
                 "challenges_total": 45, "challenges_won_total": 35,
                 "shots_on_target": 14,
+                "fouls_total": 10,
                 "passes_total": 160, "passes_complete": 150,
                 "crosses_total": 25, "crosses_complete": 18,
                 "distance_m": 14500.0,
