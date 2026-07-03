@@ -36,8 +36,9 @@ def _clamp_conf(v):
 
     Never 1.0 — these are rule-based estimates, not verified results; the
     ceiling keeps downstream consumers from treating any event as certain.
+    Cast to plain float so numpy scalars never reach json.dump.
     """
-    return round(max(0.05, min(0.98, v)), 2)
+    return round(float(max(0.05, min(0.98, v))), 2)
 
 class AdvancedEventDetector:
     def __init__(self, frame_width=None, frame_height=None):
@@ -905,6 +906,119 @@ class AdvancedEventDetector:
                                                     # Heuristic: If shot was "Long Range" (>17m), likely jumping/diving.
                                                     if shot_dist > 15.0:
                                                          stats[gk_id]["jumping_saves"] += 1
+
+        # 7. Foul Detection (heuristic)
+        # A foul leaves three traces in our existing signals: the ball carrier
+        # loses possession (a) while an opponent is in body-contact range, and
+        # (b) play then STOPS — ownership stays empty beyond the 2.5s smoothing
+        # fill (a real dead-ball window: free-kick restart), with (c) the ball
+        # staying near the foul spot instead of travelling (which would mean a
+        # long ball / clearance, the main false-positive source for ownership
+        # gaps). Indirect evidence — confidence deliberately lands in the
+        # admin-review band rather than auto-trust territory.
+        FOUL_CONTACT_M = 1.2        # body-contact range at possession loss
+        FOUL_STOP_FRAMES = int(EFF_FPS * 1.0)  # on top of the 2.5s smoothing fill
+        FOUL_BALL_STILL_M = 10.0    # dead ball stays near the spot
+        _last_foul_frame = {}       # fouler pid -> frame (60s per-player cooldown)
+        _fouls_found = 0
+        _SMOOTH_FILL = int(EFF_FPS * 2.5)  # matches _smooth_ownership gap fill
+        if team_map:
+            for si in range(len(segments) - 1):
+                seg_last, seg_gap = segments[si], segments[si + 1]
+                if seg_last["pid"] is None or seg_gap["pid"] is not None:
+                    continue
+                gap_len = seg_gap["end"] - seg_gap["start"] + 1
+                if gap_len < FOUL_STOP_FRAMES:
+                    continue
+                # The last owner before the gap can be a 1-frame ownership blip
+                # (ball momentarily nearest to the fouler in the duel) inflated
+                # to segment size by the smoothing fill — which would invert
+                # who-fouled-whom. Walk back over such short segments to the
+                # player who actually carried the ball into the contact.
+                oi = si
+                while (oi > 0
+                       and segments[oi]["end"] - segments[oi]["start"] + 1
+                           < _SMOOTH_FILL + MIN_OWN_FRAMES
+                       and segments[oi - 1]["pid"] is not None):
+                    oi -= 1
+                seg_own = segments[oi]
+                carrier = seg_own["pid"]
+                if carrier is None:
+                    continue
+                # Carrier must have had controlled possession (same gate as passes)
+                if seg_own["end"] - seg_own["start"] < MIN_OWN_FRAMES:
+                    continue
+                f_end = seg_last["end"]
+                if f_end >= len(player_tracks):
+                    continue
+                team_c = team_map.get(str(carrier))
+                if not team_c or team_c == "Unknown":
+                    continue
+
+                # Nearest OPPONENT in contact range around possession loss.
+                # Ownership smoothing gap-fills up to 2.5s past the true loss,
+                # and nearest-player ownership lingers while the players
+                # separate from the dead ball — so the contact can sit up to
+                # ~3.5s before the segment end. Scan that window for the
+                # tightest cross-team approach instead of only the final frame.
+                scan_start = max(seg_own["start"], f_end - int(EFF_FPS * 3.5) - 1)
+                foul_by, foul_dist, foul_frame = None, FOUL_CONTACT_M, f_end
+                for k in range(scan_start, f_end + 1):
+                    boxes = player_tracks[k].get("boxes", [])
+                    my_box = next((b for b in boxes if b.get("id") == carrier), None)
+                    if not my_box:
+                        continue
+                    my_c = bbox_center(my_box["xyxy"])
+                    for b in boxes:
+                        pid_o = b.get("id")
+                        if pid_o is None or pid_o == carrier:
+                            continue
+                        team_o = team_map.get(str(pid_o))
+                        if not team_o or team_o == "Unknown" or team_o == team_c:
+                            continue
+                        d = self.camera.calculate_distance(my_c, bbox_center(b["xyxy"]))
+                        if d < foul_dist:
+                            foul_dist = d
+                            foul_by = pid_o
+                            foul_frame = k
+                if foul_by is None:
+                    continue
+
+                # Dead ball stays near the foul spot; a travelled ball means
+                # the gap was a long pass/clearance, not a stoppage.
+                spot = None
+                for off in range(0, f_end - scan_start + 1):
+                    if f_end - off >= 0 and ball_track[f_end - off]:
+                        spot = ball_track[f_end - off]
+                        break
+                max_disp = None
+                if spot is not None:
+                    win_end = min(seg_gap["start"] + int(EFF_FPS * 2), seg_gap["end"] + 1)
+                    disps = [self.camera.calculate_distance(spot, ball_track[k])
+                             for k in range(seg_gap["start"], win_end) if ball_track[k]]
+                    if disps:
+                        max_disp = max(disps)
+                        if max_disp > FOUL_BALL_STILL_M:
+                            continue
+
+                last_f = _last_foul_frame.get(foul_by, -999)
+                if f_end - last_f < int(EFF_FPS * 60):
+                    continue
+                _last_foul_frame[foul_by] = f_end
+                stats[foul_by]["fouls_total"] += 1
+                _fouls_found += 1
+
+                prox_norm = 1.0 - foul_dist / FOUL_CONTACT_M
+                stop_norm = min(1.0, gap_len / (EFF_FPS * 3))
+                if max_disp is None:
+                    ball_ev = 0.3  # no ball detections during the stoppage window
+                else:
+                    ball_ev = 1.0 - min(1.0, max_disp / FOUL_BALL_STILL_M)
+                foul_conf = _clamp_conf(0.20 + 0.30 * prox_norm + 0.25 * stop_norm
+                                        + 0.25 * ball_ev)
+                events.append({"type": "foul", "by": foul_by, "on": carrier,
+                               "frame": foul_frame, "confidence": foul_conf})
+        print(f"[FoulDebug] Heuristic fouls detected: {_fouls_found}")
 
         # 3. Defensive (Tackles)
         # R18.1: Transition-based tackles DISABLED. Every cross-team ownership flip
