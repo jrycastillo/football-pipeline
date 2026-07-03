@@ -974,6 +974,7 @@ class AdvancedEventDetector:
                 # tightest cross-team approach instead of only the final frame.
                 scan_start = max(seg_own["start"], f_end - int(EFF_FPS * 3.5) - 1)
                 foul_by, foul_dist, foul_frame = None, FOUL_CONTACT_M, f_end
+                foul_by_team_known = False
                 for k in range(scan_start, f_end + 1):
                     boxes = player_tracks[k].get("boxes", [])
                     my_box = next((b for b in boxes if b.get("id") == carrier), None)
@@ -984,30 +985,43 @@ class AdvancedEventDetector:
                         pid_o = b.get("id")
                         if pid_o is None or pid_o == carrier:
                             continue
+                        if b.get("cls") == 3:
+                            continue  # referees hover near duels/restarts
                         team_o = team_map.get(str(pid_o))
-                        if not team_o or team_o == "Unknown" or team_o == team_c:
-                            continue
+                        if team_o == team_c:
+                            continue  # same known team — not an opponent
+                        # Unknown-team boxes stay eligible: duels fragment
+                        # tracks under occlusion, so the fouler's box at the
+                        # contact moment often carries a fresh unmapped ID.
+                        # Requiring a known cross-team label here passed only
+                        # 2/52 real candidates on the Babak GT clip.
                         d = self.camera.calculate_distance(my_c, bbox_center(b["xyxy"]))
                         if d < foul_dist:
                             foul_dist = d
                             foul_by = pid_o
                             foul_frame = k
+                            foul_by_team_known = bool(team_o and team_o != "Unknown")
                 if foul_by is None:
                     continue
                 _foul_debug["contact"] += 1
 
                 # Dead ball stays near the foul spot; a travelled ball means
-                # the gap was a long pass/clearance, not a stoppage.
+                # the gap was a long pass/clearance, not a stoppage. Use RAW
+                # detections only: interpolated positions sweep in a straight
+                # line to the next detection (possibly seconds away), faking
+                # ball motion during exactly these no-owner windows.
                 spot = None
                 for off in range(0, f_end - scan_start + 1):
-                    if f_end - off >= 0 and ball_track[f_end - off]:
-                        spot = ball_track[f_end - off]
+                    idx = f_end - off
+                    if idx >= 0 and idx in raw_ball_frames and ball_track[idx]:
+                        spot = ball_track[idx]
                         break
                 max_disp = None
                 if spot is not None:
                     win_end = min(seg_gap["start"] + int(EFF_FPS * 2), seg_gap["end"] + 1)
                     disps = [self.camera.calculate_distance(spot, ball_track[k])
-                             for k in range(seg_gap["start"], win_end) if ball_track[k]]
+                             for k in range(seg_gap["start"], win_end)
+                             if k in raw_ball_frames and ball_track[k]]
                     if disps:
                         max_disp = max(disps)
                         if max_disp > FOUL_BALL_STILL_M:
@@ -1025,11 +1039,14 @@ class AdvancedEventDetector:
                 prox_norm = 1.0 - foul_dist / FOUL_CONTACT_M
                 stop_norm = min(1.0, gap_len / (EFF_FPS * 3))
                 if max_disp is None:
-                    ball_ev = 0.3  # no ball detections during the stoppage window
+                    ball_ev = 0.3  # no raw ball detections during the stoppage window
                 else:
                     ball_ev = 1.0 - min(1.0, max_disp / FOUL_BALL_STILL_M)
+                # Fouler on an unmapped/unknown-team track: the event is real
+                # evidence but the attribution is weaker — admin confirms it.
+                attrib_pen = 0.0 if foul_by_team_known else 0.08
                 foul_conf = _clamp_conf(0.20 + 0.30 * prox_norm + 0.25 * stop_norm
-                                        + 0.25 * ball_ev)
+                                        + 0.25 * ball_ev - attrib_pen)
                 events.append({"type": "foul", "by": foul_by, "on": carrier,
                                "frame": foul_frame, "confidence": foul_conf})
         print(f"[FoulDebug] Heuristic fouls detected: {_fouls_found} | gates passed: {_foul_debug}")
