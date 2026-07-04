@@ -1785,6 +1785,12 @@ if __name__ == "__main__":
                              "clips_manifest.json for the admin verification flow.")
     parser.add_argument('--clip_pad_s', type=float, default=3.0,
                         help="Seconds of video kept on each side of a clipped event.")
+    parser.add_argument('--pitch_homography', action="store_true",
+                        help="Fit a real pixel->meter homography from the 32-landmark pitch "
+                             "keypoint model (env.PITCH_KP_WEIGHTS, default "
+                             "models/pitch_keypoints.pt). Refit on the calibration cadence; "
+                             "per-frame H is stored with each frame so the stats engine "
+                             "projects with it instead of the flat fallback scale.")
     args = parser.parse_args()
 
     # Handle legacy argument mapping
@@ -1901,7 +1907,18 @@ if __name__ == "__main__":
         log(f"[Roster] Forcing player team colors from user roster: {kit_coordinator.forced_player_colors}")
     pitch_manager = PitchManager(model_path=CONFIG['env'].get('POSE_WEIGHTS', 'models/yolo_pitch.pt'), device=get_device().type)
     camera = Camera(pitch_manager.H_default)
-    
+
+    # Real pixel->meter homography from the 32-landmark pitch keypoint model.
+    # Opt-in: without the flag (or without the model file) the flat fallback
+    # scale above stays authoritative, exactly as before.
+    homography_estimator = None
+    if args.pitch_homography:
+        from vision.pitch_homography import PitchHomographyEstimator
+        homography_estimator = PitchHomographyEstimator(
+            model_path=CONFIG['env'].get('PITCH_KP_WEIGHTS', 'models/pitch_keypoints.pt'),
+            device=get_device().type)
+
+
     _device = get_device().type  # cuda > mps > cpu
     player_model = YOLO(CONFIG['env']['DET_WEIGHTS']).to(_device)
     ball_model = YOLO(CONFIG['env']['BALL_MODEL_PATH']).to(_device)
@@ -2094,10 +2111,20 @@ if __name__ == "__main__":
 
                 # Pitch Calib (Every 60 frames)
                 if n % 60 == 0:
-                     kps, H_new = pitch_manager.predict(f)
-                     camera.update(H_new)
-                
+                     if homography_estimator is not None:
+                         kps, H_kp = homography_estimator.predict(f)
+                         if homography_estimator.is_ready:
+                             camera.update(H_kp)
+                     else:
+                         kps, H_new = pitch_manager.predict(f)
+                         camera.update(H_new)
+
                 frame_data = {"boxes": []}
+                # Per-frame homography for the stats engine: broadcast cameras
+                # pan/zoom, so post-hoc projections must use the H that was
+                # valid when the frame was captured, not one global matrix.
+                if homography_estimator is not None and homography_estimator.is_ready:
+                    frame_data["H"] = camera.H.tolist()
                 batch_crops = []
                 batch_ids = []
             
@@ -2348,6 +2375,8 @@ if __name__ == "__main__":
             writer.release()
             log(f"Video saved to {out_video_path}")
         log(f"Tracking finished in {time.time() - start_time:.2f}s.")
+        if homography_estimator is not None:
+            log(f"[PitchHomography] fit stats: {homography_estimator.fit_stats()}")
         
         # DEBUG: Dump raw frame data for metric analysis
         with open(os.path.join(output_dir, "debug_all_frames.json"), "w") as f:
