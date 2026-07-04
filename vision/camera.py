@@ -4,9 +4,17 @@ import cv2
 # Standard Pitch Dimensions (Meters)
 PITCH_LENGTH = 105.0
 PITCH_WIDTH = 68.0
+PITCH_CENTER_Y = PITCH_WIDTH / 2.0
 
 # Goal Dimensions
 GOAL_WIDTH = 7.32
+
+# Penalty Area Dimensions (Meters)
+PENALTY_BOX_DEPTH = 16.5
+PENALTY_BOX_WIDTH = 40.32
+PENALTY_BOX_HALF_WIDTH = PENALTY_BOX_WIDTH / 2.0
+PENALTY_BOX_Y_MIN = PITCH_CENTER_Y - PENALTY_BOX_HALF_WIDTH
+PENALTY_BOX_Y_MAX = PITCH_CENTER_Y + PENALTY_BOX_HALF_WIDTH
 
 class Camera:
     def __init__(self, homography_matrix=None, frame_width=None, frame_height=None):
@@ -44,25 +52,21 @@ class Camera:
     def is_in_penalty_box(self, point_px):
         """
         Check if point is in Penalty Box.
-        BoxDims: 16.5m from goal line, 40.3m wide (centered).
+        BoxDims: 16.5m from goal line, 40.32m wide (centered).
         """
         xm, ym = self.project_point(point_px[0], point_px[1])
         
         # Assuming origin (0,0) is top-left corner, Goal at X=0 and X=105
-        # Penalty Box 1 (Left Goal): X in [0, 16.5], Y in [13.84, 54.16] (Centered on 68/2 = 34)
-        
-        box_depth = 16.5
-        box_width_half = 20.15 # 40.3 / 2
-        cy = PITCH_WIDTH / 2.0
+        # Penalty Box 1 (Left Goal): X in [0, 16.5], Y in [13.84, 54.16]
         
         # Check Box 1 (Left)
-        if 0 <= xm <= box_depth:
-            if cy - box_width_half <= ym <= cy + box_width_half:
+        if 0 <= xm <= PENALTY_BOX_DEPTH:
+            if PENALTY_BOX_Y_MIN <= ym <= PENALTY_BOX_Y_MAX:
                 return True
                 
         # Check Box 2 (Right)
-        if PITCH_LENGTH - box_depth <= xm <= PITCH_LENGTH:
-            if cy - box_width_half <= ym <= cy + box_width_half:
+        if PITCH_LENGTH - PENALTY_BOX_DEPTH <= xm <= PITCH_LENGTH:
+            if PENALTY_BOX_Y_MIN <= ym <= PENALTY_BOX_Y_MAX:
                 return True
                 
         return False
