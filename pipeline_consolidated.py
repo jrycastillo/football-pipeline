@@ -1791,6 +1791,10 @@ if __name__ == "__main__":
                              "models/pitch_keypoints.pt). Refit on the calibration cadence; "
                              "per-frame H is stored with each frame so the stats engine "
                              "projects with it instead of the flat fallback scale.")
+    parser.add_argument('--dump_fragments', action="store_true",
+                        help="Write fragments_dump.json: per-track ReID embedding, jersey-read "
+                             "evidence, team color and temporal extent — the input for offline "
+                             "identity-merge prototyping (fragment reconciliation rework).")
     args = parser.parse_args()
 
     # Handle legacy argument mapping
@@ -2385,6 +2389,36 @@ if __name__ == "__main__":
         with open(os.path.join(output_dir, "debug_all_frames.json"), "w") as f:
             json.dump(all_frames, f)
         log(f"Dumping debug_all_frames.json ({len(all_frames)} frames)")
+
+        # Fragment evidence dump for the identity-merge rework. Runs here, in
+        # the finally block, because box IDs in all_frames are still RAW track
+        # IDs (the Option A remap later mutates them in place) and the
+        # id_manager read evidence is complete. Offline merge prototypes
+        # consume this file instead of re-running the pipeline.
+        if args.dump_fragments:
+            try:
+                _frag = {}
+                for _fi, _fr in enumerate(all_frames):
+                    for _b in _fr.get("boxes", []):
+                        _tid = _b.get("id")
+                        if _tid is None:
+                            continue
+                        _e = _frag.setdefault(_tid, {"first_frame": _fi, "last_frame": _fi, "frames": 0})
+                        _e["last_frame"] = _fi
+                        _e["frames"] += 1
+                for _tid, _e in _frag.items():
+                    _emb = osnet_reid._memory.get(_tid) if osnet_reid is not None else None
+                    _e["embedding"] = [round(float(x), 5) for x in _emb] if _emb is not None else None
+                    _e["raw_reads"] = {str(k): int(v) for k, v in
+                                       (getattr(id_manager, "raw_read_counts", {}) or {}).get(_tid, {}).items()}
+                    _e["votes"] = {str(k): float(v) for k, v in
+                                   (getattr(id_manager, "vote_counts", {}) or {}).get(_tid, {}).items()}
+                    _e["color"] = (getattr(id_manager, "track_colors", {}) or {}).get(_tid)
+                with open(os.path.join(output_dir, "fragments_dump.json"), "w") as f:
+                    json.dump({str(k): v for k, v in _frag.items()}, f)
+                log(f"Fragment dump: {len(_frag)} tracks -> fragments_dump.json")
+            except Exception as e:
+                log(f"Fragment dump failed (non-fatal): {e}")
 
     # Phase v27.2: Bayesian Tracklet Consolidation
     # Perform this BEFORE stats and propagation
