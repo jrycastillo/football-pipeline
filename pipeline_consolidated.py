@@ -2109,15 +2109,18 @@ if __name__ == "__main__":
                 
                 img = player_res.orig_img
 
-                # Pitch Calib (Every 60 frames)
-                if n % 60 == 0:
-                     if homography_estimator is not None:
-                         kps, H_kp = homography_estimator.predict(f)
-                         if homography_estimator.is_ready:
-                             camera.update(H_kp)
-                     else:
-                         kps, H_new = pitch_manager.predict(f)
-                         camera.update(H_new)
+                # Pitch Calib — keypoint estimator runs denser (every 25 src
+                # frames, ~1s) because pans change the camera pose quickly and
+                # only ~1/3 of calibration frames yield a fit on broadcast
+                # footage; the legacy flat path keeps its 60-frame cadence.
+                if homography_estimator is not None:
+                    if n % 25 == 0:
+                        kps, H_kp = homography_estimator.predict(f)
+                        if homography_estimator.is_ready:
+                            camera.update(H_kp)
+                elif n % 60 == 0:
+                     kps, H_new = pitch_manager.predict(f)
+                     camera.update(H_new)
 
                 frame_data = {"boxes": []}
                 # Per-frame homography for the stats engine: broadcast cameras
