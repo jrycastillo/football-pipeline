@@ -67,3 +67,20 @@ proven end-to-end, but it pays off only once the fit rate is fixed:
 4. Re-run this A/B after (1)–(2); promote to default only when distance medians
    land in a physically plausible range AND event counts hold up against an
    event-level GT list (harness in progress).
+
+## Addendum — tuned re-run (`run_hb5_homog2`, same day)
+
+After the measured tuning (detection conf 0.30→0.05, commit `abaf3dd`):
+fit rate **20% → 31%** (31/100 calibrations), shots 9→7 (expected direction:
+fewer far-field phantom fast balls), passes 60, distance median back to ~100 m
+(speed gate + fragmentation still dominate distance, as analyzed above).
+A cadence bug found in the process: `n % 25` only fires on frames that also
+pass the stride filter, so calibration ran every lcm(25,3)=75 frames — fixed
+to a stride-compatible 24 (`075ca84`); expect ~3× more fit attempts on the
+next run. Detection-level sweep confirms the ~31% ceiling stands until the
+keypoint model is retrained on our footage domain (prep task parked pending
+the contractor's answer on retraining ownership).
+
+The run also produced the first real fragment dataset for the identity-merge
+rework (`--dump_fragments`, commit `9cbd017`): 289 fragments over 5 minutes
+(~13 per real player), 94% with ReID embeddings, median fragment ~4 s.
