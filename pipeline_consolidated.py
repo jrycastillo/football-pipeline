@@ -2209,7 +2209,7 @@ if __name__ == "__main__":
                                        x1r,y1r,x2r,y2r = [int(v) for v in box_data["xyxy"]]
                                        full_crop = img[max(0,y1r):y2r, max(0,x1r):x2r]
                                        emb = osnet_reid.extract_embedding(full_crop)
-                                       osnet_reid.update(tid, emb)
+                                       osnet_reid.update(tid, emb, frame=n)
                                    
                                    # Phase 168: Global Kit Discovery
                                    kit_coordinator.observe(cls_id, color)
@@ -2306,6 +2306,16 @@ if __name__ == "__main__":
                                     id_manager.raw_read_counts = {}
                                 rc = id_manager.raw_read_counts.setdefault(track_id, {})
                                 rc[int(raw_text)] = rc.get(int(raw_text), 0) + 1
+                                # Timestamped read log: aggregate counts hide
+                                # WHEN each number was read, but ByteTrack
+                                # fragments can switch players mid-track — the
+                                # read sequence is what lets an offline pass
+                                # find the switch point and split the fragment.
+                                if not hasattr(id_manager, 'raw_read_events'):
+                                    id_manager.raw_read_events = {}
+                                id_manager.raw_read_events.setdefault(track_id, []).append(
+                                    (n, int(raw_text),
+                                     round(float(pred.get("confidence") or pred.get("conf") or 0.0), 3)))
 
                          if pred["number"] is not None:
                             # 1. Resolve Identity
@@ -2413,8 +2423,18 @@ if __name__ == "__main__":
                 for _tid, _e in _frag.items():
                     _emb = osnet_reid._memory.get(_tid) if osnet_reid is not None else None
                     _e["embedding"] = [round(float(x), 5) for x in _emb] if _emb is not None else None
+                    # v2: raw snapshot gallery (frame, vector) — the EMA vector
+                    # blurs pose/lighting; merging needs spread-out looks.
+                    _e["embedding_gallery"] = [
+                        [_gf, [round(float(x), 5) for x in _ge]]
+                        for _gf, _ge in (osnet_reid.get_gallery(_tid) if osnet_reid is not None else [])
+                    ]
                     _e["raw_reads"] = {str(k): int(v) for k, v in
                                        (getattr(id_manager, "raw_read_counts", {}) or {}).get(_tid, {}).items()}
+                    # v2: timestamped read sequence (frame, number, conf) — lets
+                    # an offline pass locate mid-fragment identity switches.
+                    _e["read_events"] = [list(_ev) for _ev in
+                                         (getattr(id_manager, "raw_read_events", {}) or {}).get(_tid, [])]
                     _e["votes"] = {str(k): float(v) for k, v in
                                    (getattr(id_manager, "vote_counts", {}) or {}).get(_tid, {}).items()}
                     _e["color"] = (getattr(id_manager, "track_colors", {}) or {}).get(_tid)
