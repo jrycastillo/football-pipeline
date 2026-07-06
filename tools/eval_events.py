@@ -23,6 +23,7 @@ def parse_args():
                         help="Minimum confidence threshold for detected events. Default 0.5.")
     parser.add_argument("--sweep", action="store_true", help="Enable sweep mode across confidence thresholds (0.3 to 0.9).")
     parser.add_argument("--output", type=str, default=None, help="Path to save evaluation metrics report as JSON.")
+    parser.add_argument("--json_out", type=str, default=None, help="Path to save evaluation metrics report as JSON (alias to --output).")
     return parser.parse_args()
 
 def load_json(path):
@@ -319,12 +320,13 @@ def main():
     # Parse tolerances
     tolerances = parse_type_tolerances(args.type_tolerances, args.tolerance)
 
+    output_path = args.json_out or args.output
     if args.sweep:
         sweep_results = run_sweep(gt_events, det_events, player_stats, args.fps, args.vid_stride, tolerances, args.strictness)
-        if args.output:
-            with open(args.output, "w") as f:
+        if output_path:
+            with open(output_path, "w") as f:
                 json.dump({"sweep": sweep_results}, f, indent=2)
-            print(f"Sweep results saved to {args.output}")
+            print(f"Sweep results saved to {output_path}")
     else:
         metrics, unmatched_gt, unmatched_det = match_events(
             gt_events, det_events, player_stats, args.fps, args.vid_stride, tolerances, args.strictness, args.min_conf
@@ -333,7 +335,7 @@ def main():
         print_metrics_table(metrics)
         print_unmatched_tables(unmatched_gt, unmatched_det)
 
-        if args.output:
+        if output_path:
             report = {
                 "strictness": args.strictness,
                 "min_conf": args.min_conf,
@@ -342,9 +344,9 @@ def main():
                 "unmatched_gt_count": len(unmatched_gt),
                 "unmatched_det_count": len(unmatched_det)
             }
-            with open(args.output, "w") as f:
+            with open(output_path, "w") as f:
                 json.dump(report, f, indent=2)
-            print(f"Report saved to {args.output}")
+            print(f"Report saved to {output_path}")
 
 if __name__ == "__main__":
     main()
