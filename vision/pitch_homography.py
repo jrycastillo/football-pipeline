@@ -219,8 +219,13 @@ class PitchHomographyEstimator:
             return None, self.H
 
         try:
+            # Detection conf 0.05: on broadcast footage the pitch object often
+            # scores low (median det conf ~0.1 on HB), but every frame it IS
+            # detected on yields >=4 good keypoints — measured fit-capable rate
+            # 31% at 0.05 vs 20% at 0.30. RANSAC + the keypoint conf gate
+            # protect against garbage fits.
             results = self.model.predict(
-                frame, conf=0.30, imgsz=640, device=self.device, verbose=False
+                frame, conf=0.05, imgsz=640, device=self.device, verbose=False
             )
             if not results:
                 self.fit_from_keypoints(None, None)

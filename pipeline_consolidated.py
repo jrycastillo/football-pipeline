@@ -2109,15 +2109,18 @@ if __name__ == "__main__":
                 
                 img = player_res.orig_img
 
-                # Pitch Calib (Every 60 frames)
-                if n % 60 == 0:
-                     if homography_estimator is not None:
-                         kps, H_kp = homography_estimator.predict(f)
-                         if homography_estimator.is_ready:
-                             camera.update(H_kp)
-                     else:
-                         kps, H_new = pitch_manager.predict(f)
-                         camera.update(H_new)
+                # Pitch Calib — keypoint estimator runs denser (every 25 src
+                # frames, ~1s) because pans change the camera pose quickly and
+                # only ~1/3 of calibration frames yield a fit on broadcast
+                # footage; the legacy flat path keeps its 60-frame cadence.
+                if homography_estimator is not None:
+                    if n % 25 == 0:
+                        kps, H_kp = homography_estimator.predict(f)
+                        if homography_estimator.is_ready:
+                            camera.update(H_kp)
+                elif n % 60 == 0:
+                     kps, H_new = pitch_manager.predict(f)
+                     camera.update(H_new)
 
                 frame_data = {"boxes": []}
                 # Per-frame homography for the stats engine: broadcast cameras
@@ -2450,15 +2453,37 @@ if __name__ == "__main__":
             else:
                 conf_bands["low_<0.50"] += 1
         etype = ev.get("type", "unknown")
-        bucket = events_by_type.setdefault(etype, {"count": 0, "_conf_sum": 0.0, "_conf_n": 0})
+        bucket = events_by_type.setdefault(etype, {
+            "count": 0,
+            "_conf_sum": 0.0,
+            "_conf_n": 0,
+            "_id_conf_sum": 0.0,
+            "_id_conf_n": 0,
+            "_id_recv_sum": 0.0,
+            "_id_recv_n": 0,
+        })
         bucket["count"] += 1
         if c is not None:
             bucket["_conf_sum"] += c
             bucket["_conf_n"] += 1
+        idc = ev.get("identity_confidence")
+        if isinstance(idc, (int, float)):
+            bucket["_id_conf_sum"] += idc
+            bucket["_id_conf_n"] += 1
+        recv_idc = ev.get("identity_confidence_receiver")
+        if isinstance(recv_idc, (int, float)):
+            bucket["_id_recv_sum"] += recv_idc
+            bucket["_id_recv_n"] += 1
     for bucket in events_by_type.values():
         n = bucket.pop("_conf_n")
         s = bucket.pop("_conf_sum")
+        id_n = bucket.pop("_id_conf_n")
+        id_s = bucket.pop("_id_conf_sum")
+        recv_n = bucket.pop("_id_recv_n")
+        recv_s = bucket.pop("_id_recv_sum")
         bucket["avg_confidence"] = round(s / n, 3) if n else None
+        bucket["avg_identity_confidence"] = round(id_s / id_n, 3) if id_n else None
+        bucket["avg_identity_confidence_receiver"] = round(recv_s / recv_n, 3) if recv_n else None
     verification_summary = {
         "verified_events": sum(1 for ev in raw_tracks
                                if isinstance(ev, dict) and ev.get("status") == "verified"),
