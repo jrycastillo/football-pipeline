@@ -40,9 +40,10 @@ passes 62 (avg identity-conf 0.77) · touches 119 · dribbles 17 · tackles 13 �
 shots 6 · crosses 2 · interceptions 5 · goals 1.
 
 - **The goal event is a false positive** — the scoreboard stays 0-0 through
-  this window — and it carries confidence **0.50**, i.e. it lands in the
-  admin-review band instead of being auto-trusted. That is the verification
-  workflow doing its job on real data.
+  this window. Its EVENT confidence is 0.79 (would pass a 0.75 bar), but its
+  IDENTITY confidence is 0.50 — so a queue routed on min(event, identity)
+  catches it. This is the concrete argument for gating on both scores, not
+  event confidence alone.
 - Confidence bands: 131 high (≥0.75) / 90 mid / 4 low → an 0.75 admin
   threshold would queue ~42% of events on this footage.
 - Homography: 96 real fits (31% of 312 calibrations, ~one per 3 s of video).
