@@ -19,12 +19,18 @@ Standalone use (re-clip from a finished run without re-running the pipeline):
 import json
 import os
 
-import cv2
-
 # Default clip-worthy types: the confirmed highlight events. Ball touches are
 # also clippable (--types touch) but produce hundreds of clips per match, so
 # they stay opt-in until the product decision on portal clip types is made.
 DEFAULT_CLIP_TYPES = ("goal", "shot", "save")
+_FFMPEG_PROBED = False
+_FFMPEG_PATH = None
+_FFMPEG_UNAVAILABLE_WARNED = False
+
+
+def _load_cv2():
+    import importlib
+    return importlib.import_module("cv2")
 
 
 def _event_player(event):
@@ -35,9 +41,145 @@ def _event_player(event):
     return None
 
 
+def _ffmpeg_path():
+    global _FFMPEG_PROBED, _FFMPEG_PATH
+    if not _FFMPEG_PROBED:
+        import shutil
+        _FFMPEG_PATH = shutil.which("ffmpeg")
+        _FFMPEG_PROBED = True
+    return _FFMPEG_PATH
+
+
+def _warn_ffmpeg_unavailable_once():
+    global _FFMPEG_UNAVAILABLE_WARNED
+    if not _FFMPEG_UNAVAILABLE_WARNED:
+        print("[Clipper] ffmpeg not found; falling back to OpenCV mp4v encoding")
+        _FFMPEG_UNAVAILABLE_WARNED = True
+
+
+def _select_codec(codec):
+    codec = (codec or "h264").lower()
+    if codec not in ("h264", "mp4v"):
+        raise ValueError("codec must be 'h264' or 'mp4v'")
+    if codec == "mp4v":
+        return "mp4v", None
+
+    ffmpeg = _ffmpeg_path()
+    if ffmpeg:
+        return "h264", ffmpeg
+
+    _warn_ffmpeg_unavailable_once()
+    return "mp4v", None
+
+
+def _build_ffmpeg_command(ffmpeg_path, clip_path, fps, width, height):
+    return [
+        ffmpeg_path,
+        "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "-",
+        "-an",
+        "-vcodec", "libx264",
+        "-preset", "veryfast",
+        "-crf", "26",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        clip_path,
+    ]
+
+
+def _remove_file_quiet(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _write_clip_ffmpeg(cap, clip_path, start, end, fps, width, height, ffmpeg_path):
+    import subprocess
+
+    cmd = _build_ffmpeg_command(ffmpeg_path, clip_path, fps, width, height)
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    written = 0
+    try:
+        for _ in range(start, end + 1):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            proc.stdin.write(frame.tobytes())
+            written += 1
+        proc.stdin.close()
+        stderr = proc.stderr.read() if proc.stderr else b""
+        return_code = proc.wait()
+    except Exception:
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        proc.wait()
+        raise
+
+    if return_code != 0:
+        msg = stderr.decode("utf-8", errors="replace").strip()
+        if msg:
+            raise RuntimeError(f"ffmpeg exited {return_code}: {msg}")
+        raise RuntimeError(f"ffmpeg exited {return_code}")
+    return written
+
+
+def _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height):
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(clip_path, fourcc, fps, (width, height))
+    written = 0
+    for _ in range(start, end + 1):
+        ok, frame = cap.read()
+        if not ok:
+            break
+        writer.write(frame)
+        written += 1
+    writer.release()
+    return written
+
+
+def _write_clip(cv2, cap, clip_path, start, end, fps, width, height,
+                selected_codec, ffmpeg_path):
+    if selected_codec == "h264" and ffmpeg_path:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        try:
+            written = _write_clip_ffmpeg(
+                cap, clip_path, start, end, fps, width, height, ffmpeg_path)
+            if written > 0:
+                return written, "h264"
+            print(f"[Clipper] ffmpeg wrote no frames for {os.path.basename(clip_path)}; "
+                  "falling back to mp4v")
+        except Exception as e:
+            print(f"[Clipper] ffmpeg failed for {os.path.basename(clip_path)} ({e}); "
+                  "falling back to mp4v")
+        _remove_file_quiet(clip_path)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    written = _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height)
+    return written, "mp4v"
+
+
 def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
                 event_types=DEFAULT_CLIP_TYPES, min_conf=None, max_conf=None,
-                max_clips=200):
+                max_clips=200, codec="h264"):
     """Write pad_s-padded clips for selected events + clips_manifest.json.
 
     events: the pipeline event list (raw_tracks.json content).
@@ -45,6 +187,12 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     only the low-confidence events that need admin review.
     Returns the manifest (list of dicts); empty list if the video is missing.
     """
+    codec = (codec or "h264").lower()
+    if codec not in ("h264", "mp4v"):
+        raise ValueError("codec must be 'h264' or 'mp4v'")
+
+    cv2 = _load_cv2()
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"[Clipper] Cannot open video: {video_path} — no clips written")
@@ -72,9 +220,12 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
         print(f"[Clipper] {len(selected)} events selected, capping at {max_clips}")
         selected = selected[:max_clips]
 
+    selected_codec, ffmpeg_path = ("mp4v", None)
+    if selected:
+        selected_codec, ffmpeg_path = _select_codec(codec)
+
     clips_dir = os.path.join(output_dir, "clips")
     os.makedirs(clips_dir, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     manifest = []
     for idx, ev in enumerate(selected):
@@ -90,19 +241,12 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
         name = f"{idx:03d}_{ev['type']}_p{player}_f{src_frame}.mp4"
         clip_path = os.path.join(clips_dir, name)
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        writer = cv2.VideoWriter(clip_path, fourcc, fps, (width, height))
-        written = 0
-        for _ in range(start, end + 1):
-            ok, frame = cap.read()
-            if not ok:
-                break
-            writer.write(frame)
-            written += 1
-        writer.release()
+        written, actual_codec = _write_clip(
+            cv2, cap, clip_path, start, end, fps, width, height,
+            selected_codec, ffmpeg_path)
 
         if written == 0:
-            os.remove(clip_path)
+            _remove_file_quiet(clip_path)
             continue
 
         manifest.append({
@@ -112,6 +256,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             "confidence": ev.get("confidence"),
             "identity_confidence": ev.get("identity_confidence"),
             "identity_confidence_receiver": ev.get("identity_confidence_receiver"),
+            "codec": actual_codec,
+            "size_bytes": os.path.getsize(clip_path) if os.path.exists(clip_path) else 0,
             "status": ev.get("status", "unverified"),
             "event_frame": ev.get("frame"),
             "source_frame": src_frame,
@@ -144,6 +290,8 @@ if __name__ == "__main__":
     parser.add_argument("--min_conf", type=float, default=None)
     parser.add_argument("--max_conf", type=float, default=None,
                         help="e.g. 0.75 → only low-confidence events (admin review queue)")
+    parser.add_argument("--codec", choices=("h264", "mp4v"), default="h264",
+                        help="Clip encoder: h264 via ffmpeg when available, or OpenCV mp4v")
     args = parser.parse_args()
 
     with open(args.events) as f:
@@ -151,4 +299,4 @@ if __name__ == "__main__":
     clip_events(args.video, event_list, args.output_dir,
                 vid_stride=args.vid_stride, pad_s=args.pad_s,
                 event_types=tuple(t.strip() for t in args.types.split(",") if t.strip()),
-                min_conf=args.min_conf, max_conf=args.max_conf)
+                min_conf=args.min_conf, max_conf=args.max_conf, codec=args.codec)
