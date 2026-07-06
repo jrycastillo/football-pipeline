@@ -2113,12 +2113,16 @@ if __name__ == "__main__":
                 
                 img = player_res.orig_img
 
-                # Pitch Calib — keypoint estimator runs denser (every 25 src
+                # Pitch Calib — keypoint estimator runs denser (every 24 src
                 # frames, ~1s) because pans change the camera pose quickly and
                 # only ~1/3 of calibration frames yield a fit on broadcast
                 # footage; the legacy flat path keeps its 60-frame cadence.
+                # 24, not 25: the cadence must share a factor with vid_stride
+                # (3), otherwise only lcm(cadence, stride) frames ever fire —
+                # n%25 with stride 3 calibrated every 75 frames, SPARSER than
+                # the 60 it replaced.
                 if homography_estimator is not None:
-                    if n % 25 == 0:
+                    if n % 24 == 0:
                         kps, H_kp = homography_estimator.predict(f)
                         if homography_estimator.is_ready:
                             camera.update(H_kp)
