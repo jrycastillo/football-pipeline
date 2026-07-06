@@ -43,16 +43,43 @@ def _clamp_conf(v):
 class AdvancedEventDetector:
     def __init__(self, frame_width=None, frame_height=None):
         self.camera = Camera(frame_width=frame_width, frame_height=frame_height)
-        
+        self._frame_H = []
+        self._has_frame_H = False
+
+    def _load_frame_homographies(self, player_tracks):
+        """Cache per-frame homographies stored by the pipeline
+        (--pitch_homography). Broadcast cameras pan/zoom, so every projection
+        must use the H valid at that frame; frames without one keep the
+        detector's flat fallback camera."""
+        self._frame_H = [None] * len(player_tracks)
+        found = 0
+        for t, f in enumerate(player_tracks):
+            H = f.get("H") if isinstance(f, dict) else None
+            if H is not None:
+                self._frame_H[t] = np.array(H)
+                found += 1
+        self._has_frame_H = found > 0
+        if found:
+            print(f"[Homography] Per-frame pitch homographies on {found}/{len(player_tracks)} frames")
+
+    def _set_frame_h(self, t):
+        """Point the camera at frame t's homography (no-op without one)."""
+        if self._has_frame_H and 0 <= t < len(self._frame_H):
+            H = self._frame_H[t]
+            if H is not None:
+                self.camera.H = H
+
     def calculate_ownership(self, player_tracks, ball_track):
         """
         Map possession: Who had the ball when? (Using Meters)
         """
+        self._load_frame_homographies(player_tracks)
         ownership = [None] * len(ball_track)
-        
+
         for t, ball_pos in enumerate(ball_track):
             if ball_pos is None: continue
             if t >= len(player_tracks): break
+            self._set_frame_h(t)
             
             frame_data = player_tracks[t]
             boxes = frame_data.get("boxes", [])
@@ -98,6 +125,7 @@ class AdvancedEventDetector:
         """
         if raw_ball_frames is None:
             raw_ball_frames = set()  # Fallback: treat all as raw (legacy behavior)
+        self._load_frame_homographies(player_tracks)
         stats = defaultdict(lambda: defaultdict(int))
         events = []
         
@@ -123,6 +151,7 @@ class AdvancedEventDetector:
         max_dist_per_frame = 12.0 * VID_STRIDE / FPS
 
         for t, frame_data in enumerate(player_tracks):
+            self._set_frame_h(t)
             boxes = frame_data.get("boxes", [])
             # Round 11 fix: Deduplicate PIDs within a frame to prevent prev_pos oscillation.
             # When finalize_bindings maps multiple ByteTrack fragments to the same jersey,
@@ -193,6 +222,7 @@ class AdvancedEventDetector:
         # 0. Spatial Residency Check (for GK ID)
         # Iterate all player tracks to count frames in box
         for t, frame_data in enumerate(player_tracks):
+             self._set_frame_h(t)
              for box in frame_data["boxes"]:
                  pid = box["id"]
                  if pid is not None:
@@ -262,6 +292,7 @@ class AdvancedEventDetector:
         dribble_lookback = max(1, int(EFF_FPS * 0.5))  # 0.5 second lookback for movement check
         for t, pid in enumerate(ownership):
             if pid is not None:
+                self._set_frame_h(t)
                 stats[pid]["touch_frames"] += 1
 
                 # Check Dribble (Opponent within range)
@@ -363,6 +394,7 @@ class AdvancedEventDetector:
                 continue
 
             _pass_debug["transitions"] += 1
+            self._set_frame_h(seg_a["end"])
 
             # Max gap check: Don't count as pass if gap > 3 seconds (ball out of play)
             gap_frames = seg_b["start"] - seg_a["end"]
@@ -576,6 +608,7 @@ class AdvancedEventDetector:
                     _shot_debug["interp_skipped"] += 1
                     continue
                 _shot_debug["raw_pairs"] += 1
+                self._set_frame_h(i)
                 p1 = ball_track[i-2]
                 p2 = ball_track[i]
                 
@@ -818,6 +851,7 @@ class AdvancedEventDetector:
                 # Round 2 fix: Skip interpolated frames
                 if raw_ball_frames and (i not in raw_ball_frames or (i-2) not in raw_ball_frames):
                     continue
+                self._set_frame_h(i)
                 m1 = self.camera.project_point(ball_track[i-2][0], ball_track[i-2][1])
                 m2 = self.camera.project_point(ball_track[i][0], ball_track[i][1])
                 dist_m = math.hypot(m2[0]-m1[0], m2[1]-m1[1])
@@ -976,6 +1010,7 @@ class AdvancedEventDetector:
                 foul_by, foul_dist, foul_frame = None, FOUL_CONTACT_M, f_end
                 foul_by_team_known = False
                 for k in range(scan_start, f_end + 1):
+                    self._set_frame_h(k)
                     boxes = player_tracks[k].get("boxes", [])
                     my_box = next((b for b in boxes if b.get("id") == carrier), None)
                     if not my_box:
