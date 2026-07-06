@@ -2,7 +2,15 @@ import math
 import numpy as np
 import yaml
 from collections import defaultdict
-from vision.camera import Camera
+from vision.camera import (
+    Camera,
+    PENALTY_BOX_DEPTH,
+    PENALTY_BOX_HALF_WIDTH,
+    PENALTY_BOX_Y_MAX,
+    PENALTY_BOX_Y_MIN,
+    PITCH_CENTER_Y,
+    PITCH_LENGTH,
+)
 
 # Load Config
 try:
@@ -130,8 +138,8 @@ class AdvancedEventDetector:
         events = []
         
         # xG & Shot Logic Constants (Meters)
-        GOAL_X = 105.0 # Goal Line
-        GOAL_CENTER_Y = 34.0
+        GOAL_X = PITCH_LENGTH # Goal Line
+        GOAL_CENTER_Y = PITCH_CENTER_Y
         GOAL_WIDTH_HALF = 3.66 # 7.32 / 2
         
         if not ball_track: return [], stats
@@ -231,10 +239,12 @@ class AdvancedEventDetector:
                       m = self.camera.project_point(c[0], c[1])
                       
                       # Check Box 1 (Left) & 2 (Right)
-                      # Box: X < 16.5 or X > 105-16.5
-                      # Y in [13.84, 54.16]
+                      # Box: X < depth or X > pitch_length-depth
+                      # Y within the standard penalty-area width.
                       in_box = False
-                      if (m[0] < 16.5 or m[0] > (105.0 - 16.5)) and (13.84 < m[1] < 54.16):
+                      if ((m[0] < PENALTY_BOX_DEPTH
+                           or m[0] > (PITCH_LENGTH - PENALTY_BOX_DEPTH))
+                              and (PENALTY_BOX_Y_MIN < m[1] < PENALTY_BOX_Y_MAX)):
                           in_box = True
                           
                       if in_box:
@@ -495,13 +505,19 @@ class AdvancedEventDetector:
 
                     # 3. Check Crosses (Side Channel to Box)
                     # Side Channel: |y - 34| > 25 -> y < 9 or y > 59
-                    # Box: x > 88.5 or x < 16.5, and |y - 34| < 20.15
+                    # Box: x > pitch_length-depth or x < depth, centered on the goal.
                     start_m = self.camera.project_point(start_pos[0], start_pos[1])
                     end_m = self.camera.project_point(end_pos[0], end_pos[1])
 
-                    in_side_channel = abs(start_m[1] - 34.0) > 25.0
-                    into_box_right = end_m[0] > 88.5 and abs(end_m[1] - 34.0) < 20.15
-                    into_box_left = end_m[0] < 16.5 and abs(end_m[1] - 34.0) < 20.15
+                    in_side_channel = abs(start_m[1] - PITCH_CENTER_Y) > 25.0
+                    into_box_right = (
+                        end_m[0] > (PITCH_LENGTH - PENALTY_BOX_DEPTH)
+                        and abs(end_m[1] - PITCH_CENTER_Y) < PENALTY_BOX_HALF_WIDTH
+                    )
+                    into_box_left = (
+                        end_m[0] < PENALTY_BOX_DEPTH
+                        and abs(end_m[1] - PITCH_CENTER_Y) < PENALTY_BOX_HALF_WIDTH
+                    )
 
                     if in_side_channel and (into_box_right or into_box_left):
                         stats[p_a]["crosses_total"] += 1
