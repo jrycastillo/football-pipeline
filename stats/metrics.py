@@ -99,6 +99,9 @@ class StatsEngine:
                     if not hasattr(id_manager, 'vote_recovered_jerseys'):
                         id_manager.vote_recovered_jerseys = set()
                     id_manager.vote_recovered_jerseys.add(jnum)
+                    if not hasattr(id_manager, 'raw_read_recovered_jerseys'):
+                        id_manager.raw_read_recovered_jerseys = set()
+                    id_manager.raw_read_recovered_jerseys.add(jnum)
                     print(f"[Phase 216++] Raw recovery: Jersey #{jnum} ({total_cnt} total raw reads)")
 
         return track_to_jersey
@@ -169,6 +172,177 @@ class StatsEngine:
         print(f"[Roster reconcile] tracks={len(track_to_jersey)} kept(valid)={kept} "
               f"reassigned(off->roster)={reassigned} dropped(false)={dropped}")
         return out
+
+    @staticmethod
+    def _coerce_int(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            s = value.strip()
+            if s.isdigit():
+                return int(s)
+        return None
+
+    @classmethod
+    def _id_variants(cls, value):
+        variants = []
+        for candidate in (value, cls._coerce_int(value)):
+            if candidate is None:
+                continue
+            if candidate not in variants:
+                variants.append(candidate)
+            candidate_str = str(candidate)
+            if candidate_str not in variants:
+                variants.append(candidate_str)
+        return variants
+
+    @classmethod
+    def _lookup_id(cls, mapping, value, default=None):
+        if not mapping:
+            return default
+        for candidate in cls._id_variants(value):
+            if candidate in mapping:
+                return mapping[candidate]
+        return default
+
+    @classmethod
+    def _contains_id(cls, values, value):
+        if not values:
+            return False
+        return any(candidate in values for candidate in cls._id_variants(value))
+
+    @classmethod
+    def _registry_info(cls, id_manager, jersey):
+        registry = getattr(id_manager, "jersey_registry", {}) if id_manager else {}
+        return cls._lookup_id(registry, jersey)
+
+    @classmethod
+    def _vote_stats(cls, id_manager, track_id, jersey):
+        vote_counts = getattr(id_manager, "vote_counts", {}) if id_manager else {}
+        vote_tallies = getattr(id_manager, "vote_tallies", {}) if id_manager else {}
+        votes = cls._lookup_id(vote_counts, track_id, {})
+        tallies = cls._lookup_id(vote_tallies, track_id, {})
+        if not votes:
+            return 0, 0.0
+
+        score = cls._lookup_id(votes, jersey, 0.0) or 0.0
+        second = 0.0
+        for num, val in votes.items():
+            if any(num == variant for variant in cls._id_variants(jersey)):
+                continue
+            if isinstance(val, (int, float)):
+                second = max(second, float(val))
+        tally = cls._lookup_id(tallies, jersey, 0) or 0
+        return int(tally), float(score) - second
+
+    @classmethod
+    def _candidate_tracks_for_jersey(cls, id_manager, jersey, source_track=None, track_to_jersey=None):
+        candidates = []
+        if source_track is not None:
+            candidates.append(source_track)
+
+        info = cls._registry_info(id_manager, jersey)
+        if isinstance(info, dict) and info.get("track_id") is not None:
+            candidates.append(info["track_id"])
+
+        active_bindings = getattr(id_manager, "active_bindings", {}) if id_manager else {}
+        for tid, jnum in active_bindings.items():
+            if any(jnum == variant for variant in cls._id_variants(jersey)):
+                candidates.append(tid)
+
+        for tid, jnum in (track_to_jersey or {}).items():
+            if any(jnum == variant for variant in cls._id_variants(jersey)):
+                candidates.append(tid)
+
+        deduped = []
+        for tid in candidates:
+            if tid not in deduped:
+                deduped.append(tid)
+        return deduped
+
+    @staticmethod
+    def _clamp_identity_confidence(value):
+        return round(float(max(0.05, min(0.95, value))), 2)
+
+    def _apply_roster_identity_adjustment(self, base, jersey, roster_prior):
+        if roster_prior is None or jersey is None:
+            return self._clamp_identity_confidence(base)
+        try:
+            if roster_prior.is_valid_number(jersey):
+                base += 0.05
+            else:
+                base = min(base, 0.50)
+        except Exception:
+            pass
+        return self._clamp_identity_confidence(base)
+
+    def _resolve_event_actor_identity(self, actor, id_manager, track_to_jersey):
+        if actor is None:
+            return None, None
+
+        mapped = self._lookup_id(track_to_jersey, actor)
+        if mapped is not None:
+            return mapped, actor
+
+        if self._registry_info(id_manager, actor) is not None:
+            return actor, None
+        if self._contains_id(getattr(id_manager, "vote_recovered_jerseys", set()), actor):
+            return actor, None
+        if self._contains_id(getattr(id_manager, "raw_read_recovered_jerseys", set()), actor):
+            return actor, None
+
+        return None, actor
+
+    def _identity_confidence_for_actor(self, actor, id_manager, track_to_jersey, roster_prior):
+        jersey, source_track = self._resolve_event_actor_identity(actor, id_manager, track_to_jersey)
+        if jersey is None:
+            return self._clamp_identity_confidence(0.20 if actor is not None else 0.05)
+
+        raw_recovered = getattr(id_manager, "raw_read_recovered_jerseys", set()) if id_manager else set()
+        vote_recovered = getattr(id_manager, "vote_recovered_jerseys", set()) if id_manager else set()
+
+        strong_lock = False
+        if self._registry_info(id_manager, jersey) is not None:
+            for tid in self._candidate_tracks_for_jersey(id_manager, jersey, source_track, track_to_jersey):
+                tally, margin = self._vote_stats(id_manager, tid, jersey)
+                if tally >= 3 and margin >= 1.0:
+                    strong_lock = True
+                    break
+
+        if strong_lock:
+            base = 0.90
+        elif self._contains_id(raw_recovered, jersey):
+            base = 0.45
+        elif self._contains_id(vote_recovered, jersey):
+            base = 0.60
+        elif self._registry_info(id_manager, jersey) is not None:
+            base = 0.60
+        else:
+            base = 0.20
+
+        return self._apply_roster_identity_adjustment(base, jersey, roster_prior)
+
+    @staticmethod
+    def _event_primary_actor(event):
+        for key in ("player", "from", "by"):
+            if event.get(key) is not None:
+                return event.get(key)
+        return None
+
+    def _stamp_event_identity_confidences(self, events, id_manager, track_to_jersey, roster_prior):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            actor = self._event_primary_actor(event)
+            event["identity_confidence"] = self._identity_confidence_for_actor(
+                actor, id_manager, track_to_jersey, roster_prior)
+            if event.get("type") == "pass" and event.get("to") is not None:
+                event["identity_confidence_receiver"] = self._identity_confidence_for_actor(
+                    event.get("to"), id_manager, track_to_jersey, roster_prior)
 
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None):
         """
@@ -263,6 +437,7 @@ class StatsEngine:
         # PICK PRIMARY TRACK per jersey (most frames) — do NOT sum across tracks.
         # Summing caused 10-22x stat inflation when multiple ByteTrack fragments
         # mapped to the same jersey.
+        identity_track_to_jersey = {}
         if id_manager:
             remapped_stats = {}
             remap_count = 0
@@ -468,7 +643,11 @@ class StatsEngine:
                 remapped_stats[track_id] = stats_dict
 
             raw_stats = remapped_stats
+            identity_track_to_jersey = track_to_jersey
             print(f"[Phase 216] Remapped {remap_count} track IDs to jersey numbers (pick-primary, no summing)")
+
+        self._stamp_event_identity_confidences(
+            events, id_manager, identity_track_to_jersey, roster_prior)
         
         # 3. Final Formatting
         formatted_stats = {}
