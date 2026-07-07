@@ -93,10 +93,25 @@ are in the dev repo (`football.git`, branch `production-v1.0`).
 - **PARSeq was already wired** (`--jnr_backend parseq`) but never selected.
   Evaluated all checkpoints on 3,000 HB crops through the production path:
   ResNet 2.1% · v6 46% (held-out) · v8 71% (match-specialized, trained on HB).
-- **In progress**: video A/B on the HB clip with PARSeq v6 (honest default
-  candidate), scored against the roster vs the ResNet 3-match/9-false baseline.
-- Next: if v6 wins, make it the config default; then validate generalization on
-  the Babak clip (held out) vs the 5/12 baseline.
+- **Video A/B result (HB 5-min, scored vs official roster)** — v6 is held out
+  (did NOT train on this match), so this is an honest generalization number:
+
+  | metric | ResNet (old default) | PARSeq v6 |
+  |---|---|---|
+  | exact team+number matches | 3 | **13** |
+  | false numbers | 9 | **1** (and it's #18 Jatta, a real player missing from our roster) |
+  | roster numbers found | 5/21 | **15/21** |
+
+  A 4× jump in correct identities and near-elimination of the magnet/false-number
+  problem — the root issue behind low identity confidence and the fragment-merge
+  difficulty.
+- **Made PARSeq v6 the config default** (`5010728`). `--jnr_backend resnet`
+  restores the old model; v8 available for match-specialized use.
+- **In progress**: Babak-clip validation with v6 (fully held out — no PARSeq
+  version trained on it) vs the 5/12 ResNet baseline.
+- Implication: this likely lifts every downstream identity metric and makes the
+  fragment-merge rework easier (cleaner reads → less denoising). Highest-value
+  change of the week; jumps ahead of the merge prototype in priority.
 
 ---
 
