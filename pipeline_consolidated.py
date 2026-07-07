@@ -1886,11 +1886,19 @@ if __name__ == "__main__":
     logging.info("🔄 [JNR] Initializing JNR Service...")
     # Clean hardcoded paths
     jnr_weights = CONFIG['env']['JNR_WEIGHTS'] if CONFIG['env']['JNR_WEIGHTS'] else "models/resnet34_rgb_jnr.pt"
-    if getattr(args, "jnr_backend", "resnet") == "parseq":
-        from vision.resnet_recognition import PARSeqRecognizer
-        parseq_weights = getattr(args, "jnr_parseq_weights", "models/parseq_local_v5.pt")
-        jnr_service = PARSeqRecognizer(weights_path=parseq_weights)
-    else:
+    jnr_service = None
+    if getattr(args, "jnr_backend", "parseq") == "parseq":
+        # PARSeq needs the vendored parseq/ (strhub) library + weights. If either
+        # is missing (e.g. a fresh clone without them), fall back to ResNet with
+        # a loud warning rather than crashing the whole run.
+        parseq_weights = getattr(args, "jnr_parseq_weights", "models/parseq_local_v6.pt")
+        try:
+            from vision.resnet_recognition import PARSeqRecognizer
+            jnr_service = PARSeqRecognizer(weights_path=parseq_weights)
+        except Exception as e:
+            log(f"⚠️ [JNR] PARSeq unavailable ({e}); falling back to ResNet backend")
+            jnr_service = None
+    if jnr_service is None:
         jnr_service = JNRService(weights_path=jnr_weights)
 
 
