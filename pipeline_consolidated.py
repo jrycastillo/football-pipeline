@@ -1764,9 +1764,15 @@ if __name__ == "__main__":
     parser.add_argument("--max_frames", type=int, help="Limit number of frames to process")
     parser.add_argument("--locking_mode", type=int, choices=[1, 2, 3], default=2, help="Locking mode: 1=Instant, 2=Consecutive High Conf, 3=Bayesian Dirichlet")
     parser.add_argument("--jnr_stride", type=int, default=30, help="Stride for JNR (frames)")
-    parser.add_argument("--jnr_backend", type=str, default="resnet", choices=["resnet", "parseq"],
-                        help="JNR backend: resnet (old) or parseq (new v5 model)")
-    parser.add_argument("--jnr_parseq_weights", type=str, default="models/parseq_local_v5.pt",
+    # PARSeq is the default JNR backend. It reads digits (scene-text model)
+    # rather than classifying jersey appearance like the old ResNet, which
+    # scored 2.1% end-to-end on real match crops vs PARSeq v6's ~46% held-out
+    # (and drove the false/magnet-number problem). Pass --jnr_backend resnet
+    # to restore the old behavior. parseq_local_v6 is the honest generalizer
+    # (did not train on the HB/Babak eval footage).
+    parser.add_argument("--jnr_backend", type=str, default="parseq", choices=["resnet", "parseq"],
+                        help="JNR backend: parseq (default, digit reader) or resnet (legacy)")
+    parser.add_argument("--jnr_parseq_weights", type=str, default="models/parseq_local_v6.pt",
                         help="Path to PARSeq weights when --jnr_backend=parseq")
     parser.add_argument("--vid_stride", type=int, default=1, help="Video frame stride (skip frames). Default=1 (process all). 2=half speed/2x faster.")
     parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend (Legacy Arg)") 
