@@ -11,6 +11,15 @@ measured (detection, jersey reading, stats, consistency, throughput). I did
 NOT have access to his repo commits, database, or written documentation, so
 those are marked "not verified" rather than pass/fail.
 
+**CORRECTION (2026-07-07, after reviewing the annotated videos):** an earlier
+version of this report said his pipeline produces "0 players / empty report on
+our footage." That was an over-generalization from the Babak clip and the
+stalled 5-min HB run. Reviewing the videos shows his detection is
+FOOTAGE-DEPENDENT: on the sharp HD Hamburg clip it works well (players boxed,
+teams A/B, GK/referee classes, some jersey numbers, radar; report identifies
+9 players with numbers+teams). On the lower-quality Babak clip it fails
+entirely (zero detection boxes). The rows below are corrected accordingly.
+
 Legend: ✅ met · ⚠️ partial · ❌ not met (measured) · ❓ not verified
 
 ---
@@ -20,16 +29,19 @@ Legend: ✅ met · ⚠️ partial · ❌ not met (measured) · ❓ not verified
 | # | Requirement | Status | Evidence |
 |---|---|---|---|
 | 1 | Accept webm/mp4/avi/URL inputs | ⚠️ | Accepts mp4/URL (his `/upload-url` + downloader). Opened our 1080p mp4 fine. webm/avi not tested. |
-| 2.1 | Detect Players, Referees, Pitch, Goals, Ball | ❌ | On our broadcast footage his detector found ~1–7 player crops over 5–14 min (his own log: target 250). Effectively no player/ball detection. Pitch keypoints (v3) work. |
-| 2.2 | Classify players into teams by jersey color | ❌ | v3 team classifier could not fit — his log: *"collected 1 player crops … Teams will be 'Unknown'."* No team assignment produced. |
-| 2.3 | Model detects jersey NUMBER | ❌ | 0 jersey numbers identified on our footage (no player crops to read). |
-| **2.4** | **≥70% jersey detection accuracy** | ❌ | **Measured 0% on our footage.** This is the hard gate for the whole project. |
-| 2.5 | Consistent/better across different full-match sources | ❌ | Fails the core generalization test: works on his own close-up sample, produces empty reports on our broadcast footage, and cannot finish a full match (killed at 54–85%). |
-| 2.6 | Stage 1 satisfied FIRST before Stage 2 | ❌ | Stage 1 not met on our footage, so the gate to Stage 2 is not cleared. |
+| 2.1 | Detect Players, Referees, Pitch, Goals, Ball | ⚠️ | Footage-dependent. Sharp HD (Hamburg): detects players, referee, GK well + pitch keypoints. Lower-quality (Babak): zero detections. Ball detection weak/absent on both. |
+| 2.2 | Classify players into teams by jersey color | ⚠️ | Works on the HD clip (TeamA/TeamB assigned in video + report). Fails on the Babak clip (no detections to classify). |
+| 2.3 | Model detects jersey NUMBER | ⚠️ | Reads SOME numbers on the HD clip (visible in video + 9 numbered players in report). None on the Babak clip. |
+| **2.4** | **≥70% jersey detection accuracy** | ❓ | **NOT measured.** He reads some numbers on HD footage but the clip that finished was only 60s (9 players) — too short to score against a roster, and longer runs stall before completing. Accuracy at scale is untested because the pipeline can't finish a full match. |
+| 2.5 | Consistent/better across different full-match sources | ❌ | Fails: strong on the HD clip, zero on the Babak clip — the opposite of consistent across sources. And no source produces a COMPLETE full-match result (all long runs stalled). |
+| 2.6 | Stage 1 satisfied FIRST before Stage 2 | ⚠️/❌ | Stage 1 works on select footage but not consistently, and never over a full match — so not demonstrably satisfied as the gate the contract requires. |
 
-**Root cause (measured, not opinion):** his detector `best.pt` was trained on
-close-up single-player phone footage; it does not generalize to wide-angle
-broadcast/match video. Every downstream stage depends on it.
+**Corrected root cause:** two separate issues. (1) The detector degrades on
+lower-quality/more-distant footage (fine on HD, fails on the Babak clip) —
+a training-domain gap. (2) Regardless of footage, per-frame cost grows until
+the pipeline stalls, so it cannot process a full match (48 min for 60s; 5-
+and 14-min runs stalled). The runtime issue is the harder blocker: even where
+detection works, no usable full-match result is produced.
 
 ## Stage 2 (stats)
 
@@ -55,10 +67,14 @@ broadcast/match video. Every downstream stage depends on it.
 
 ## Bottom line
 
-**The gating requirement — Stage 1, ≥70% jersey detection accuracy (2.4),
-consistent across full-match sources (2.5), satisfied before Stage 2 (2.6) —
-is not met on the footage we tested (measured 0%).** Because Stage 1 gates
-everything, Stage 2's ≥80% stat accuracy (3.4) cannot be demonstrated either.
+**Stage 1 partially works but is not demonstrably met as the contract defines
+it.** His detector, team classifier, and jersey OCR function on sharp HD
+footage (Hamburg) but fail on lower-quality footage (Babak) — so §2.5
+(consistent across different full-match sources) fails. The ≥70% jersey bar
+(§2.4) is untested at scale, because the only run that finished was 60s (9
+players); every longer run stalled before completing. Since no complete
+full-match result exists, Stage 2's ≥80% accuracy (§3.4) also can't be
+demonstrated.
 
 **Important fairness caveats before any payment decision:**
 1. We tested his archive builds on OUR footage. If his GCP milestone was
