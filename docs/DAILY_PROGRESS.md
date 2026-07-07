@@ -107,11 +107,23 @@ are in the dev repo (`football.git`, branch `production-v1.0`).
   difficulty.
 - **Made PARSeq v6 the config default** (`5010728`). `--jnr_backend resnet`
   restores the old model; v8 available for match-specialized use.
-- **In progress**: Babak-clip validation with v6 (fully held out — no PARSeq
-  version trained on it) vs the 5/12 ResNet baseline.
-- Implication: this likely lifts every downstream identity metric and makes the
+- **Babak-clip validation** (fully held out — no PARSeq version trained on this
+  footage; and it's the worst-case blurred-bib clip):
+
+  | metric | ResNet (old) | PARSeq v6 |
+  |---|---|---|
+  | matched team+number | 5 | **9** |
+  | unique roster numbers found | 5/12 | **12/12 (all)** |
+  | false numbers | 10 | 4 |
+
+  Identity-dependent stats also improved (interceptions 56%→106%, fouls
+  0%→50%) because correct numbers give correct team assignment.
+- **Next weak point surfaced**: the 3 remaining Babak errors are cross-team
+  (right number, wrong team color) — a team-CLUSTERING issue, not JNR. That's
+  now the highest-value identity target after this.
+- Implication: this lifts every downstream identity metric and makes the
   fragment-merge rework easier (cleaner reads → less denoising). Highest-value
-  change of the week; jumps ahead of the merge prototype in priority.
+  change of the week.
 
 ---
 
