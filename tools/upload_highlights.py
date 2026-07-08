@@ -101,6 +101,75 @@ def upload_one(session, endpoint, api_key, clip_path, fields, retries=1):
     return False, "unreachable"
 
 
+def upload_run(run_dir, user_id, api_key, endpoint=DEFAULT_ENDPOINT,
+               matches_video_id=None, analysis_id=None, types=None,
+               max_conf=None, min_conf=None, limit=None, dry_run=False):
+    """Upload a finished run's clips. Callable from the pipeline
+    (--upload_highlights) or the CLI below. Returns (ok_count, total_selected);
+    never raises — a failed batch is reported in uploads_manifest.json."""
+    class _Args:
+        pass
+    args = _Args()
+    args.user_id = user_id
+    args.matches_video_id = matches_video_id
+    args.analysis_id = analysis_id
+    args.types = types
+    args.max_conf = max_conf
+    args.min_conf = min_conf
+    args.limit = limit
+
+    manifest_path = os.path.join(run_dir, "clips_manifest.json")
+    if not os.path.exists(manifest_path):
+        print(f"[Upload] No clips_manifest.json in {run_dir} — nothing to upload")
+        return 0, 0
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    entries = select_entries(manifest, args)
+    print(f"[Upload] {len(entries)}/{len(manifest)} clips selected from {manifest_path}")
+
+    session = None
+    if not dry_run:
+        import requests
+        session = requests.Session()
+
+    results = []
+    ok_count = 0
+    for entry in entries:
+        clip_rel = entry.get("clip")
+        clip_path = os.path.join(run_dir, clip_rel) if clip_rel else None
+        fields = build_fields(entry, args)
+        record = {"clip": clip_rel, "fields": fields}
+        if not clip_path or not os.path.exists(clip_path):
+            record["status"] = "missing_file"
+            print(f"  MISSING {clip_rel}")
+        elif dry_run:
+            record["status"] = "dry_run"
+            print(f"  DRY {clip_rel} -> {fields}")
+        else:
+            try:
+                ok, data = upload_one(session, endpoint, api_key, clip_path, fields)
+            except Exception as e:
+                ok, data = False, f"{type(e).__name__}: {e}"
+            if ok:
+                ok_count += 1
+                record["status"] = "uploaded"
+                record["remote"] = {k: data.get(k) for k in
+                                    ("id", "file_key", "file_url", "created_at")}
+                print(f"  OK  {clip_rel} -> id={data.get('id')}")
+            else:
+                record["status"] = "failed"
+                record["error"] = str(data)
+                print(f"  FAIL {clip_rel}: {data}")
+        results.append(record)
+
+    out_path = os.path.join(run_dir, "uploads_manifest.json")
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"[Upload] {ok_count}/{len(entries)} uploaded; record -> {out_path}")
+    return ok_count, len(entries)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Upload a run's event clips to the highlights API")
     parser.add_argument("--run_dir", required=True, help="Run output dir containing clips_manifest.json + clips/")
@@ -123,53 +192,12 @@ def main():
         print("No API key: pass --api_key or set SBG_HIGHLIGHTS_API_KEY", file=sys.stderr)
         sys.exit(2)
 
-    manifest_path = os.path.join(args.run_dir, "clips_manifest.json")
-    if not os.path.exists(manifest_path):
-        print(f"No clips_manifest.json in {args.run_dir}", file=sys.stderr)
-        sys.exit(2)
-    with open(manifest_path) as f:
-        manifest = json.load(f)
-
-    entries = select_entries(manifest, args)
-    print(f"[Upload] {len(entries)}/{len(manifest)} clips selected from {manifest_path}")
-
-    results = []
-    ok_count = 0
-    session = None
-    if not args.dry_run:
-        import requests
-        session = requests.Session()
-
-    for entry in entries:
-        clip_rel = entry.get("clip")
-        clip_path = os.path.join(args.run_dir, clip_rel) if clip_rel else None
-        fields = build_fields(entry, args)
-        record = {"clip": clip_rel, "fields": fields}
-        if not clip_path or not os.path.exists(clip_path):
-            record["status"] = "missing_file"
-            print(f"  MISSING {clip_rel}")
-        elif args.dry_run:
-            record["status"] = "dry_run"
-            print(f"  DRY {clip_rel} -> {fields}")
-        else:
-            ok, data = upload_one(session, args.endpoint, api_key, clip_path, fields)
-            if ok:
-                ok_count += 1
-                record["status"] = "uploaded"
-                record["remote"] = {k: data.get(k) for k in
-                                    ("id", "file_key", "file_url", "created_at")}
-                print(f"  OK  {clip_rel} -> id={data.get('id')}")
-            else:
-                record["status"] = "failed"
-                record["error"] = str(data)
-                print(f"  FAIL {clip_rel}: {data}")
-        results.append(record)
-
-    out_path = os.path.join(args.run_dir, "uploads_manifest.json")
-    with open(out_path, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"[Upload] {ok_count}/{len(entries)} uploaded; record -> {out_path}")
-    sys.exit(0 if (args.dry_run or ok_count == len(entries)) else 1)
+    ok_count, total = upload_run(
+        args.run_dir, args.user_id, api_key, endpoint=args.endpoint,
+        matches_video_id=args.matches_video_id, analysis_id=args.analysis_id,
+        types=args.types, max_conf=args.max_conf, min_conf=args.min_conf,
+        limit=args.limit, dry_run=args.dry_run)
+    sys.exit(0 if (args.dry_run or ok_count == total) else 1)
 
 
 if __name__ == "__main__":

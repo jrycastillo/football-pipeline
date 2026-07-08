@@ -1801,6 +1801,16 @@ if __name__ == "__main__":
                         help="Write fragments_dump.json: per-track ReID embedding, jersey-read "
                              "evidence, team color and temporal extent — the input for offline "
                              "identity-merge prototyping (fragment reconciliation rework).")
+    parser.add_argument('--upload_highlights', action="store_true",
+                        help="After clipping, upload the clips to the ScoutBridge highlights "
+                             "endpoint (needs --upload_user_id and SBG_HIGHLIGHTS_API_KEY in "
+                             "the environment). Only meaningful together with --clip_events.")
+    parser.add_argument('--upload_user_id', type=str, default=None,
+                        help="App user id the match belongs to (required for uploads).")
+    parser.add_argument('--upload_matches_video_id', type=str, default=None)
+    parser.add_argument('--upload_analysis_id', type=str, default=None)
+    parser.add_argument('--upload_max_conf', type=float, default=None,
+                        help="Only upload clips at or below this confidence (admin-queue mode).")
     args = parser.parse_args()
 
     # Handle legacy argument mapping
@@ -2581,6 +2591,27 @@ if __name__ == "__main__":
                                         pad_s=args.clip_pad_s, event_types=clip_types)
             log(f"Event clipping: {len(clip_manifest)} clip(s) → {output_dir}/clips "
                 f"(types: {', '.join(clip_types)})")
+
+            # Optional: push the clips straight to the highlights endpoint so
+            # they land in the admin verification queue without a manual step.
+            if args.upload_highlights and clip_manifest:
+                upload_key = os.environ.get("SBG_HIGHLIGHTS_API_KEY")
+                if not args.upload_user_id:
+                    log("⚠️ [Upload] --upload_highlights needs --upload_user_id; skipping")
+                elif not upload_key:
+                    log("⚠️ [Upload] SBG_HIGHLIGHTS_API_KEY not set; skipping upload")
+                else:
+                    try:
+                        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+                        from upload_highlights import upload_run
+                        ok, total = upload_run(
+                            output_dir, args.upload_user_id, upload_key,
+                            matches_video_id=args.upload_matches_video_id,
+                            analysis_id=args.upload_analysis_id,
+                            max_conf=args.upload_max_conf)
+                        log(f"Highlights upload: {ok}/{total} clip(s) uploaded")
+                    except Exception as e:
+                        log(f"Highlights upload failed (non-fatal): {e}")
         except Exception as e:
             log(f"Event clipping failed (non-fatal): {e}")
     
