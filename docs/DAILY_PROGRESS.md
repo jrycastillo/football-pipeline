@@ -125,6 +125,21 @@ are in the dev repo (`football.git`, branch `production-v1.0`).
   fragment-merge rework easier (cleaner reads → less denoising). Highest-value
   change of the week.
 
+## 2026-07-08 — Nabeel evaluation delivered to Babak
+
+- Compliance check against the signed requirements finalized (corrected
+  version: detection is footage-dependent, not uniformly empty; the hard
+  blocker is the full-match runtime stall). `reports/2026-07-07/…compliance.md`.
+- Detailed feedback package for Babak written (`reports/2026-07-08/
+  nabeel_feedback_for_babak.md`): what works, the blockers, clause-by-clause
+  scorecard, GCP3 recommendation (docs request first, then live Stage 1 demo
+  on footage we provide), plus a forwardable engineer-to-engineer appendix
+  for Nabeel.
+- Ronan sent his condensed version to Babak (runtime blocker + requirements
+  assessment). Held in reserve for follow-ups: the footage-dependence
+  evidence behind the §2.5 verdict, the two recommended asks, and the
+  forwardable Nabeel message.
+
 ---
 
 ### Open items carried forward
