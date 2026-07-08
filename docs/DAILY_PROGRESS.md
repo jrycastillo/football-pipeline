@@ -139,6 +139,15 @@ are in the dev repo (`football.git`, branch `production-v1.0`).
   assessment). Held in reserve for follow-ups: the footage-dependence
   evidence behind the §2.5 verdict, the two recommended asks, and the
   forwardable Nabeel message.
+- **Jhan's highlights endpoint: LIVE integration confirmed.** Full batch of 7
+  showcase clips uploaded to staging — correct metadata (event type,
+  confidence as percent, timestamp, jersey number), stored on DigitalOcean,
+  ids + signed file_urls returned and recorded in uploads_manifest.json.
+- **Auto-upload wired into the pipeline** (`9388c33`): --upload_highlights
+  (+ user/match/analysis ids, --upload_max_conf for admin-queue-only) pushes
+  a run's clips straight to the verification queue; non-fatal on failure.
+- Clean repo updated with the PARSeq default, fallback, and auto-upload
+  (3 commits staged on main; push pending Ronan's token).
 
 ---
 
