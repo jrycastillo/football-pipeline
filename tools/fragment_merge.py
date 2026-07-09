@@ -32,16 +32,24 @@ def _norm(v):
     return v / n if n > 0 else None
 
 
-def load_fragments(path):
+def load_fragments(path, min_frames=8):
+    """Load fragments. Prefilter tiny/unidentifiable fragments (< min_frames AND
+    no jersey reads): they can't be identified or reliably merged, and the O(n^2)
+    merge doesn't scale to the raw fragment count on heavily-fragmented clips
+    (e.g. 1326 on the Babak training clip vs 289 on HB)."""
     frag = json.load(open(path))
     tracks = {}
+    skipped = 0
     for tid, v in frag.items():
+        reads = {int(k): c for k, c in (v.get("raw_reads") or {}).items()}
+        if v.get("frames", 0) < min_frames and not reads:
+            skipped += 1
+            continue
         snaps = [_norm(g[1]) for g in (v.get("embedding_gallery") or [])]
         snaps = [s for s in snaps if s is not None]
         if not snaps and v.get("embedding"):
             e = _norm(v["embedding"])
             snaps = [e] if e is not None else []
-        reads = {int(k): c for k, c in (v.get("raw_reads") or {}).items()}
         strong = {n for n, c in reads.items() if c >= STRONG_READS}
         tracks[tid] = {
             "iv": (v["first_frame"], v["last_frame"]),
@@ -51,6 +59,9 @@ def load_fragments(path):
             "gal": snaps,
             "impure": len(strong) > 1,
         }
+    if skipped:
+        print(f"[prefilter] dropped {skipped} tiny fragments (< {min_frames} frames, no reads) "
+              f"-> {len(tracks)} kept")
     return tracks
 
 
@@ -167,6 +178,8 @@ def main():
     ap.add_argument("--roster", required=True, help="roster JSON (teams + colors)")
     ap.add_argument("--split", action="store_true", help="run split_fragments first")
     ap.add_argument("--threshold", type=float, default=0.75)
+    ap.add_argument("--min_frames", type=int, default=8,
+                    help="drop fragments shorter than this that also have no reads")
     args = ap.parse_args()
 
     sys.path.insert(0, ".")
@@ -179,12 +192,14 @@ def main():
     if args.split:
         from tools.split_fragments import split_fragments
         raw = json.load(open(path))
-        split = split_fragments(raw)
+        split, summary = split_fragments(raw)   # returns (fragments, summary)
         path = args.input.replace(".json", "_split.json")
         json.dump(split, open(path, "w"))
-        print(f"[split] {len(raw)} -> {len(split)} fragments -> {path}")
+        print(f"[split] {len(raw)} -> {len(split)} fragments "
+              f"(split {summary.get('actually_split', 0)}, left impure "
+              f"{summary.get('left_impure', 0)}) -> {path}")
 
-    tracks = load_fragments(path)
+    tracks = load_fragments(path, min_frames=args.min_frames)
     real_teams = set(roster.canonical_team_colors().values())
     impure = sum(1 for t in tracks.values() if t["impure"])
     print(f"fragments: {len(tracks)} ({impure} impure) | real teams: {real_teams}")
