@@ -207,6 +207,7 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label):
     if not frame_boxes or player_id is None:
         return None
     keys = sorted(frame_boxes.keys())
+    drew = {"any": False}
 
     def _nearest_box(src_idx):
         # nearest sampled source frame within one stride
@@ -230,7 +231,9 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 215, 255), 3)
         cv2.putText(frame, label, (x1, max(0, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2, cv2.LINE_AA)
+        drew["any"] = True
 
+    hook.drew = drew  # inspect after writing to tally clips that got a box
     return hook
 
 
@@ -281,10 +284,27 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     if selected:
         selected_codec, ffmpeg_path = _select_codec(codec)
 
+    # Guard against the silent-no-box failure: frame_boxes is keyed by the box
+    # "id", which is only the jersey number AFTER the pipeline's Option A remap
+    # rewrites all_frames in place. If frame_boxes is supplied but no event
+    # player matches any box id, boxes would render on zero clips — warn loudly
+    # instead (usually means all_frames still holds raw ByteTrack track IDs).
+    if frame_boxes:
+        _box_ids = set()
+        for _b in frame_boxes.values():
+            _box_ids.update(_b.keys())
+        _event_players = {_event_player(ev) for ev in selected}
+        _event_players.discard(None)
+        if _event_players and not (_event_players & _box_ids):
+            print("[Clipper] WARNING: frame_boxes supplied but no event player "
+                  "matches any box id — highlight boxes will NOT render. Are "
+                  "all_frames box IDs still raw track IDs (Option A remap not applied)?")
+
     clips_dir = os.path.join(output_dir, "clips")
     os.makedirs(clips_dir, exist_ok=True)
 
     manifest = []
+    clips_with_box = 0
     for idx, ev in enumerate(selected):
         src_frame = (int(ev.get("frame", 0)) + 1) * max(1, vid_stride)
         start = max(0, src_frame - pad_frames)
@@ -312,6 +332,10 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             _remove_file_quiet(clip_path)
             continue
 
+        boxed = bool(draw_hook is not None and getattr(draw_hook, "drew", {}).get("any"))
+        if boxed:
+            clips_with_box += 1
+
         manifest.append({
             "clip": os.path.join("clips", name),
             "type": ev["type"],
@@ -327,6 +351,7 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             "time_s": round(src_frame / fps, 2),
             "clip_start_s": round(start / fps, 2),
             "clip_end_s": round(end / fps, 2),
+            "player_boxed": boxed,
         })
 
     cap.release()
@@ -334,7 +359,9 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     manifest_path = os.path.join(output_dir, "clips_manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"[Clipper] Wrote {len(manifest)} clip(s) to {clips_dir} + clips_manifest.json")
+    box_note = f", {clips_with_box} with player box" if frame_boxes else ""
+    print(f"[Clipper] Wrote {len(manifest)} clip(s){box_note} to {clips_dir} "
+          "+ clips_manifest.json")
     return manifest
 
 
