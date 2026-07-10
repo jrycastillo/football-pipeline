@@ -2584,11 +2584,14 @@ if __name__ == "__main__":
     # clipping failure must never lose a finished analysis.
     if args.clip_events:
         try:
-            from stats.event_clipper import clip_events
+            from stats.event_clipper import clip_events, _build_frame_boxes
             clip_types = tuple(t.strip() for t in args.clip_events.split(",") if t.strip())
+            # Per-frame boxes so each clip highlights the event player.
+            frame_boxes = _build_frame_boxes(all_frames, max(1, args.vid_stride))
             clip_manifest = clip_events(video_path, raw_tracks, output_dir,
                                         vid_stride=max(1, args.vid_stride),
-                                        pad_s=args.clip_pad_s, event_types=clip_types)
+                                        pad_s=args.clip_pad_s, event_types=clip_types,
+                                        frame_boxes=frame_boxes)
             log(f"Event clipping: {len(clip_manifest)} clip(s) → {output_dir}/clips "
                 f"(types: {', '.join(clip_types)})")
 

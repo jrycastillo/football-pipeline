@@ -100,7 +100,8 @@ def _remove_file_quiet(path):
         pass
 
 
-def _write_clip_ffmpeg(cap, clip_path, start, end, fps, width, height, ffmpeg_path):
+def _write_clip_ffmpeg(cap, clip_path, start, end, fps, width, height, ffmpeg_path,
+                       draw_hook=None):
     import subprocess
 
     cmd = _build_ffmpeg_command(ffmpeg_path, clip_path, fps, width, height)
@@ -112,10 +113,12 @@ def _write_clip_ffmpeg(cap, clip_path, start, end, fps, width, height, ffmpeg_pa
     )
     written = 0
     try:
-        for _ in range(start, end + 1):
+        for off in range(end - start + 1):
             ok, frame = cap.read()
             if not ok:
                 break
+            if draw_hook is not None:
+                draw_hook(frame, start + off)
             proc.stdin.write(frame.tobytes())
             written += 1
         proc.stdin.close()
@@ -142,14 +145,16 @@ def _write_clip_ffmpeg(cap, clip_path, start, end, fps, width, height, ffmpeg_pa
     return written
 
 
-def _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height):
+def _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height, draw_hook=None):
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(clip_path, fourcc, fps, (width, height))
     written = 0
-    for _ in range(start, end + 1):
+    for off in range(end - start + 1):
         ok, frame = cap.read()
         if not ok:
             break
+        if draw_hook is not None:
+            draw_hook(frame, start + off)
         writer.write(frame)
         written += 1
     writer.release()
@@ -157,12 +162,12 @@ def _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height):
 
 
 def _write_clip(cv2, cap, clip_path, start, end, fps, width, height,
-                selected_codec, ffmpeg_path):
+                selected_codec, ffmpeg_path, draw_hook=None):
     if selected_codec == "h264" and ffmpeg_path:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
         try:
             written = _write_clip_ffmpeg(
-                cap, clip_path, start, end, fps, width, height, ffmpeg_path)
+                cap, clip_path, start, end, fps, width, height, ffmpeg_path, draw_hook)
             if written > 0:
                 return written, "h264"
             print(f"[Clipper] ffmpeg wrote no frames for {os.path.basename(clip_path)}; "
@@ -173,13 +178,65 @@ def _write_clip(cv2, cap, clip_path, start, end, fps, width, height,
         _remove_file_quiet(clip_path)
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-    written = _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height)
+    written = _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height, draw_hook)
     return written, "mp4v"
+
+
+def _build_frame_boxes(all_frames, vid_stride):
+    """Map source-frame index -> {player_id: (x1,y1,x2,y2)} from the pipeline's
+    per-frame box data. all_frames is indexed by processed frame; the source
+    frame is (index+1)*vid_stride (see module docstring)."""
+    fb = {}
+    for idx, f in enumerate(all_frames or []):
+        src = (idx + 1) * max(1, vid_stride)
+        boxes = {}
+        for b in f.get("boxes", []):
+            pid = b.get("id")
+            xy = b.get("xyxy")
+            if pid is not None and xy:
+                boxes[pid] = tuple(int(v) for v in xy)
+        if boxes:
+            fb[src] = boxes
+    return fb
+
+
+def _make_draw_hook(cv2, frame_boxes, player_id, stride, label):
+    """Return a draw_hook(frame, src_idx) that boxes the event player. Uses the
+    nearest processed frame's box for the player (frames between strides reuse
+    the closest sampled box)."""
+    if not frame_boxes or player_id is None:
+        return None
+    keys = sorted(frame_boxes.keys())
+
+    def _nearest_box(src_idx):
+        # nearest sampled source frame within one stride
+        best, bestd = None, stride + 1
+        lo = src_idx - stride
+        for k in keys:
+            if k < lo:
+                continue
+            if k > src_idx + stride:
+                break
+            d = abs(k - src_idx)
+            if d < bestd and player_id in frame_boxes[k]:
+                best, bestd = frame_boxes[k][player_id], d
+        return best
+
+    def hook(frame, src_idx):
+        box = _nearest_box(src_idx)
+        if not box:
+            return
+        x1, y1, x2, y2 = box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 215, 255), 3)
+        cv2.putText(frame, label, (x1, max(0, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2, cv2.LINE_AA)
+
+    return hook
 
 
 def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
                 event_types=DEFAULT_CLIP_TYPES, min_conf=None, max_conf=None,
-                max_clips=200, codec="h264"):
+                max_clips=200, codec="h264", frame_boxes=None):
     """Write pad_s-padded clips for selected events + clips_manifest.json.
 
     events: the pipeline event list (raw_tracks.json content).
@@ -241,9 +298,15 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
         name = f"{idx:03d}_{ev['type']}_p{player}_f{src_frame}.mp4"
         clip_path = os.path.join(clips_dir, name)
 
+        # Highlight the event player with a bounding box (keeps the full-frame
+        # context so the admin can verify the play, not just the player).
+        draw_hook = _make_draw_hook(
+            cv2, frame_boxes, player, max(1, vid_stride),
+            label=f"#{player} {ev['type']}")
+
         written, actual_codec = _write_clip(
             cv2, cap, clip_path, start, end, fps, width, height,
-            selected_codec, ffmpeg_path)
+            selected_codec, ffmpeg_path, draw_hook)
 
         if written == 0:
             _remove_file_quiet(clip_path)
