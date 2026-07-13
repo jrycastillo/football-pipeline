@@ -594,7 +594,7 @@ def is_video_processed(matches_video_id, source_url):
 def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None,
                  locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", make_video=False,
                  task_id=0, roster_file=None, clip_events=None, clip_pad_s=3.0,
-                 write_db=False, db_dry_run=False, analysis_id=None):
+                 write_db=False, db_dry_run=False, analysis_id=None, pitch_homography=False):
     """
     Unified metadata-aware pipeline wrapper.
     Delegates to pipeline_consolidated.py and handles DB updates.
@@ -665,7 +665,11 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             cmd.extend(["--roster_file", roster_file])
         if clip_events:
             cmd.extend(["--clip_events", clip_events, "--clip_pad_s", str(clip_pad_s)])
-            
+        # Nabeel v3 pitch-keypoint homography (opt-in; default off until the
+        # keypoint model is retrained on our footage — see docs/PITCH_HOMOGRAPHY.md).
+        if pitch_homography:
+            cmd.append("--pitch_homography")
+
         print(f"[pipeline] Executing Core: {' '.join(cmd)}")
         # Increased timeout to 24 hours for H100 full matches
         result = subprocess.run(cmd, env=os.environ, timeout=86400)
@@ -776,7 +780,8 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
                          locking_mode=2, jnr_stride=None, vid_stride=None,
                          tracking_mode="bytetrack", make_video=False,
                          roster_file=None, clip_events=None, clip_pad_s=3.0,
-                         write_db=False, db_dry_run=False, analysis_id=None):
+                         write_db=False, db_dry_run=False, analysis_id=None,
+                         pitch_homography=False):
     """
     Process a single video from SPACES using the unified run_pipeline wrapper.
     """
@@ -832,9 +837,10 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
         clip_pad_s=clip_pad_s,
         write_db=write_db,
         db_dry_run=db_dry_run,
-        analysis_id=analysis_id
+        analysis_id=analysis_id,
+        pitch_homography=pitch_homography
     )
-    
+
     if success:
         return {"status": "success", "video_id": video_id, "stats_path": os.path.join(out_dir, "player_stats.json")}
     else:
@@ -848,7 +854,7 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                        make_video=False, parallel_workers=1, max_frames=None,
                        video_ids_filter=None, roster_file=None, clip_events=None,
                        clip_pad_s=3.0, write_db=False, db_dry_run=False,
-                       analysis_id=None):
+                       analysis_id=None, pitch_homography=False):
     """
     Continuously poll for pending videos and process them.
     
@@ -927,7 +933,8 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                     clip_pad_s=clip_pad_s,
                     write_db=write_db,
                     db_dry_run=db_dry_run,
-                    analysis_id=analysis_id
+                    analysis_id=analysis_id,
+                    pitch_homography=pitch_homography
                 )
                 futures.append(future)
 
@@ -1000,6 +1007,9 @@ def main():
                         help="Comma-separated event types to clip; writes clips_manifest.json")
     parser.add_argument("--clip_pad_s", type=float, default=3.0,
                         help="Seconds of video kept on each side of a clipped event")
+    parser.add_argument("--pitch_homography", action="store_true",
+                        help="Enable Nabeel v3 pitch-keypoint homography (px->meters). "
+                             "Opt-in; default off until the keypoint model is retrained on our footage.")
     parser.add_argument("--analysis_id", type=str,
                         help="Stable idempotency key for normalized DB persistence")
     parser.add_argument("--write_db", action="store_true",
@@ -1095,7 +1105,8 @@ def main():
                 clip_pad_s=args.clip_pad_s,
                 write_db=args.write_db,
                 db_dry_run=args.db_dry_run,
-                analysis_id=args.analysis_id
+                analysis_id=args.analysis_id,
+                pitch_homography=args.pitch_homography
             )
             if success:
                 print(f"Finished successfully. Output in {out_dir}")
@@ -1130,7 +1141,8 @@ def main():
             clip_pad_s=args.clip_pad_s,
             write_db=args.write_db,
             db_dry_run=args.db_dry_run,
-            analysis_id=args.analysis_id
+            analysis_id=args.analysis_id,
+            pitch_homography=args.pitch_homography
         )
     else:
         # Show help if no mode specified
