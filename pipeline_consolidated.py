@@ -2559,6 +2559,13 @@ if __name__ == "__main__":
     # just exposes the confidence distribution per event type.
     conf_bands = {"high_0.75+": 0, "mid_0.50-0.75": 0, "low_<0.50": 0}
     events_by_type = {}
+    # Identity-credit gap instrumentation: events whose primary player never
+    # resolved to a jersey are detected but not credited in per-player stats
+    # (e.g. Babak GT clip: 127 counted passes -> 67 credited). Track it per
+    # run so the gap is visible, not inferred.
+    _jersey_ids = {int(k) for k in player_stats.keys() if str(k).isdigit()}
+    _events_with_player = 0
+    _events_unknown_identity = 0
     for ev in raw_tracks:
         if not isinstance(ev, dict):
             continue
@@ -2573,6 +2580,7 @@ if __name__ == "__main__":
         etype = ev.get("type", "unknown")
         bucket = events_by_type.setdefault(etype, {
             "count": 0,
+            "unknown_identity": 0,
             "_conf_sum": 0.0,
             "_conf_n": 0,
             "_id_conf_sum": 0.0,
@@ -2581,6 +2589,13 @@ if __name__ == "__main__":
             "_id_recv_n": 0,
         })
         bucket["count"] += 1
+        _pl = next((ev[k] for k in ("player", "from", "by") if ev.get(k) is not None), None)
+        if _pl is not None:
+            _events_with_player += 1
+            _known = (isinstance(_pl, int) or str(_pl).isdigit()) and int(_pl) in _jersey_ids
+            if not _known:
+                _events_unknown_identity += 1
+                bucket["unknown_identity"] += 1
         if c is not None:
             bucket["_conf_sum"] += c
             bucket["_conf_n"] += 1
@@ -2608,12 +2623,18 @@ if __name__ == "__main__":
         "unverified_events": sum(1 for ev in raw_tracks
                                  if isinstance(ev, dict) and ev.get("status") != "verified"),
         "confidence_bands": conf_bands,
+        "events_with_player": _events_with_player,
+        "events_unknown_identity": _events_unknown_identity,
         "by_event_type": events_by_type,
     }
     with open(os.path.join(output_dir, "verification_summary.json"), "w") as f:
         json.dump(verification_summary, f, indent=2)
     log(f"Saved {output_dir}/verification_summary.json "
         f"(events: {verification_summary['unverified_events']} unverified, bands: {conf_bands})")
+    if _events_with_player:
+        log(f"[IdentityCredit] {_events_unknown_identity}/{_events_with_player} events "
+            f"({100.0 * _events_unknown_identity / _events_with_player:.0f}%) have an "
+            f"unresolved player identity — detected but not credited in player stats")
 
     # Event clipping (verification workflow): extract short clips around the
     # requested event types so the admin can review them. Non-fatal — a
