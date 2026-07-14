@@ -1950,7 +1950,11 @@ if __name__ == "__main__":
     _device = get_device().type  # cuda > mps > cpu
     player_model = YOLO(CONFIG['env']['DET_WEIGHTS']).to(_device)
     ball_model = YOLO(CONFIG['env']['BALL_MODEL_PATH']).to(_device)
-    log(f"🚀 [Device] Models loaded on: {_device}")
+    # Effective ball inference settings — logged so an A/B can verify what
+    # actually ran (a silent default once masked an inert config change).
+    _ball_imgsz = CONFIG["heuristics"].get("BALL_IMG_SIZE", 832)
+    _ball_conf = CONFIG["heuristics"].get("BALL_CONF", 0.10)
+    log(f"🚀 [Device] Models loaded on: {_device} | ball imgsz={_ball_imgsz} conf={_ball_conf}")
     loader = ThreadedVideoReader(video_path)
     time.sleep(1.0)
     
@@ -2157,15 +2161,15 @@ if __name__ == "__main__":
                 player_res = MockResults(mock_boxes, f)
                     
                 # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
-                # WS1.1: the ball is a handful of pixels on wide-angle footage; the
+                # The ball is a handful of pixels on wide-angle footage; the
                 # inference previously ran at ultralytics defaults (imgsz 640,
-                # conf 0.25) while raw ball detection sat at 31% of frames.
-                # BALL_IMG_SIZE/BALL_CONF make the resolution and threshold
-                # explicit and tunable (config.yaml heuristics).
+                # conf 0.25) finding a ball on only ~4% of sampled frames.
+                # Measured sweep picked 832/0.10 (~10x the detection rate; 1280
+                # HURTS — the model is trained at 640 and large upscales break
+                # its scale prior). See config.yaml heuristics.
                 ball_res = ball_model.track(
                     f, persist=True, tracker="botsort.yaml", verbose=False,
-                    imgsz=CONFIG["heuristics"].get("BALL_IMG_SIZE", 1280),
-                    conf=CONFIG["heuristics"].get("BALL_CONF", 0.15),
+                    imgsz=_ball_imgsz, conf=_ball_conf,
                     device=get_device().type)[0]
                 
                 img = player_res.orig_img
@@ -2215,9 +2219,10 @@ if __name__ == "__main__":
                 if hasattr(ball_res, "boxes"):
                     for b in ball_res.boxes:
                         conf = float(b.conf[0].item())
-                        # FILTER: Low threshold to maximize ball detection (was 0.3, lowered to 0.15)
-                        # Ball model is dedicated so FPs are rare; more detections = better ownership tracking
-                        if conf < 0.15:
+                        # Acceptance gate aligned with the inference threshold
+                        # (was a hardcoded 0.15, which silently discarded any
+                        # detections a lower BALL_CONF was tuned to admit).
+                        if conf < _ball_conf:
                             continue
                         frame_data["boxes"].append({
                             "xyxy": b.xyxy[0].cpu().numpy().tolist(),

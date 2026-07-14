@@ -32,11 +32,16 @@ heuristics:
   DET_IMG_SIZE: 640         # 640x640 vs 832x832 = 40% fewer pixels, ~2x faster detection
   VID_STRIDE: 3             # Process every 3rd frame (3x speedup, ByteTrack interpolates)
 
-  # Ball detection - the ball is a few pixels on wide-angle footage; it needs
-  # higher inference resolution than the player model. Before these keys the
-  # ball ran at ultralytics defaults (640 / 0.25) with only 31% raw detections.
-  BALL_IMG_SIZE: 1280
-  BALL_CONF: 0.15
+  # Ball detection - measured sweep on the Babak GT clip (frames with a ball
+  # found, 90 sampled frames across 3 match windows):
+  #   640/0.25 (old default)  4/90        1280/0.15  ~wash (res hurts: model
+  #   640/0.15               13/90                    trained at 640; 1280
+  #   832/0.10               40/90  <- best            breaks its scale prior)
+  #   832/0.05               53/90 but 40% multi-ball frames (FP-heavy)
+  # 832 is a mild upscale the model tolerates; conf 0.10 needs the pipeline's
+  # acceptance gate aligned (it uses BALL_CONF too, not a hardcoded 0.15).
+  BALL_IMG_SIZE: 832
+  BALL_CONF: 0.10
 
   # JNR - Reduced frequency, ID locking prevents redundant calls anyway
   JNR_IMG_SIZE: 160         # Full resolution crops
