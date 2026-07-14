@@ -24,6 +24,14 @@ _ENABLE_ROSTER_RECONCILE = False
 # team-color compatibility, and boundary continuity (the fragment starts where
 # and when the jersey's track ended, or vice versa). Never invents a new
 # jersey; disable with RESIDUAL_STITCH=0.
+# Jersey temporal exclusivity: the identity-resolution paths (bindings,
+# registry, vote/raw-read recovery) can map many overlapping fragments to one
+# jersey, letting a "player" be several boxes at the same time. Measured on
+# the Babak GT clip: one jersey held 88% of ownership frames this way. The
+# exclusivity pass keeps, per jersey, the strongest non-overlapping fragment
+# set and demotes the rest to unresolved. JERSEY_EXCLUSIVITY=0 disables.
+_ENABLE_JERSEY_EXCLUSIVITY = os.environ.get("JERSEY_EXCLUSIVITY", "1") != "0"
+
 _ENABLE_RESIDUAL_STITCH = os.environ.get("RESIDUAL_STITCH", "1") != "0"
 # Tight windows: the first calibration run (gap 75 ≈ 9 s, radius up to ~570 px)
 # turned the two busiest identities into magnets — #6 absorbed 17 fragments and
@@ -62,14 +70,21 @@ class StatsEngine:
                     if tid not in track_to_jersey:
                         track_to_jersey[tid] = jersey_num
 
-        # Roster gate: when a roster is provided, never recover/mark a number
-        # that isn't on it (off-roster recovery is what let false numbers survive
-        # the noise filter via the vote-recovered exemption).
+        # Roster gate: when a roster is provided, never RECOVER a number that
+        # isn't on it. Recovery (vote/raw-read) is weak evidence — it is where
+        # false numbers (e.g. 9/15/18/20 on the Babak clip, roster max 17)
+        # enter and then survive the noise filter via the vote-recovered
+        # exemption. Locked bindings and the jersey registry are NOT gated:
+        # strong evidence may legitimately beat an incomplete roster. This is
+        # deliberately narrower than the shelved Layer-2 reconcile (which
+        # re-derived every identity and dropped real players).
         _roster = getattr(self, "_roster_prior", None)
+        _gate_rejects = []
         def _roster_ok(num):
-            if not _ENABLE_ROSTER_RECONCILE:
+            if _roster is None or _roster.is_valid_number(num):
                 return True
-            return _roster is None or _roster.is_valid_number(num)
+            _gate_rejects.append(num)
+            return False
 
         # Consistent-vote recovery: fragments that read the right number but
         # never locked due to the global-uniqueness constraint.
@@ -130,7 +145,80 @@ class StatsEngine:
                     id_manager.raw_read_recovered_jerseys.add(jnum)
                     print(f"[Phase 216++] Raw recovery: Jersey #{jnum} ({total_cnt} total raw reads)")
 
+        if _gate_rejects:
+            print(f"[RosterGate] Rejected {len(_gate_rejects)} off-roster recovery "
+                  f"candidates: {sorted(set(_gate_rejects))}")
         return track_to_jersey
+
+    def _enforce_jersey_exclusivity(self, all_frames, track_to_jersey, id_manager):
+        """Keep, per jersey, the strongest temporally NON-OVERLAPPING fragment
+        set; demote overlapping conflicts to unresolved.
+
+        Evidence order: locked/active binding > jersey registry > recovery
+        (vote/raw-read); within a tier, longer fragments win. Demoted
+        fragments become Unknown (their events are counted but not credited)
+        unless the residual stitch re-attaches them under its constraints.
+        Returns a new track_to_jersey map.
+        """
+        if not track_to_jersey:
+            return track_to_jersey
+
+        # Per-track extents (processed-frame indices).
+        extents = {}
+        for t, fr in enumerate(all_frames):
+            for b in fr.get("boxes", []):
+                tid = b.get("id")
+                if tid is None:
+                    continue
+                e = extents.get(tid)
+                if e is None:
+                    extents[tid] = [t, t, 1]
+                else:
+                    e[1] = t
+                    e[2] += 1
+
+        active = getattr(id_manager, "active_bindings", {}) or {}
+        registry_tracks = set()
+        for info in (getattr(id_manager, "jersey_registry", {}) or {}).values():
+            if isinstance(info, dict) and "track_id" in info:
+                registry_tracks.add(info["track_id"])
+
+        def _tier(tid):
+            if tid in active:
+                return 0
+            if tid in registry_tracks:
+                return 1
+            return 2  # vote / raw-read recovery
+
+        by_jersey = defaultdict(list)
+        for tid, jnum in track_to_jersey.items():
+            if tid in extents:
+                by_jersey[jnum].append(tid)
+            # tracks with no boxes in all_frames carry no events; keep mapping
+
+        kept_map = {tid: j for tid, j in track_to_jersey.items() if tid not in extents}
+        demoted = 0
+        for jnum, tids in by_jersey.items():
+            tids.sort(key=lambda t: (_tier(t), -extents[t][2]))
+            occupied = []  # list of (first, last)
+            for tid in tids:
+                f0, f1, _n = extents[tid]
+                overlap = any(min(f1, b) - max(f0, a) > _STITCH_OVERLAP_TOL
+                              for a, b in occupied)
+                if overlap:
+                    demoted += 1
+                    continue
+                occupied.append((f0, f1))
+                kept_map[tid] = jnum
+
+        if demoted:
+            kept_per_jersey = defaultdict(int)
+            for j in kept_map.values():
+                kept_per_jersey[j] += 1
+            print(f"[JerseyExclusivity] Demoted {demoted} temporally-overlapping "
+                  f"fragments to unresolved ({len(kept_map)} kept across "
+                  f"{len(kept_per_jersey)} jerseys)")
+        return kept_map
 
     def _residual_stitch(self, all_frames, track_to_jersey, id_manager):
         """WS2.2 — stitch unresolved fragments onto existing jerseys.
@@ -607,6 +695,17 @@ class StatsEngine:
             # box IDs were already rewritten to the false numbers.
             if _ENABLE_ROSTER_RECONCILE and getattr(self, "_roster_prior", None) is not None and _ttj:
                 _ttj = self._reconcile_roster(_ttj, id_manager, getattr(self, "team_map", None))
+            # Jersey exclusivity: a player cannot be two boxes at once, but the
+            # resolution paths above map many TEMPORALLY OVERLAPPING fragments
+            # to the same jersey — measured on the Babak GT clip, one jersey
+            # held 88% of all ownership frames because hundreds of concurrent
+            # fragments carried its number, so it was always "nearest the
+            # ball" somewhere. Keep the strongest non-overlapping fragment set
+            # per jersey; demote the rest to unresolved (miscredit is worse
+            # than no credit — the residual stitch below can legitimately
+            # re-attach demoted fragments where they actually continue).
+            if _ttj and _ENABLE_JERSEY_EXCLUSIVITY:
+                _ttj = self._enforce_jersey_exclusivity(all_frames, _ttj, id_manager)
             # WS2.2: stitch unresolved fragments onto existing jerseys so their
             # events are credited instead of dropped (identity-credit gap).
             if _ttj and _ENABLE_RESIDUAL_STITCH:
