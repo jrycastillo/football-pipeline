@@ -203,9 +203,25 @@ class StatsEngine:
             occupied = []  # list of (first, last)
             for tid in tids:
                 f0, f1, _n = extents[tid]
-                overlap = any(min(f1, b) - max(f0, a) > _STITCH_OVERLAP_TOL
-                              for a, b in occupied)
-                if overlap:
+                # Relative overlap: boundary double-boxing during occlusion is
+                # normal ByteTrack behavior — a long fragment must not be
+                # demoted for a few shared frames at its edge. Demote only
+                # when the overlap exceeds 25% of the shorter span (absolute
+                # floor keeps 1-2 frame jitter tolerated as before). The first
+                # calibration of this pass used absolute tol 2 and demoted
+                # 522/788 fragments, collapsing roster coverage 12/12 -> 8/12
+                # and leaving 62% of events uncredited.
+                span = max(1, f1 - f0 + 1)
+                conflict = False
+                for a, b in occupied:
+                    ov = min(f1, b) - max(f0, a) + 1
+                    if ov <= _STITCH_OVERLAP_TOL:
+                        continue
+                    shorter = min(span, b - a + 1)
+                    if ov > 0.25 * shorter:
+                        conflict = True
+                        break
+                if conflict:
                     demoted += 1
                     continue
                 occupied.append((f0, f1))
