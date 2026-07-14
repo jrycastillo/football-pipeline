@@ -2019,12 +2019,35 @@ if __name__ == "__main__":
     start_time = time.time()
     fatal_error = None  # set on unexpected mid-loop crash; checked after cleanup
 
+    # Stall watchdog: a run once froze at frame 6990 for 13 hours (GPU/reader
+    # deadlock) and was only caught by eye. If frame progress stops for
+    # STALL_ABORT_MIN the watchdog hard-exits(2) so the orchestrator marks the
+    # video failed and can reprocess it; a hung main thread cannot be relied on
+    # to raise, hence the daemon thread + os._exit.
+    STALL_ABORT_MIN = int(os.environ.get("STALL_ABORT_MIN", "15"))
+    _progress = {"n": 0, "t": time.time(), "done": False}
+
+    def _stall_watchdog():
+        while not _progress["done"]:
+            time.sleep(60)
+            if _progress["done"]:
+                return
+            _age = time.time() - _progress["t"]
+            if _age > STALL_ABORT_MIN * 60:
+                print(f"[Watchdog] FATAL: no frame progress for {_age / 60:.0f} min "
+                      f"(stuck after frame {_progress['n']}) — aborting run", flush=True)
+                os._exit(2)
+
+    threading.Thread(target=_stall_watchdog, daemon=True).start()
+
     try:
         while loader.more() and n < MAX_FRAMES:
             f = loader.read()
             if f is None: break
             n += 1
-            
+            _progress["n"] = n
+            _progress["t"] = time.time()
+
             # Step 5: Apply Resize if requested
             if args.resize_h and args.resize_h > 0:
                 f = cv2.resize(f, (target_width, target_height))
@@ -2438,6 +2461,7 @@ if __name__ == "__main__":
         except OSError:
             pass
     finally:
+        _progress["done"] = True  # disarm the stall watchdog (stats stage makes no frame progress)
         loader.stop()
         if writer:
             writer.release()
