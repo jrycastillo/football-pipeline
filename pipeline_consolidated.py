@@ -2017,7 +2017,8 @@ if __name__ == "__main__":
     
     n = 0
     start_time = time.time()
-    
+    fatal_error = None  # set on unexpected mid-loop crash; checked after cleanup
+
     try:
         while loader.more() and n < MAX_FRAMES:
             f = loader.read()
@@ -2413,7 +2414,20 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Pipeline interrupted by user.")
     except Exception as e:
+        # Do NOT continue to stats with partial data: a mid-run crash used to
+        # be swallowed here (no traceback), stats ran on whatever frames were
+        # processed, and the run was reported 'finished' with garbage numbers.
+        # Record the error, let the finally block save the debug dumps, then
+        # exit non-zero below so the orchestrator marks the video failed.
+        import traceback
+        fatal_error = e
         print(f"Pipeline error: {e}")
+        traceback.print_exc()
+        try:
+            with open(os.path.join(output_dir, "pipeline_error.txt"), "w") as _ef:
+                _ef.write(f"frame={n}\n{traceback.format_exc()}")
+        except OSError:
+            pass
     finally:
         loader.stop()
         if writer:
@@ -2467,6 +2481,19 @@ if __name__ == "__main__":
                 log(f"Fragment dump: {len(_frag)} tracks -> fragments_dump.json")
             except Exception as e:
                 log(f"Fragment dump failed (non-fatal): {e}")
+
+    # Fail fast before stats: a crashed or frameless run must never be
+    # reported 'finished' with empty/partial numbers (debug dumps above are
+    # already saved for diagnosis). Missing player_stats.json makes the
+    # orchestrator mark the video failed.
+    if fatal_error is not None:
+        log(f"FATAL: pipeline crashed at frame {n}: {fatal_error} — "
+            f"skipping stats, see pipeline_error.txt")
+        sys.exit(1)
+    if not all_frames:
+        log(f"FATAL: no frames decoded from {video_path} "
+            f"(corrupt/unreadable video?) — skipping stats")
+        sys.exit(1)
 
     # Phase v27.2: Bayesian Tracklet Consolidation
     # Perform this BEFORE stats and propagation

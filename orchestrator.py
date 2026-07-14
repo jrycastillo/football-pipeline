@@ -754,6 +754,10 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
         else:
             print(f"[pipeline] Missing player_stats.json in {output_dir}")
             health.record_video_failure(video_id, "Missing output file")
+            if not no_db:
+                # Without this the row stayed 'running' forever
+                upsert_status_row(video_id, user_id, spaces_url or video_path,
+                                  "failed", task_id, error="Missing player_stats.json")
             return False
 
     except Exception as e:
