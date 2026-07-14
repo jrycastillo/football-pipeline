@@ -793,9 +793,23 @@ class AdvancedEventDetector:
                                                     if GOAL_Y_MIN - 0.5 <= y_proj <= GOAL_Y_MAX + 0.5:
                                                         on_course += 1
                                             if on_course >= 2:
-                                                goal_confirmed = True
-                                                goal_method = 1
-                                                goal_on_course = on_course
+                                                # A scored ball LEAVES PLAY: require the ball to
+                                                # actually disappear after the on-course window,
+                                                # same physical test as Method 2. Without this,
+                                                # trajectory extrapolation confirmed "goals" on
+                                                # hard balls toward the goal that were then
+                                                # cleared and play continued (verified false
+                                                # positive at 4.1 min of the GT clip, where the
+                                                # ball stayed tracked in open play throughout).
+                                                _gone_start = i + on_course + 1
+                                                _gone_end = min(_gone_start + int(EFF_FPS * 1.5),
+                                                                len(ball_track))
+                                                _gone = sum(1 for k in range(_gone_start, _gone_end)
+                                                            if not ball_track[k])
+                                                if _gone >= int(EFF_FPS * 0.8):
+                                                    goal_confirmed = True
+                                                    goal_method = 1
+                                                    goal_on_course = on_course
 
                                     # Method 2: Ball enters goal zone (within 5m of goal line, Y on target)
                                     # and then disappears (no detection for 1+ second) — ball in net
