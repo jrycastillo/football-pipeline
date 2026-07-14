@@ -2134,7 +2134,16 @@ if __name__ == "__main__":
                 player_res = MockResults(mock_boxes, f)
                     
                 # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
-                ball_res = ball_model.track(f, persist=True, tracker="botsort.yaml", verbose=False, device=get_device().type)[0]
+                # WS1.1: the ball is a handful of pixels on wide-angle footage; the
+                # inference previously ran at ultralytics defaults (imgsz 640,
+                # conf 0.25) while raw ball detection sat at 31% of frames.
+                # BALL_IMG_SIZE/BALL_CONF make the resolution and threshold
+                # explicit and tunable (config.yaml heuristics).
+                ball_res = ball_model.track(
+                    f, persist=True, tracker="botsort.yaml", verbose=False,
+                    imgsz=CONFIG["heuristics"].get("BALL_IMG_SIZE", 1280),
+                    conf=CONFIG["heuristics"].get("BALL_CONF", 0.15),
+                    device=get_device().type)[0]
                 
                 img = player_res.orig_img
 

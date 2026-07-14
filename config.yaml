@@ -32,6 +32,12 @@ heuristics:
   DET_IMG_SIZE: 640         # 640x640 vs 832x832 = 40% fewer pixels, ~2x faster detection
   VID_STRIDE: 3             # Process every 3rd frame (3x speedup, ByteTrack interpolates)
 
+  # Ball detection - the ball is a few pixels on wide-angle footage; it needs
+  # higher inference resolution than the player model. Before these keys the
+  # ball ran at ultralytics defaults (640 / 0.25) with only 31% raw detections.
+  BALL_IMG_SIZE: 1280
+  BALL_CONF: 0.15
+
   # JNR - Reduced frequency, ID locking prevents redundant calls anyway
   JNR_IMG_SIZE: 160         # Full resolution crops
   JNR_STRIDE: 10            # Every 10th processed frame (locked players skip JNR already)
