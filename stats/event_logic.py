@@ -1,4 +1,5 @@
 import math
+import os
 import numpy as np
 import yaml
 from collections import defaultdict
@@ -1195,6 +1196,30 @@ class AdvancedEventDetector:
         # Verification workflow: every AI-detected event starts life
         # unverified. The admin review flow (external to this repo) flips
         # status to "verified" / "rejected" after a human watches the clip.
+        #
+        # Confidence-gated routing (WS3.1): once the product decides the
+        # threshold, set VERIFY_CONF_THRESHOLD (env, 0-1). Events at or above
+        # it are marked "auto_accepted" (shown directly); the rest become
+        # "needs_review" (admin queue). Unset (default) keeps every event
+        # "unverified" — the pre-decision behavior. Events with no confidence
+        # are never auto-accepted.
+        _verify_thr = os.environ.get("VERIFY_CONF_THRESHOLD")
+        if _verify_thr is not None:
+            try:
+                _thr = float(_verify_thr)
+                _auto = _review = 0
+                for e in events:
+                    c = e.get("confidence")
+                    if c is not None and c >= _thr:
+                        e["status"] = "auto_accepted"
+                        _auto += 1
+                    else:
+                        e["status"] = "needs_review"
+                        _review += 1
+                print(f"[Verify] Threshold {_thr}: {_auto} auto-accepted, "
+                      f"{_review} routed to admin review")
+            except ValueError:
+                print(f"[Verify] Ignoring invalid VERIFY_CONF_THRESHOLD={_verify_thr!r}")
         for e in events:
             e.setdefault("status", "unverified")
 
