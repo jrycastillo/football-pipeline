@@ -685,6 +685,20 @@ class StatsEngine:
             if balls and all(b.get("zoom") for b in balls):
                 zoom_ball_frames.add(t)
 
+        # Second, pristine ball track WITHOUT zoom recoveries, for high-speed
+        # event evidence (shots/goals/saves). Zoom re-acquisitions near the
+        # last position corrupt the tracker's path selection around goals
+        # (stale anchor wins over the real ball entering the net), which
+        # silenced a real goal even after the disappearance tests ignored
+        # zoom-only frames. Possession keeps the zoom-enhanced track — that
+        # is what the zoom is for.
+        event_tracker = BallTracker()
+        for t, f in enumerate(all_frames):
+            event_tracker.update(t, [b for b in f.get("boxes", [])
+                                     if not (b.get("cls") == 32 and b.get("zoom"))])
+        event_ball_track = event_tracker.interpolate(len(all_frames))
+        event_raw_frames = set(event_tracker.tracks.keys())
+
         balls_found = sum(1 for b in ball_track if b is not None)
         raw_count = len(raw_ball_frames)
         ball_pct = (balls_found / len(all_frames) * 100) if all_frames else 0
@@ -770,7 +784,9 @@ class StatsEngine:
         events, raw_stats = self.detector.analyze(ownership, player_tracks, ball_track,
                                                     team_map=team_map_ref,
                                                     raw_ball_frames=raw_ball_frames,
-                                                    zoom_ball_frames=zoom_ball_frames)
+                                                    zoom_ball_frames=zoom_ball_frames,
+                                                    event_ball_track=event_ball_track,
+                                                    event_raw_frames=event_raw_frames)
         
         # Phase 216: Remap raw_stats from track IDs to jersey numbers.
         # PICK PRIMARY TRACK per jersey (most frames) — do NOT sum across tracks.

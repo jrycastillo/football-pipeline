@@ -149,7 +149,7 @@ class AdvancedEventDetector:
         return smoothed
 
     def analyze(self, ownership, player_tracks, ball_track, team_map=None, raw_ball_frames=None,
-                zoom_ball_frames=None):
+                zoom_ball_frames=None, event_ball_track=None, event_raw_frames=None):
         """
         Detects: Dribbles, Passes, Crosses, Tackles, Interceptions, Goals, XG.
         team_map: dict {pid (str): "TeamName"}
@@ -159,13 +159,17 @@ class AdvancedEventDetector:
             raw_ball_frames = set()  # Fallback: treat all as raw (legacy behavior)
         if zoom_ball_frames is None:
             zoom_ball_frames = set()
+        # High-speed event evidence (shots/goals/saves) runs on a PRISTINE
+        # full-frame-only ball track: zoom recoveries corrupt the tracker's
+        # path near goals (stale anchor beats the real ball entering the net)
+        # and refill post-goal disappearance windows. Possession/segments keep
+        # the zoom-enhanced track — that is what the zoom pass is for.
+        ev_bt = event_ball_track if event_ball_track is not None else ball_track
+        ev_raw = event_raw_frames if event_raw_frames is not None else raw_ball_frames
 
         def _ball_gone(k):
-            """Goal-evidence 'missing' test: the FULL-FRAME detector lost the
-            ball. Zoom-only recoveries don't count as presence here — near the
-            goal the zoom re-acquires the ball (net bounce / GK pickup) and
-            would veto the 'ball left play' evidence a real goal produces."""
-            return (not ball_track[k]) or (k in zoom_ball_frames)
+            """Goal-evidence 'missing' test on the pristine event track."""
+            return not ev_bt[k]
 
         self._load_frame_homographies(player_tracks)
         stats = defaultdict(lambda: defaultdict(int))
@@ -649,18 +653,18 @@ class AdvancedEventDetector:
         # 5. Shot Detection (Trajectory Analysis)
         # Round 2 fix: Only compute velocity on raw ball detections (not interpolated)
         # Interpolated positions create false velocity spikes at gap boundaries
-        frames_count = len(ball_track)
+        frames_count = len(ev_bt)
         _shot_debug = {"raw_pairs": 0, "interp_skipped": 0}
         for i in range(2, frames_count):
-            if ball_track[i] and ball_track[i-2]:
+            if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip if either frame is interpolated
-                if raw_ball_frames and (i not in raw_ball_frames or (i-2) not in raw_ball_frames):
+                if ev_raw and (i not in ev_raw or (i-2) not in ev_raw):
                     _shot_debug["interp_skipped"] += 1
                     continue
                 _shot_debug["raw_pairs"] += 1
                 self._set_frame_h(i)
-                p1 = ball_track[i-2]
-                p2 = ball_track[i]
+                p1 = ev_bt[i-2]
+                p2 = ev_bt[i]
                 
                 # Distance in meters (using Camera.calculate_distance logic, but we have world coords if projected)
                 # Wait, ball_track is currently PIXELS.
@@ -797,9 +801,9 @@ class AdvancedEventDetector:
                                             # on course for at least 2 more frames (not deflected)
                                             lookahead = max(3, int(0.5 * EFF_FPS))
                                             on_course = 0
-                                            for k in range(i+1, min(i+lookahead+1, len(ball_track))):
-                                                if ball_track[k]:
-                                                    mk2 = self.camera.project_point(ball_track[k][0], ball_track[k][1])
+                                            for k in range(i+1, min(i+lookahead+1, len(ev_bt))):
+                                                if ev_bt[k]:
+                                                    mk2 = self.camera.project_point(ev_bt[k][0], ev_bt[k][1])
                                                     y_proj = mk2[1] + slope * (target_goal_x - mk2[0])
                                                     if GOAL_Y_MIN - 0.5 <= y_proj <= GOAL_Y_MAX + 0.5:
                                                         on_course += 1
@@ -814,7 +818,7 @@ class AdvancedEventDetector:
                                                 # ball stayed tracked in open play throughout).
                                                 _gone_start = i + on_course + 1
                                                 _gone_end = min(_gone_start + int(EFF_FPS * 1.5),
-                                                                len(ball_track))
+                                                                len(ev_bt))
                                                 _gone = sum(1 for k in range(_gone_start, _gone_end)
                                                             if _ball_gone(k))
                                                 if _gone >= int(EFF_FPS * 0.8):
@@ -827,15 +831,15 @@ class AdvancedEventDetector:
                                     if not goal_confirmed:
                                         goal_lookahead = max(10, int(2.0 * EFF_FPS))
                                         last_ball_in_zone = None
-                                        for k in range(i, min(i + goal_lookahead, len(ball_track))):
-                                            if ball_track[k]:
-                                                mk = self.camera.project_point(ball_track[k][0], ball_track[k][1])
+                                        for k in range(i, min(i + goal_lookahead, len(ev_bt))):
+                                            if ev_bt[k]:
+                                                mk = self.camera.project_point(ev_bt[k][0], ev_bt[k][1])
                                                 near_goal = (mk[0] > 98.0) if moving_right else (mk[0] < 7.0)
                                                 if near_goal and (GOAL_Y_MIN - 1.5 <= mk[1] <= GOAL_Y_MAX + 1.5):
                                                     last_ball_in_zone = k
                                         if last_ball_in_zone is not None:
                                             gap_start = last_ball_in_zone + 1
-                                            gap_end = min(last_ball_in_zone + int(EFF_FPS * 1.5), len(ball_track))
+                                            gap_end = min(last_ball_in_zone + int(EFF_FPS * 1.5), len(ev_bt))
                                             missing = sum(1 for k in range(gap_start, gap_end) if _ball_gone(k))
                                             if missing >= int(EFF_FPS * 0.8):
                                                 goal_confirmed = True
@@ -858,8 +862,8 @@ class AdvancedEventDetector:
                                                         if alt_pid is None: continue
                                                         if team_map.get(str(alt_pid)) == atk_teams[0]:
                                                             c = bbox_center(b["xyxy"])
-                                                            if ball_track[i]:
-                                                                d = self.camera.calculate_distance(c, ball_track[i])
+                                                            if ev_bt[i]:
+                                                                d = self.camera.calculate_distance(c, ev_bt[i])
                                                                 if d < best_d:
                                                                     best_d = d
                                                                     best_alt = alt_pid
@@ -911,13 +915,13 @@ class AdvancedEventDetector:
         
         # Iterate high-speed ball segments again (same raw-only filter as shots)
         for i in range(2, frames_count - 5):
-            if ball_track[i] and ball_track[i-2]:
+            if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip interpolated frames
-                if raw_ball_frames and (i not in raw_ball_frames or (i-2) not in raw_ball_frames):
+                if ev_raw and (i not in ev_raw or (i-2) not in ev_raw):
                     continue
                 self._set_frame_h(i)
-                m1 = self.camera.project_point(ball_track[i-2][0], ball_track[i-2][1])
-                m2 = self.camera.project_point(ball_track[i][0], ball_track[i][1])
+                m1 = self.camera.project_point(ev_bt[i-2][0], ev_bt[i-2][1])
+                m2 = self.camera.project_point(ev_bt[i][0], ev_bt[i][1])
                 dist_m = math.hypot(m2[0]-m1[0], m2[1]-m1[1])
                 speed_mps = dist_m / (2.0 / EFF_FPS)
 
@@ -946,9 +950,9 @@ class AdvancedEventDetector:
                                  # Check what happens next (i+1 to i+3)
                                  # If speed drops < 5 m/s OR vector flips
                                  
-                                 f_next = min(i+3, len(ball_track)-1)
-                                 if ball_track[f_next]:
-                                     m_next = self.camera.project_point(ball_track[f_next][0], ball_track[f_next][1])
+                                 f_next = min(i+3, len(ev_bt)-1)
+                                 if ev_bt[f_next]:
+                                     m_next = self.camera.project_point(ev_bt[f_next][0], ev_bt[f_next][1])
                                      v_next_x = m_next[0] - m2[0]
                                      # v_prev_x = m2[0] - m1[0]
                                      
