@@ -99,18 +99,44 @@ class RosterPrior:
             return None
         return sum(v for v in vals.values() if isinstance(v, (int, float)))
 
-    def compare_stats(self, player_stats):
+    # Ground-truth metric -> event type in the pipeline's event list. Event
+    # counts are identity-independent (an event is counted even when its
+    # player never resolved to a jersey), so the gap between event_level and
+    # the credited per-player total IS the identity-credit loss.
+    _EVENT_TYPE_MAP = {
+        "passes": ("pass",),
+        "interceptions": ("interception",),
+        "shots": ("shot", "goal"),
+        "crosses": ("cross",),
+        "fouls": ("foul",),
+        "goals": ("goal",),
+        "dribbles": ("dribble",),
+        "tackles": ("tackle",),
+    }
+
+    def compare_stats(self, player_stats, events=None):
         """Compare pipeline output to the user-provided known_stats.
 
         player_stats: {player_key: {"stats": {...}, ...}}.
-        Returns a list of dicts: {metric, pipeline, ground_truth, accuracy_pct}.
-        Empty if no known_stats were provided.
+        events: optional pipeline event list (raw_tracks); when given, each row
+        also carries event_level — the raw detected-event count for the metric,
+        before identity credit — and event_level_pct.
+        Returns a list of dicts: {metric, pipeline, ground_truth, accuracy_pct,
+        [event_level, event_level_pct]}. Empty if no known_stats were provided.
         """
         if not self.known_stats:
             return []
 
         def field_total(field):
             return sum(p.get("stats", {}).get(field, 0) or 0 for p in player_stats.values())
+
+        event_counts = {}
+        if events:
+            for ev in events:
+                if isinstance(ev, dict):
+                    t = ev.get("type")
+                    if t:
+                        event_counts[t] = event_counts.get(t, 0) + 1
 
         rows = []
         for metric, gt in self.known_stats.items():
@@ -123,8 +149,14 @@ class RosterPrior:
             else:
                 pv = field_total(field)
             acc = round(100.0 * pv / gtt, 1) if gtt else (0.0 if pv else 100.0)
-            rows.append({"metric": metric, "pipeline": round(pv, 2),
-                         "ground_truth": gtt, "accuracy_pct": acc})
+            row = {"metric": metric, "pipeline": round(pv, 2),
+                   "ground_truth": gtt, "accuracy_pct": acc}
+            if events and metric in self._EVENT_TYPE_MAP:
+                el = sum(event_counts.get(t, 0) for t in self._EVENT_TYPE_MAP[metric])
+                row["event_level"] = el
+                row["event_level_pct"] = (round(100.0 * el / gtt, 1) if gtt
+                                          else (0.0 if el else 100.0))
+            rows.append(row)
         return rows
 
     # --- helpers used by later phases (team assignment, JNR constraint) ---
