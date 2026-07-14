@@ -1963,6 +1963,13 @@ if __name__ == "__main__":
     fps = loader.stream.get(cv2.CAP_PROP_FPS) or 25.0
     width = int(loader.stream.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(loader.stream.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Time-scaled stats thresholds must use the video's REAL fps, not the
+    # config default (25): a 20fps video otherwise has its duration
+    # underestimated ~25%, over-tightening rate caps and skewing every
+    # gap-fill/cooldown/speed estimate.
+    from stats import event_logic as _event_logic
+    _event_logic.set_runtime_fps(fps, max(1, args.vid_stride))
     
     # Tracking Setup (Strict) - MOVED HERE
     # Ensure args has required tracker config

@@ -1,7 +1,12 @@
 from collections import defaultdict
 import math
 import os
-from .event_logic import AdvancedEventDetector, EFF_FPS
+# NOTE: event_logic.EFF_FPS is referenced as a module attribute (not imported
+# by value) so set_runtime_fps() overrides — the video's real fps — are seen
+# here too. A by-value import froze the config default (25) even after the
+# pipeline set the true fps.
+from . import event_logic
+from .event_logic import AdvancedEventDetector
 
 # Layer 2 roster reconciliation is DISABLED. On unreliable-jersey footage it
 # dropped real players tracked under misread numbers (coverage collapse) while
@@ -833,7 +838,7 @@ class StatsEngine:
                 "crosses_total": 35, "crosses_complete": 28,
                 "distance_m": 14500.0,
             }
-            match_minutes = (len(all_frames) / EFF_FPS) / 60.0 if all_frames else 90.0
+            match_minutes = (len(all_frames) / event_logic.EFF_FPS) / 60.0 if all_frames else 90.0
             _dur_ratio = max(0.05, match_minutes / 90.0)
             for ck, merged_stats in remapped_stats.items():
                 jnum_log = ck[1] if isinstance(ck, tuple) else ck
@@ -931,8 +936,8 @@ class StatsEngine:
             if isinstance(id_key, str) and id_key.isdigit(): # Handle stringified ints
                  total_frames = id_frame_counts.get(int(id_key), 0) + id_frame_counts.get(id_key, 0)
             
-            minutes_played = (total_frames / EFF_FPS) / 60.0
-            seconds_played = (total_frames / EFF_FPS)
+            minutes_played = (total_frames / event_logic.EFF_FPS) / 60.0
+            seconds_played = (total_frames / event_logic.EFF_FPS)
             
             # Strict Filter: < 1.5 Seconds -> DELETE
             # Exception: vote-recovered jerseys are exempt — they are real players
@@ -1033,7 +1038,7 @@ class StatsEngine:
             s = raw_stats.get(id_key, defaultdict(int)) 
             
             # Derived Metrics
-            time_on_ball = round(s["touch_frames"] / EFF_FPS, 2)
+            time_on_ball = round(s["touch_frames"] / event_logic.EFF_FPS, 2)
             
             p_total = s["passes_total"]
             p_comp = s["passes_complete"]

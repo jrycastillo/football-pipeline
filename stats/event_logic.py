@@ -29,6 +29,28 @@ except:
 # each entry in all_frames/ball_track is 3/25=0.12s apart, not 1/25=0.04s
 EFF_FPS = FPS / VID_STRIDE
 
+
+def set_runtime_fps(src_fps, vid_stride=None):
+    """Override the config-derived effective FPS with the video's actual fps.
+
+    The config FPS (25) silently skewed every time-scaled threshold on
+    non-25fps footage: on a 20fps video the duration was underestimated by
+    ~25% (rate caps too strict), and gap fills / cooldowns / debounces /
+    speed estimates were all off by the same factor. The pipeline reads the
+    real fps from the file and calls this before stats run. Module globals
+    are mutated so every call-site picks the value up at call time; other
+    modules must reference event_logic.EFF_FPS dynamically (module attr),
+    not import it by value.
+    """
+    global EFF_FPS, FPS, VID_STRIDE
+    if vid_stride:
+        VID_STRIDE = max(1, int(vid_stride))
+    if src_fps and src_fps > 0:
+        FPS = float(src_fps)
+        EFF_FPS = FPS / VID_STRIDE
+        print(f"[StatsEngine] Runtime FPS: source {FPS:.2f}, stride {VID_STRIDE} "
+              f"-> effective {EFF_FPS:.2f}/s")
+
 # Constants (Meters) - Phase 190/195: Relaxed thresholds
 DIST_TOUCH = 5.0  # Increased for better possession detection
 DIST_DRIBBLE_OPP = 3.0  # Phase 195: Increased from 2.0 to 3.0m for more dribble detection
