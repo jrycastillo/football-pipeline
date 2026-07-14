@@ -29,8 +29,14 @@ _ENABLE_ROSTER_RECONCILE = False
 # jersey, letting a "player" be several boxes at the same time. Measured on
 # the Babak GT clip: one jersey held 88% of ownership frames this way. The
 # exclusivity pass keeps, per jersey, the strongest non-overlapping fragment
-# set and demotes the rest to unresolved. JERSEY_EXCLUSIVITY=0 disables.
-_ENABLE_JERSEY_EXCLUSIVITY = os.environ.get("JERSEY_EXCLUSIVITY", "1") != "0"
+# set and demotes the rest to unresolved. DEFAULT OFF: on the GT clip the
+# overlaps proved to be massive concurrent duplicates rooted in the identity
+# evidence itself (single-digit jerseys are OCR magnets) — demotion bought
+# credit quality (passes 67->71, clean jersey list) but cost roster coverage
+# (12/12 -> 8/12), broke the foul heuristic (needs stable ownership), and
+# left 62% of events uncredited. Opt-in via JERSEY_EXCLUSIVITY=1 until
+# per-player GT / verified events allow tuning the trade properly.
+_ENABLE_JERSEY_EXCLUSIVITY = os.environ.get("JERSEY_EXCLUSIVITY", "0") == "1"
 
 _ENABLE_RESIDUAL_STITCH = os.environ.get("RESIDUAL_STITCH", "1") != "0"
 # Tight windows: the first calibration run (gap 75 ≈ 9 s, radius up to ~570 px)
