@@ -1954,7 +1954,15 @@ if __name__ == "__main__":
     # actually ran (a silent default once masked an inert config change).
     _ball_imgsz = CONFIG["heuristics"].get("BALL_IMG_SIZE", 832)
     _ball_conf = CONFIG["heuristics"].get("BALL_CONF", 0.10)
-    log(f"🚀 [Device] Models loaded on: {_device} | ball imgsz={_ball_imgsz} conf={_ball_conf}")
+    # WS1.2 zoom second pass: when the full-frame pass misses the ball but it
+    # was seen recently, run the ball model on a 640px crop centered on its
+    # last position — the ball is ~2.5x larger relative to the input there.
+    # A SEPARATE model instance so the main ball tracker's state is untouched.
+    _ball_zoom_on = bool(CONFIG["heuristics"].get("BALL_ZOOM", True))
+    _ball_zoom_window = int(CONFIG["heuristics"].get("BALL_ZOOM_WINDOW", 40))  # src frames (~2s at 20fps)
+    ball_zoom_model = YOLO(CONFIG['env']['BALL_MODEL_PATH']).to(_device) if _ball_zoom_on else None
+    log(f"🚀 [Device] Models loaded on: {_device} | ball imgsz={_ball_imgsz} conf={_ball_conf}"
+        f" | zoom={'on' if _ball_zoom_on else 'off'}")
     loader = ThreadedVideoReader(video_path)
     time.sleep(1.0)
     
@@ -2037,6 +2045,11 @@ if __name__ == "__main__":
     # to raise, hence the daemon thread + os._exit.
     STALL_ABORT_MIN = int(os.environ.get("STALL_ABORT_MIN", "15"))
     _progress = {"n": 0, "t": time.time(), "done": False}
+
+    # Ball zoom-pass state (WS1.2): last accepted ball center + src frame.
+    _last_ball_xy = None
+    _last_ball_n = -10**9
+    _zoom_stats = {"attempts": 0, "hits": 0}
 
     def _stall_watchdog():
         while not _progress["done"]:
@@ -2238,6 +2251,47 @@ if __name__ == "__main__":
                             "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
                         })
                         
+                # WS1.2 zoom second pass: full-frame missed the ball but we saw
+                # it within the last ~2s — re-look at a 640px crop around the
+                # last position, where the ball is much larger relative to the
+                # input. Detections are offset back to full-frame coordinates.
+                _ball_now = [bd for bd in frame_data["boxes"] if bd["cls"] == 32]
+                if _ball_now:
+                    _bb = max(_ball_now, key=lambda bd: bd["conf"])["xyxy"]
+                    _last_ball_xy = ((_bb[0] + _bb[2]) / 2.0, (_bb[1] + _bb[3]) / 2.0)
+                    _last_ball_n = n
+                elif (ball_zoom_model is not None and _last_ball_xy is not None
+                        and (n - _last_ball_n) <= _ball_zoom_window):
+                    _zoom_stats["attempts"] += 1
+                    _fh, _fw = f.shape[:2]
+                    _cx, _cy = _last_ball_xy
+                    _half = 320
+                    _x0 = int(max(0, min(_cx - _half, _fw - 2 * _half)))
+                    _y0 = int(max(0, min(_cy - _half, _fh - 2 * _half)))
+                    _x1, _y1 = min(_fw, _x0 + 2 * _half), min(_fh, _y0 + 2 * _half)
+                    _crop = f[_y0:_y1, _x0:_x1]
+                    if _crop.size > 0:
+                        try:
+                            _zr = ball_zoom_model.predict(
+                                _crop, imgsz=640, conf=_ball_conf,
+                                device=get_device().type, verbose=False)[0]
+                            _zb = getattr(_zr, "boxes", None)
+                            if _zb is not None and len(_zb) > 0:
+                                _bi = int(_zb.conf.argmax())
+                                _bxy = _zb.xyxy[_bi].cpu().numpy().tolist()
+                                _bconf = float(_zb.conf[_bi].item())
+                                _bxy = [_bxy[0] + _x0, _bxy[1] + _y0,
+                                        _bxy[2] + _x0, _bxy[3] + _y0]
+                                frame_data["boxes"].append({
+                                    "xyxy": _bxy, "id": None, "conf": _bconf,
+                                    "cls": 32, "zoom": True})
+                                _last_ball_xy = ((_bxy[0] + _bxy[2]) / 2.0,
+                                                 (_bxy[1] + _bxy[3]) / 2.0)
+                                _last_ball_n = n
+                                _zoom_stats["hits"] += 1
+                        except Exception:
+                            pass  # zoom pass is best-effort; never break the frame
+
                 # NOTE: is_near_feet filter REMOVED — it was deleting ball detections during
                 # possession (ball at player feet), destroying ownership/pass tracking.
                 # Ball model is trained specifically for balls; confidence threshold handles FPs.
@@ -2479,6 +2533,9 @@ if __name__ == "__main__":
             writer.release()
             log(f"Video saved to {out_video_path}")
         log(f"Tracking finished in {time.time() - start_time:.2f}s.")
+        if ball_zoom_model is not None and _zoom_stats["attempts"]:
+            log(f"[BallZoom] recovered {_zoom_stats['hits']}/{_zoom_stats['attempts']} "
+                f"miss-frames via crop second pass")
         if homography_estimator is not None:
             log(f"[PitchHomography] fit stats: {homography_estimator.fit_stats()}")
         
