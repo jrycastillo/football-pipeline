@@ -708,9 +708,30 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
             cmd.append("--pitch_homography")
 
         print(f"[pipeline] Executing Core: {' '.join(cmd)}")
-        # Increased timeout to 24 hours for H100 full matches
-        result = subprocess.run(cmd, env=os.environ, timeout=86400)
-        
+        # GPU OOM guard: hold a permit while the subprocess owns GPU memory;
+        # on a CUDA OOM death the permit is leaked so concurrency shrinks.
+        _gate_acquired = False
+        if _GPU_GATE is not None:
+            _GPU_GATE.acquire()
+            _gate_acquired = True
+        _oom_leak = False
+        try:
+            # Increased timeout to 24 hours for H100 full matches
+            result = subprocess.run(cmd, env=os.environ, timeout=86400)
+            if result.returncode != 0:
+                _oom_leak = _run_dir_is_cuda_oom(output_dir)
+        finally:
+            if _gate_acquired:
+                global _GPU_GATE_LEAKS
+                with _GPU_GATE_LOCK:
+                    if _oom_leak and _GPU_GATE_LEAKS < _GPU_GATE_MAX_LEAKS:
+                        _GPU_GATE_LEAKS += 1
+                        print(f"[OOMGuard] CUDA OOM detected — permanently reducing "
+                              f"pipeline concurrency (leaked permit "
+                              f"{_GPU_GATE_LEAKS}/{_GPU_GATE_MAX_LEAKS})")
+                    else:
+                        _GPU_GATE.release()
+
         if result.returncode != 0:
             print(f"[pipeline] Core failed with code {result.returncode}")
             if not no_db:
@@ -889,6 +910,26 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
 
 
 import concurrent.futures
+import threading
+
+# GPU OOM guard (only armed when --parallel > 1): every pipeline subprocess
+# must hold a permit. When a run dies of CUDA OOM the permit is deliberately
+# NOT returned, so effective concurrency shrinks by one — parallel runs that
+# overload the GPU degrade to fewer workers instead of failing repeatedly.
+# Never shrinks below 1.
+_GPU_GATE = None
+_GPU_GATE_LEAKS = 0
+_GPU_GATE_MAX_LEAKS = 0
+_GPU_GATE_LOCK = threading.Lock()
+
+
+def _run_dir_is_cuda_oom(output_dir):
+    """True if the failed run's pipeline_error.txt points at CUDA OOM."""
+    try:
+        with open(os.path.join(output_dir, "pipeline_error.txt")) as f:
+            return "out of memory" in f.read().lower()
+    except OSError:
+        return False
 
 def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_size_mb=float('inf'), 
                        locking_mode=2, jnr_stride=None, vid_stride=None,
@@ -913,6 +954,12 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
     if video_ids_filter:
         print(f"[poll] Video ID filter: {video_ids_filter}")
     
+    # Arm the GPU OOM guard only for genuinely parallel runs.
+    global _GPU_GATE, _GPU_GATE_MAX_LEAKS
+    if parallel_workers > 1:
+        _GPU_GATE = threading.Semaphore(parallel_workers)
+        _GPU_GATE_MAX_LEAKS = parallel_workers - 1
+
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers)
 
     processed_count = 0
