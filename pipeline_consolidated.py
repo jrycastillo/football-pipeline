@@ -2049,7 +2049,19 @@ if __name__ == "__main__":
     # Ball zoom-pass state (WS1.2): last accepted ball center + src frame.
     _last_ball_xy = None
     _last_ball_n = -10**9
-    _zoom_stats = {"attempts": 0, "hits": 0}
+    _zoom_stats = {"attempts": 0, "hits": 0, "goal_zone_skips": 0}
+
+    def _in_goal_zone(xy):
+        """True when the position projects inside either goal mouth zone.
+        The zoom pass must NOT look there: goal detection's core evidence is
+        the ball DISAPPEARING after crossing the line, and the first zoom run
+        recovered the ball in the net — killing the only real goal (0/1).
+        Same zone definition as the stats engine's Method-2 test."""
+        xm, ym = camera.project_point(xy[0], xy[1])
+        if (xm > 98.0 or xm < 7.0) and 28.8 <= ym <= 39.2:
+            _zoom_stats["goal_zone_skips"] += 1
+            return True
+        return False
 
     def _stall_watchdog():
         while not _progress["done"]:
@@ -2261,7 +2273,8 @@ if __name__ == "__main__":
                     _last_ball_xy = ((_bb[0] + _bb[2]) / 2.0, (_bb[1] + _bb[3]) / 2.0)
                     _last_ball_n = n
                 elif (ball_zoom_model is not None and _last_ball_xy is not None
-                        and (n - _last_ball_n) <= _ball_zoom_window):
+                        and (n - _last_ball_n) <= _ball_zoom_window
+                        and not _in_goal_zone(_last_ball_xy)):
                     _zoom_stats["attempts"] += 1
                     _fh, _fw = f.shape[:2]
                     _cx, _cy = _last_ball_xy
@@ -2535,7 +2548,8 @@ if __name__ == "__main__":
         log(f"Tracking finished in {time.time() - start_time:.2f}s.")
         if ball_zoom_model is not None and _zoom_stats["attempts"]:
             log(f"[BallZoom] recovered {_zoom_stats['hits']}/{_zoom_stats['attempts']} "
-                f"miss-frames via crop second pass")
+                f"miss-frames via crop second pass "
+                f"({_zoom_stats['goal_zone_skips']} goal-zone skips)")
         if homography_estimator is not None:
             log(f"[PitchHomography] fit stats: {homography_estimator.fit_stats()}")
         
