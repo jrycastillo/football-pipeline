@@ -1,5 +1,6 @@
 from collections import defaultdict
 import math
+import os
 from .event_logic import AdvancedEventDetector, EFF_FPS
 
 # Layer 2 roster reconciliation is DISABLED. On unreliable-jersey footage it
@@ -9,6 +10,21 @@ from .event_logic import AdvancedEventDetector, EFF_FPS
 # filter jersey_registry against the roster). Team-color forcing, soft-snap
 # (Phase 3), and the known_stats accuracy report (Phase 4) remain active.
 _ENABLE_ROSTER_RECONCILE = False
+
+# Residual stitch (identity-credit gap): fragments that never resolved to a
+# jersey carry real detected events that are then dropped from per-player stats
+# (Babak GT clip: 127 counted passes -> 67 credited). After the normal
+# resolution, unresolved fragments are greedily stitched onto EXISTING jerseys
+# under hard constraints — no temporal overlap with that jersey's tracks,
+# team-color compatibility, and boundary continuity (the fragment starts where
+# and when the jersey's track ended, or vice versa). Never invents a new
+# jersey; disable with RESIDUAL_STITCH=0.
+_ENABLE_RESIDUAL_STITCH = os.environ.get("RESIDUAL_STITCH", "1") != "0"
+_STITCH_MAX_GAP = 75        # max processed-frame gap at the stitch boundary (~9 s at stride 3)
+_STITCH_BASE_PX = 120.0     # allowed boundary distance at gap 0
+_STITCH_PX_PER_FRAME = 6.0  # allowed extra distance per frame of gap
+_STITCH_MIN_FRAMES = 2      # ignore 1-frame flickers
+_STITCH_OVERLAP_TOL = 2     # frames of interval overlap tolerated
 
 class StatsEngine:
     def __init__(self, frame_width=None, frame_height=None):
@@ -105,6 +121,149 @@ class StatsEngine:
                     print(f"[Phase 216++] Raw recovery: Jersey #{jnum} ({total_cnt} total raw reads)")
 
         return track_to_jersey
+
+    def _residual_stitch(self, all_frames, track_to_jersey, id_manager):
+        """WS2.2 — stitch unresolved fragments onto existing jerseys.
+
+        A ByteTrack fragment that never resolved to a jersey still owns real
+        detected events, which are then dropped from per-player stats (the
+        identity-credit gap). This assigns each unresolved fragment to an
+        EXISTING jersey when it is safe to do so:
+
+          - the fragment must not temporally overlap any track already mapped
+            to that jersey (a player cannot be in two boxes at once),
+          - the fragment's team color must match the jersey's team (unknown
+            color is allowed, exact match is preferred),
+          - boundary continuity: the fragment starts close in time AND space
+            to where one of the jersey's tracks ended, or ends where one
+            starts (ByteTrack fragmentation is exactly this pattern).
+
+        Greedy, biggest fragments first; each assignment extends the jersey's
+        occupied intervals so later stitches respect it. Never creates a new
+        jersey. Returns {track_id: jersey_num} additions.
+        """
+        if not all_frames or not track_to_jersey:
+            return {}
+
+        # One pass over all_frames: per-track extent and boundary centers.
+        # Track only player-class boxes (cls 2); GK/referee tracks must not
+        # stitch onto field players.
+        info = {}
+        cls_counts = defaultdict(lambda: defaultdict(int))
+        for t, fr in enumerate(all_frames):
+            for b in fr.get("boxes", []):
+                tid = b.get("id")
+                xy = b.get("xyxy")
+                if tid is None or not xy:
+                    continue
+                cls_counts[tid][b.get("cls", 2)] += 1
+                cx = (xy[0] + xy[2]) / 2.0
+                cy = (xy[1] + xy[3]) / 2.0
+                e = info.get(tid)
+                if e is None:
+                    info[tid] = {"first": t, "last": t, "fc": (cx, cy),
+                                 "lc": (cx, cy), "n": 1}
+                else:
+                    e["last"] = t
+                    e["lc"] = (cx, cy)
+                    e["n"] += 1
+
+        def _dominant_player(tid):
+            counts = cls_counts.get(tid)
+            if not counts:
+                return False
+            return max(counts, key=counts.get) == 2
+
+        # Jersey state: occupied intervals + stitchable boundaries + team color.
+        team_map = getattr(self, "team_map", {}) or {}
+        track_colors = getattr(id_manager, "track_colors", {}) or {}
+        jersey_ivs = defaultdict(list)     # jersey -> [(first, last)]
+        jersey_bounds = defaultdict(list)  # jersey -> [(t, (x, y), kind)] kind: 'start'|'end'
+        jersey_color = {}
+        for tid, jnum in track_to_jersey.items():
+            e = info.get(tid)
+            if e is None:
+                continue
+            jersey_ivs[jnum].append((e["first"], e["last"]))
+            jersey_bounds[jnum].append((e["first"], e["fc"], "start"))
+            jersey_bounds[jnum].append((e["last"], e["lc"], "end"))
+            c = track_colors.get(tid)
+            if c and c != "Unknown" and jnum not in jersey_color:
+                jersey_color[jnum] = c
+        for jnum in list(jersey_ivs.keys()):
+            tm = team_map.get(str(jnum))
+            if tm:
+                jersey_color[jnum] = tm  # team assignment beats single-track color
+
+        def _overlaps(iv, ivs):
+            for a, b in ivs:
+                if min(iv[1], b) - max(iv[0], a) > _STITCH_OVERLAP_TOL:
+                    return True
+            return False
+
+        unresolved = [tid for tid in info
+                      if tid not in track_to_jersey
+                      and info[tid]["n"] >= _STITCH_MIN_FRAMES
+                      and _dominant_player(tid)]
+        unresolved.sort(key=lambda t: -info[t]["n"])
+
+        raw_reads = getattr(id_manager, "raw_read_counts", {}) or {}
+        additions = {}
+        for tid in unresolved:
+            e = info[tid]
+            tcol = track_colors.get(tid)
+            best = None  # (score, jersey)
+            for jnum, ivs in jersey_ivs.items():
+                if _overlaps((e["first"], e["last"]), ivs):
+                    continue
+                jcol = jersey_color.get(jnum)
+                if tcol and tcol != "Unknown" and jcol and tcol != jcol:
+                    continue
+                # boundary continuity: fragment start after a jersey 'end', or
+                # fragment end before a jersey 'start'
+                feasible = None
+                for bt, bc, kind in jersey_bounds[jnum]:
+                    if kind == "end":
+                        gap = e["first"] - bt
+                        pt = e["fc"]
+                    else:
+                        gap = bt - e["last"]
+                        pt = e["lc"]
+                    if gap < -_STITCH_OVERLAP_TOL or gap > _STITCH_MAX_GAP:
+                        continue
+                    gap = max(0, gap)
+                    dist = math.hypot(pt[0] - bc[0], pt[1] - bc[1])
+                    if dist > _STITCH_BASE_PX + _STITCH_PX_PER_FRAME * gap:
+                        continue
+                    score = dist + 3.0 * gap
+                    if feasible is None or score < feasible:
+                        feasible = score
+                if feasible is None:
+                    continue
+                # weak jersey-read support for this number lowers the score
+                support = raw_reads.get(tid, {}).get(jnum, 0)
+                score = feasible - min(support, 5) * 25.0
+                if tcol and tcol != "Unknown" and tcol == jersey_color.get(jnum):
+                    score -= 40.0
+                if best is None or score < best[0]:
+                    best = (score, jnum)
+            if best is not None:
+                jnum = best[1]
+                additions[tid] = jnum
+                jersey_ivs[jnum].append((e["first"], e["last"]))
+                jersey_bounds[jnum].append((e["first"], e["fc"], "start"))
+                jersey_bounds[jnum].append((e["last"], e["lc"], "end"))
+
+        if additions:
+            per_jersey = defaultdict(int)
+            for jnum in additions.values():
+                per_jersey[jnum] += 1
+            print(f"[ResidualStitch] Stitched {len(additions)} unresolved fragments onto "
+                  f"{len(per_jersey)} existing jerseys: "
+                  + ", ".join(f"#{j}+{c}" for j, c in sorted(per_jersey.items(), key=lambda x: str(x[0]))))
+        else:
+            print("[ResidualStitch] No unresolved fragments met the stitch constraints")
+        return additions
 
     def _reconcile_roster(self, track_to_jersey, id_manager, team_map_ref):
         """Layer 2 — roster-anchored identity reconciliation.
@@ -405,6 +564,10 @@ class StatsEngine:
             # box IDs were already rewritten to the false numbers.
             if _ENABLE_ROSTER_RECONCILE and getattr(self, "_roster_prior", None) is not None and _ttj:
                 _ttj = self._reconcile_roster(_ttj, id_manager, getattr(self, "team_map", None))
+            # WS2.2: stitch unresolved fragments onto existing jerseys so their
+            # events are credited instead of dropped (identity-credit gap).
+            if _ttj and _ENABLE_RESIDUAL_STITCH:
+                _ttj.update(self._residual_stitch(all_frames, _ttj, id_manager))
             if _ttj:
                 _remapped_boxes = 0
                 for f in all_frames:
