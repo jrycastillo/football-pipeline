@@ -673,6 +673,17 @@ class StatsEngine:
         ball_track = ball_tracker.interpolate(len(all_frames))
         # Round 2 fix: Track which frames have real detections vs interpolated
         raw_ball_frames = set(ball_tracker.tracks.keys())
+        # Frames whose only ball evidence is the crop zoom pass. Goal
+        # detection's disappearance tests must ignore these: the zoom exists
+        # to rescue possession tracking, and near the goal it re-acquires the
+        # ball (bounced out of the net / GK pickup) and vetoes the 'ball left
+        # play' evidence — measured: it silenced a real, previously-detected
+        # goal on the GT clip.
+        zoom_ball_frames = set()
+        for t, f in enumerate(all_frames):
+            balls = [b for b in f.get("boxes", []) if b.get("cls") == 32]
+            if balls and all(b.get("zoom") for b in balls):
+                zoom_ball_frames.add(t)
 
         balls_found = sum(1 for b in ball_track if b is not None)
         raw_count = len(raw_ball_frames)
@@ -758,7 +769,8 @@ class StatsEngine:
         team_map_ref = self.team_map if hasattr(self, "team_map") else None
         events, raw_stats = self.detector.analyze(ownership, player_tracks, ball_track,
                                                     team_map=team_map_ref,
-                                                    raw_ball_frames=raw_ball_frames)
+                                                    raw_ball_frames=raw_ball_frames,
+                                                    zoom_ball_frames=zoom_ball_frames)
         
         # Phase 216: Remap raw_stats from track IDs to jersey numbers.
         # PICK PRIMARY TRACK per jersey (most frames) — do NOT sum across tracks.

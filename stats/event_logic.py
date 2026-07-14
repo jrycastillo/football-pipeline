@@ -148,7 +148,8 @@ class AdvancedEventDetector:
                 gap += 1
         return smoothed
 
-    def analyze(self, ownership, player_tracks, ball_track, team_map=None, raw_ball_frames=None):
+    def analyze(self, ownership, player_tracks, ball_track, team_map=None, raw_ball_frames=None,
+                zoom_ball_frames=None):
         """
         Detects: Dribbles, Passes, Crosses, Tackles, Interceptions, Goals, XG.
         team_map: dict {pid (str): "TeamName"}
@@ -156,6 +157,16 @@ class AdvancedEventDetector:
         """
         if raw_ball_frames is None:
             raw_ball_frames = set()  # Fallback: treat all as raw (legacy behavior)
+        if zoom_ball_frames is None:
+            zoom_ball_frames = set()
+
+        def _ball_gone(k):
+            """Goal-evidence 'missing' test: the FULL-FRAME detector lost the
+            ball. Zoom-only recoveries don't count as presence here — near the
+            goal the zoom re-acquires the ball (net bounce / GK pickup) and
+            would veto the 'ball left play' evidence a real goal produces."""
+            return (not ball_track[k]) or (k in zoom_ball_frames)
+
         self._load_frame_homographies(player_tracks)
         stats = defaultdict(lambda: defaultdict(int))
         events = []
@@ -805,7 +816,7 @@ class AdvancedEventDetector:
                                                 _gone_end = min(_gone_start + int(EFF_FPS * 1.5),
                                                                 len(ball_track))
                                                 _gone = sum(1 for k in range(_gone_start, _gone_end)
-                                                            if not ball_track[k])
+                                                            if _ball_gone(k))
                                                 if _gone >= int(EFF_FPS * 0.8):
                                                     goal_confirmed = True
                                                     goal_method = 1
@@ -825,7 +836,7 @@ class AdvancedEventDetector:
                                         if last_ball_in_zone is not None:
                                             gap_start = last_ball_in_zone + 1
                                             gap_end = min(last_ball_in_zone + int(EFF_FPS * 1.5), len(ball_track))
-                                            missing = sum(1 for k in range(gap_start, gap_end) if not ball_track[k])
+                                            missing = sum(1 for k in range(gap_start, gap_end) if _ball_gone(k))
                                             if missing >= int(EFF_FPS * 0.8):
                                                 goal_confirmed = True
                                                 goal_method = 2
