@@ -609,21 +609,27 @@ class StatsEngine:
             # Far-outlier guard, scaled to observed match duration.
             # With Option A (identities resolved before stats), events are now
             # counted once per player, so real per-player variation is valid and
-            # must NOT be flattened. These ceilings are deliberately ~2.5x the
-            # realistic top-of-range so they fire ONLY on clearly-broken values
-            # (e.g. a fragment-leak explosion of 40+ tackles), never on a genuine
-            # busy player. A previous tighter version (tackles 6/90 -> cap 2 for a
-            # 30-min clip) was clamping everyone to identical values and hiding
-            # the real spread.
+            # must NOT be flattened. These ceilings target ONLY clearly-broken
+            # values — the fragment-leak explosions the caps were built for
+            # produced 20-60x inflation (300+ passes, 40+ tackles per player).
+            # They must never fire on a genuine busy player.
+            #
+            # Calibration note (Babak GT clip, 14 min, small-sided 10v6): the
+            # previous 11v11-shaped caps (passes 160/90) cut a real playmaker's
+            # passes 39 -> 25 while team recall was only 49% of GT. Small-sided
+            # formats concentrate events on fewer players: GT itself implies
+            # ~150-250/90 pass rates for a busy player there. Caps are now set
+            # well above any plausible rate in either format; distance_m stays
+            # as a physical bound.
             _RATE_CAPS_PER_90 = {
-                "tackles": 18, "tackles_successful": 18,
-                "interceptions": 25, "ball_interceptions_total": 25,
-                "dribbles": 30, "dribbles_successful": 24,
-                "challenges_total": 45, "challenges_won_total": 35,
-                "shots_on_target": 14,
-                "fouls_total": 10,
-                "passes_total": 160, "passes_complete": 150,
-                "crosses_total": 25, "crosses_complete": 18,
+                "tackles": 30, "tackles_successful": 30,
+                "interceptions": 40, "ball_interceptions_total": 40,
+                "dribbles": 45, "dribbles_successful": 36,
+                "challenges_total": 70, "challenges_won_total": 55,
+                "shots_on_target": 20,
+                "fouls_total": 15,
+                "passes_total": 300, "passes_complete": 280,
+                "crosses_total": 35, "crosses_complete": 28,
                 "distance_m": 14500.0,
             }
             match_minutes = (len(all_frames) / EFF_FPS) / 60.0 if all_frames else 90.0
