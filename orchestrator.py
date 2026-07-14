@@ -575,16 +575,41 @@ def upsert_status_row(matches_video_id, user_id, source_url, status, task_id,
         print(f"[db] ❌ FAILED to upsert: {e}")
         health.record_db_query(success=False)
 
-def is_video_processed(matches_video_id, source_url):
+# A 'running' row older than this is a crashed/killed run (the pipeline
+# subprocess itself times out at 24h), so the video is eligible again.
+# Without this, an orchestrator crash left the row 'running' forever and
+# the video was silently skipped on every subsequent poll.
+RUNNING_STALE_HOURS = 25
+
+
+def is_video_processed(matches_video_id, source_url, retry_failed=False):
     if NO_DB: return False
     unique_id = _sha1(source_url or f"{matches_video_id or ''}")
     try:
         with _conn() as conn, conn.cursor() as cur:
-            sql = f"SELECT status FROM {ANALYSIS_TABLE} WHERE unique_id=%s LIMIT 1"
+            sql = (f"SELECT status, updated_at, "
+                   f"TIMESTAMPDIFF(HOUR, updated_at, NOW()) AS age_h "
+                   f"FROM {ANALYSIS_TABLE} WHERE unique_id=%s LIMIT 1")
             cur.execute(sql, (unique_id,))
             row = cur.fetchone()
             health.record_db_query(success=True)
-            if row and row["status"] in ("finished", "running", "failed"):
+            if not row:
+                return False
+            status = row["status"]
+            if status == "finished":
+                return True
+            if status == "running":
+                age_h = row.get("age_h")
+                if age_h is not None and age_h >= RUNNING_STALE_HOURS:
+                    print(f"[db] Reclaiming stale 'running' video {matches_video_id} "
+                          f"(last update {age_h}h ago)")
+                    return False
+                return True
+            if status == "failed":
+                if retry_failed:
+                    print(f"[db] Retrying previously failed video {matches_video_id} "
+                          f"(--retry_failed)")
+                    return False
                 return True
     except Exception as e:
         print(f"[db] Error checking status: {e}")
@@ -616,18 +641,30 @@ def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=
         if not use_streaming:
             temp_dir = tempfile.mkdtemp(prefix="pf_")
             temp_video_path = os.path.join(temp_dir, filename)
-            try:
-                resp = requests.get(video_path, stream=True, timeout=3600)
-                resp.raise_for_status()
-                with open(temp_video_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        f.write(chunk)
-                local_video_path = temp_video_path
-                print(f"[pipeline] Downloaded to {temp_video_path}")
-            except Exception as e:
-                print(f"[pipeline] Download Failed: {e}")
+            # Retry transient network failures — a single blip used to mark the
+            # video 'failed' permanently (failed rows are not re-polled).
+            download_attempts = 3
+            last_err = None
+            for attempt in range(1, download_attempts + 1):
+                try:
+                    resp = requests.get(video_path, stream=True, timeout=3600)
+                    resp.raise_for_status()
+                    with open(temp_video_path, 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            f.write(chunk)
+                    local_video_path = temp_video_path
+                    print(f"[pipeline] Downloaded to {temp_video_path}")
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"[pipeline] Download attempt {attempt}/{download_attempts} failed: {e}")
+                    if attempt < download_attempts:
+                        time.sleep(10 * attempt)
+            if last_err is not None:
+                print(f"[pipeline] Download Failed after {download_attempts} attempts: {last_err}")
                 if not no_db:
-                    upsert_status_row(video_id, user_id, spaces_url or video_path, "failed", task_id, error=f"Download failed: {e}")
+                    upsert_status_row(video_id, user_id, spaces_url or video_path, "failed", task_id, error=f"Download failed: {last_err}")
                 return False
 
     # 2. Initial status update (In Progress) - Use 'running' (7 chars) instead of 'in_progress' (11 chars)
@@ -854,7 +891,7 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                        make_video=False, parallel_workers=1, max_frames=None,
                        video_ids_filter=None, roster_file=None, clip_events=None,
                        clip_pad_s=3.0, write_db=False, db_dry_run=False,
-                       analysis_id=None, pitch_homography=False):
+                       analysis_id=None, pitch_homography=False, retry_failed=False):
     """
     Continuously poll for pending videos and process them.
     
@@ -907,7 +944,8 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                     continue
                 
                 # Skip if already in DB (Persistent check)
-                if is_video_processed(video_id, video.get("spacesURL")):
+                if is_video_processed(video_id, video.get("spacesURL"),
+                                      retry_failed=retry_failed):
                    print(f"[poll] Already processed (DB): {video_id}")
                    processed_ids.add(video_id)
                    continue
@@ -1010,6 +1048,8 @@ def main():
     parser.add_argument("--pitch_homography", action="store_true",
                         help="Enable Nabeel v3 pitch-keypoint homography (px->meters). "
                              "Opt-in; default off until the keypoint model is retrained on our footage.")
+    parser.add_argument("--retry_failed", action="store_true",
+                        help="Re-process videos whose DB status is 'failed' (default: skip them)")
     parser.add_argument("--analysis_id", type=str,
                         help="Stable idempotency key for normalized DB persistence")
     parser.add_argument("--write_db", action="store_true",
@@ -1142,7 +1182,8 @@ def main():
             write_db=args.write_db,
             db_dry_run=args.db_dry_run,
             analysis_id=args.analysis_id,
-            pitch_homography=args.pitch_homography
+            pitch_homography=args.pitch_homography,
+            retry_failed=args.retry_failed
         )
     else:
         # Show help if no mode specified
