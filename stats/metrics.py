@@ -20,11 +20,16 @@ _ENABLE_ROSTER_RECONCILE = False
 # and when the jersey's track ended, or vice versa). Never invents a new
 # jersey; disable with RESIDUAL_STITCH=0.
 _ENABLE_RESIDUAL_STITCH = os.environ.get("RESIDUAL_STITCH", "1") != "0"
-_STITCH_MAX_GAP = 75        # max processed-frame gap at the stitch boundary (~9 s at stride 3)
-_STITCH_BASE_PX = 120.0     # allowed boundary distance at gap 0
-_STITCH_PX_PER_FRAME = 6.0  # allowed extra distance per frame of gap
+# Tight windows: the first calibration run (gap 75 ≈ 9 s, radius up to ~570 px)
+# turned the two busiest identities into magnets — #6 absorbed 17 fragments and
+# ballooned to 89 pre-cap passes (75% of all pass events). A stitch is only
+# trustworthy when the fragment is a near-immediate continuation.
+_STITCH_MAX_GAP = 25        # max processed-frame gap at the boundary (~3 s at stride 3)
+_STITCH_BASE_PX = 90.0      # allowed boundary distance at gap 0
+_STITCH_PX_PER_FRAME = 4.0  # allowed extra distance per frame of gap
 _STITCH_MIN_FRAMES = 2      # ignore 1-frame flickers
 _STITCH_OVERLAP_TOL = 2     # frames of interval overlap tolerated
+_STITCH_AMBIGUITY_MARGIN = 60.0  # best candidate must beat 2nd-best by this, else skip
 
 class StatsEngine:
     def __init__(self, frame_width=None, frame_height=None):
@@ -195,75 +200,108 @@ class StatsEngine:
             if tm:
                 jersey_color[jnum] = tm  # team assignment beats single-track color
 
+        unresolved = [tid for tid in info
+                      if tid not in track_to_jersey
+                      and info[tid]["n"] >= _STITCH_MIN_FRAMES
+                      and _dominant_player(tid)]
+        # Temporal order, so a fragment can chain onto one stitched just before
+        # it; the outer fixed-point loop below catches any remaining chains.
+        unresolved.sort(key=lambda t: info[t]["first"])
+
+        raw_reads = getattr(id_manager, "raw_read_counts", {}) or {}
+        additions = {}
+        ambiguous_skips = 0
+        for _pass in range(4):  # fixed-point: stitched fragments open new boundaries
+            progressed = False
+            for tid in [t for t in unresolved if t not in additions]:
+                jnum = self._stitch_candidate(tid, info, jersey_ivs, jersey_bounds,
+                                              jersey_color, track_colors, raw_reads)
+                if jnum is None:
+                    continue
+                if jnum == "_ambiguous":
+                    continue
+                e = info[tid]
+                additions[tid] = jnum
+                jersey_ivs[jnum].append((e["first"], e["last"]))
+                jersey_bounds[jnum].append((e["first"], e["fc"], "start"))
+                jersey_bounds[jnum].append((e["last"], e["lc"], "end"))
+                progressed = True
+            if not progressed:
+                break
+        # count ambiguous on the final state for the log
+        for tid in [t for t in unresolved if t not in additions]:
+            if self._stitch_candidate(tid, info, jersey_ivs, jersey_bounds,
+                                      jersey_color, track_colors, raw_reads) == "_ambiguous":
+                ambiguous_skips += 1
+        if additions:
+            per_jersey = defaultdict(int)
+            for jnum in additions.values():
+                per_jersey[jnum] += 1
+            print(f"[ResidualStitch] Stitched {len(additions)} unresolved fragments onto "
+                  f"{len(per_jersey)} existing jerseys ({ambiguous_skips} ambiguous skipped): "
+                  + ", ".join(f"#{j}+{c}" for j, c in sorted(per_jersey.items(), key=lambda x: str(x[0]))))
+        else:
+            print(f"[ResidualStitch] No unresolved fragments met the stitch constraints "
+                  f"({ambiguous_skips} ambiguous skipped)")
+        return additions
+
+    @staticmethod
+    def _stitch_candidate(tid, info, jersey_ivs, jersey_bounds, jersey_color,
+                          track_colors, raw_reads):
+        """Evaluate one unresolved fragment against every jersey's boundaries.
+        Returns the winning jersey, "_ambiguous" when the best two candidates
+        are closer than _STITCH_AMBIGUITY_MARGIN (a near-tie in a crowd is how
+        magnet misattribution happens), or None when nothing is feasible."""
+        e = info[tid]
+        tcol = track_colors.get(tid)
+
         def _overlaps(iv, ivs):
             for a, b in ivs:
                 if min(iv[1], b) - max(iv[0], a) > _STITCH_OVERLAP_TOL:
                     return True
             return False
 
-        unresolved = [tid for tid in info
-                      if tid not in track_to_jersey
-                      and info[tid]["n"] >= _STITCH_MIN_FRAMES
-                      and _dominant_player(tid)]
-        unresolved.sort(key=lambda t: -info[t]["n"])
-
-        raw_reads = getattr(id_manager, "raw_read_counts", {}) or {}
-        additions = {}
-        for tid in unresolved:
-            e = info[tid]
-            tcol = track_colors.get(tid)
-            best = None  # (score, jersey)
-            for jnum, ivs in jersey_ivs.items():
-                if _overlaps((e["first"], e["last"]), ivs):
+        candidates = []  # (score, jersey)
+        for jnum, ivs in jersey_ivs.items():
+            if _overlaps((e["first"], e["last"]), ivs):
+                continue
+            jcol = jersey_color.get(jnum)
+            if tcol and tcol != "Unknown" and jcol and tcol != jcol:
+                continue
+            # boundary continuity: fragment start after a jersey 'end', or
+            # fragment end before a jersey 'start'
+            feasible = None
+            for bt, bc, kind in jersey_bounds[jnum]:
+                if kind == "end":
+                    gap = e["first"] - bt
+                    pt = e["fc"]
+                else:
+                    gap = bt - e["last"]
+                    pt = e["lc"]
+                if gap < -_STITCH_OVERLAP_TOL or gap > _STITCH_MAX_GAP:
                     continue
-                jcol = jersey_color.get(jnum)
-                if tcol and tcol != "Unknown" and jcol and tcol != jcol:
+                gap = max(0, gap)
+                dist = math.hypot(pt[0] - bc[0], pt[1] - bc[1])
+                if dist > _STITCH_BASE_PX + _STITCH_PX_PER_FRAME * gap:
                     continue
-                # boundary continuity: fragment start after a jersey 'end', or
-                # fragment end before a jersey 'start'
-                feasible = None
-                for bt, bc, kind in jersey_bounds[jnum]:
-                    if kind == "end":
-                        gap = e["first"] - bt
-                        pt = e["fc"]
-                    else:
-                        gap = bt - e["last"]
-                        pt = e["lc"]
-                    if gap < -_STITCH_OVERLAP_TOL or gap > _STITCH_MAX_GAP:
-                        continue
-                    gap = max(0, gap)
-                    dist = math.hypot(pt[0] - bc[0], pt[1] - bc[1])
-                    if dist > _STITCH_BASE_PX + _STITCH_PX_PER_FRAME * gap:
-                        continue
-                    score = dist + 3.0 * gap
-                    if feasible is None or score < feasible:
-                        feasible = score
-                if feasible is None:
-                    continue
-                # weak jersey-read support for this number lowers the score
-                support = raw_reads.get(tid, {}).get(jnum, 0)
-                score = feasible - min(support, 5) * 25.0
-                if tcol and tcol != "Unknown" and tcol == jersey_color.get(jnum):
-                    score -= 40.0
-                if best is None or score < best[0]:
-                    best = (score, jnum)
-            if best is not None:
-                jnum = best[1]
-                additions[tid] = jnum
-                jersey_ivs[jnum].append((e["first"], e["last"]))
-                jersey_bounds[jnum].append((e["first"], e["fc"], "start"))
-                jersey_bounds[jnum].append((e["last"], e["lc"], "end"))
-
-        if additions:
-            per_jersey = defaultdict(int)
-            for jnum in additions.values():
-                per_jersey[jnum] += 1
-            print(f"[ResidualStitch] Stitched {len(additions)} unresolved fragments onto "
-                  f"{len(per_jersey)} existing jerseys: "
-                  + ", ".join(f"#{j}+{c}" for j, c in sorted(per_jersey.items(), key=lambda x: str(x[0]))))
-        else:
-            print("[ResidualStitch] No unresolved fragments met the stitch constraints")
-        return additions
+                score = dist + 3.0 * gap
+                if feasible is None or score < feasible:
+                    feasible = score
+            if feasible is None:
+                continue
+            # weak jersey-read support for this number lowers the score
+            support = raw_reads.get(tid, {}).get(jnum, 0)
+            score = feasible - min(support, 5) * 25.0
+            if tcol and tcol != "Unknown" and tcol == jersey_color.get(jnum):
+                score -= 40.0
+            candidates.append((score, jnum))
+        if not candidates:
+            return None
+        candidates.sort()
+        if (len(candidates) > 1
+                and candidates[1][0] - candidates[0][0] < _STITCH_AMBIGUITY_MARGIN):
+            return "_ambiguous"
+        return candidates[0][1]
 
     def _reconcile_roster(self, track_to_jersey, id_manager, team_map_ref):
         """Layer 2 — roster-anchored identity reconciliation.
