@@ -2514,7 +2514,22 @@ if __name__ == "__main__":
             id_manager.suppress_conflicts(online_targets, n)
 
             # Visualization
-            annotated_img = visualizer.draw_hud(img.copy(), frame_data, id_manager)
+            annotated_img = img.copy()
+            if writer:
+                # Review aid: RAW detections as thin gray boxes underneath the
+                # tracked overlay — during camera pans ByteTrack loses every
+                # confirmed track while the detector still sees the players,
+                # and without this the video reads as "detector blind" when it
+                # is actually "tracker reset" (the fragmentation problem).
+                try:
+                    if det_res.boxes is not None:
+                        for _rb in det_res.boxes:
+                            _rx1, _ry1, _rx2, _ry2 = map(int, _rb.xyxy[0].tolist())
+                            cv2.rectangle(annotated_img, (_rx1, _ry1), (_rx2, _ry2),
+                                          (160, 160, 160), 1)
+                except Exception:
+                    pass
+            annotated_img = visualizer.draw_hud(annotated_img, frame_data, id_manager)
             if writer:
                 writer.write(annotated_img)
             # NOTE: frame_data is already appended to all_frames at the end of the
