@@ -838,6 +838,43 @@ def fetch_pending_videos():
         return all_items  # Return whatever we got so far
 
 
+def _extract_video_roster(video_item, out_dir):
+    """Per-video roster (front-end integration): the matches-video record may
+    carry the roster inline (roster_json / rosterJSON / roster — dict or JSON
+    string) or as a URL (rosterURL / roster_url). Writes it to
+    out_dir/roster_input.json and returns that path, or None when the video
+    has no usable roster. Never raises — a bad roster must not block the run
+    (the pipeline then runs fully automatic)."""
+    try:
+        data = None
+        for key in ("roster_json", "rosterJSON", "roster"):
+            v = video_item.get(key)
+            if not v:
+                continue
+            data = json.loads(v) if isinstance(v, str) else v
+            break
+        if data is None:
+            url = video_item.get("rosterURL") or video_item.get("roster_url")
+            if url:
+                resp = requests.get(url, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+        if not isinstance(data, dict) or not data.get("teams"):
+            if data is not None:
+                print("[roster] Per-video roster present but has no 'teams' — ignoring")
+            return None
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "roster_input.json")
+        with open(path, "w") as f:
+            json.dump(data, f)
+        print(f"[roster] Per-video roster saved to {path} "
+              f"({len(data['teams'])} teams)")
+        return path
+    except Exception as e:
+        print(f"[roster] Per-video roster ignored (invalid): {e}")
+        return None
+
+
 def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None,
                          locking_mode=2, jnr_stride=None, vid_stride=None,
                          tracking_mode="bytetrack", make_video=False,
@@ -877,8 +914,13 @@ def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=Non
     out_dir = f"./output/{video_id}"
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
-    
-    # Process using the new unified wrapper
+
+    # Per-video roster beats the process-wide --roster_file; no roster at all
+    # -> fully automatic run.
+    video_roster = _extract_video_roster(video_item, out_dir)
+    if video_roster:
+        roster_file = video_roster
+
     # Process using the new unified wrapper
     success = run_pipeline(
         video_path=spaces_url,
