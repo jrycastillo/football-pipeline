@@ -2864,6 +2864,16 @@ if __name__ == "__main__":
     # its own tracked fragments, not a copy.
 
 
+    # Derived-stats enrichment: Babak's basic-stats contract (percent/ratio/
+    # per-90 fields, GK save totals, clean sheets) — pure formulas over the
+    # counters above; see stats/derived.py for the spreadsheet mapping.
+    try:
+        from stats.derived import enrich_player_stats
+        enrich_player_stats(player_stats, _event_logic.EFF_FPS)
+        log("Derived stats enrichment applied (spreadsheet contract fields)")
+    except Exception as e:
+        log(f"Derived stats enrichment failed (non-fatal): {e}")
+
     # Save Player Stats
     with open(os.path.join(output_dir, "player_stats.json"), "w") as f:
         json.dump(player_stats, f, indent=2)
