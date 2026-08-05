@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import torch
 from sklearn.cluster import KMeans
-from collections import Counter
+from collections import Counter, defaultdict
 from transformers import SiglipImageProcessor, SiglipVisionModel
 from PIL import Image
 
