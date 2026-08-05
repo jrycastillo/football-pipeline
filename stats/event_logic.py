@@ -836,6 +836,17 @@ class AdvancedEventDetector:
                             if not self._gk_near_point(i, _g, window=_gk_w,
                                                        near_px=self.frame_width * 0.25):
                                 continue
+                            # ...but if a keeper is essentially ON the ball, the
+                            # KEEPER HAS it — a catch, goal-kick or distribution,
+                            # not a shot. Crediting the keeper as the shooter (the
+                            # last possessor) is exactly the #28-in-the-goal false
+                            # positive. Radius measured on the clip: the keeper
+                            # HOLDING the ball is ~1% of frame width away, a real
+                            # goal that beat the keeper is ~3% — so 2% separates
+                            # them and still keeps the goal.
+                            if self._gk_near_point(i, p2, window=_gk_w,
+                                                   near_px=self.frame_width * 0.02):
+                                continue
                         # Visual gates passed: a fast ball toward a keeper-defended,
                         # DETECTED goal. This is stronger evidence than the pitch
                         # projection, so the homography gates below are skipped —
