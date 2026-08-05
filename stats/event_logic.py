@@ -816,6 +816,16 @@ class AdvancedEventDetector:
                         # remaining source of false shots after the near-goal gate.
                         if _d2 > _gnear or _d2 >= _d1:
                             continue
+                        # SUSTAINED APPROACH — the ball must be closer to the goal
+                        # now than ~0.6s ago. A goalkeeper distribution / clearance
+                        # near the OWN goal moves AWAY over that window even when a
+                        # 2-frame jitter looks like it is approaching (this is what
+                        # made GK passes register as shots). A real shot approaches
+                        # the goal over the whole run-up.
+                        _wb = max(2, int(EFF_FPS * 0.6))
+                        _pe = ev_bt[i - _wb] if i - _wb >= 0 else None
+                        if _pe is not None and math.hypot(_pe[0] - _g[0], _pe[1] - _g[1]) <= _d2:
+                            continue
                         # GOALKEEPER CORROBORATION (Babak: precision on true shots
                         # on goal). The target goal must be DEFENDED — a keeper
                         # within 25% frame width of it confirms it's the real goal
