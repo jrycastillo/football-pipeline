@@ -22,7 +22,7 @@ import os
 # Default clip-worthy types: the confirmed highlight events. Ball touches are
 # also clippable (--types touch) but produce hundreds of clips per match, so
 # they stay opt-in until the product decision on portal clip types is made.
-DEFAULT_CLIP_TYPES = ("goal", "shot", "save")
+DEFAULT_CLIP_TYPES = ("goal", "assist", "shot", "save")
 _FFMPEG_PROBED = False
 _FFMPEG_PATH = None
 _FFMPEG_UNAVAILABLE_WARNED = False
@@ -118,7 +118,9 @@ def _write_clip_ffmpeg(cap, clip_path, start, end, fps, width, height, ffmpeg_pa
             if not ok:
                 break
             if draw_hook is not None:
-                draw_hook(frame, start + off)
+                out = draw_hook(frame, start + off)
+                if out is not None:
+                    frame = out
             proc.stdin.write(frame.tobytes())
             written += 1
         proc.stdin.close()
@@ -154,7 +156,9 @@ def _write_clip_mp4v(cv2, cap, clip_path, start, end, fps, width, height, draw_h
         if not ok:
             break
         if draw_hook is not None:
-            draw_hook(frame, start + off)
+            out = draw_hook(frame, start + off)
+            if out is not None:
+                frame = out
         writer.write(frame)
         written += 1
     writer.release()
@@ -200,38 +204,342 @@ def _build_frame_boxes(all_frames, vid_stride):
     return fb
 
 
-def _make_draw_hook(cv2, frame_boxes, player_id, stride, label):
-    """Return a draw_hook(frame, src_idx) that boxes the event player. Uses the
-    nearest processed frame's box for the player (frames between strides reuse
-    the closest sampled box)."""
+def _build_frame_balls(all_frames, vid_stride):
+    """Map source-frame index -> ball center (cx, cy) from the cls-32 ball boxes
+    the pipeline writes per frame. Zoom re-acquisition balls are skipped — they
+    are a possession-rescue heuristic, not a clean position (see metrics.py). At
+    most one ball per frame: the highest-confidence detection."""
+    fb = {}
+    for idx, f in enumerate(all_frames or []):
+        src = (idx + 1) * max(1, vid_stride)
+        best = None  # (conf, cx, cy)
+        for b in f.get("boxes", []):
+            if b.get("cls") != 32 or b.get("zoom"):
+                continue
+            xy = b.get("xyxy")
+            if not xy:
+                continue
+            conf = b.get("conf") or 0.0
+            if best is None or conf > best[0]:
+                best = (conf, (xy[0] + xy[2]) * 0.5, (xy[1] + xy[3]) * 0.5)
+        if best is not None:
+            fb[src] = (best[1], best[2])
+    return _stabilize_ball_track(fb, max(1, vid_stride))
+
+
+def _build_frame_class_boxes(all_frames, vid_stride, cls):
+    """Map source-frame index -> highest-confidence box (x1,y1,x2,y2) of a given
+    class. Used for the detected goal (cls 33) and goalkeeper (cls 1) so shot
+    clips can show the ball heading to a keeper-defended goal."""
+    fb = {}
+    for idx, f in enumerate(all_frames or []):
+        src = (idx + 1) * max(1, vid_stride)
+        best = None  # (conf, box)
+        for b in f.get("boxes", []):
+            if b.get("cls") != cls:
+                continue
+            xy = b.get("xyxy")
+            if not xy:
+                continue
+            conf = b.get("conf") or 0.0
+            if best is None or conf > best[0]:
+                best = (conf, tuple(float(v) for v in xy))
+        if best is not None:
+            fb[src] = best[1]
+    return fb
+
+
+def _nearest_class_box(frame_boxes, src_idx, window):
+    """The class box at the sampled frame nearest src_idx within +/- window
+    source frames (goals/keepers are near-static, so a small window is fine)."""
+    if not frame_boxes:
+        return None
+    best = None
+    for k, box in frame_boxes.items():
+        d = abs(k - src_idx)
+        if d <= window and (best is None or d < best[0]):
+            best = (d, box)
+    return best[1] if best else None
+
+
+def _stabilize_ball_track(fb, stride):
+    """Reject implausible-jump ball detections so the drawn ball moves smoothly.
+
+    The ball detector occasionally fires on a white shirt or a pitch line far
+    from the real ball for a single frame — the marker then teleports across the
+    pitch and back ("jumping"). A real ball can't move more than a bounded
+    pixel distance between detections, so we walk the detections in time order
+    and drop any that jump faster than that ceiling from the last accepted
+    position. The track re-seeds after a long stale gap so a genuine relocation
+    (throw-in, restart on the far side) is not rejected forever."""
+    if len(fb) < 3:
+        return fb
+    MAX_PX_PER_SRC_FRAME = 55.0    # generous ceiling for real ball motion @1080p
+    BASE_PX = 45.0                 # slack for jitter on a near-static ball
+    reseed_gap = 30 * stride       # src frames with no accepted ball -> trust next
+    out, last_k, last_p, dropped = {}, None, None, 0
+    for k in sorted(fb.keys()):
+        p = fb[k]
+        if last_p is None:
+            out[k] = p; last_k, last_p = k, p; continue
+        gap = k - last_k
+        d = ((p[0] - last_p[0]) ** 2 + (p[1] - last_p[1]) ** 2) ** 0.5
+        if d <= BASE_PX + MAX_PX_PER_SRC_FRAME * gap or gap > reseed_gap:
+            out[k] = p; last_k, last_p = k, p
+        else:
+            dropped += 1  # teleport -> false positive, keep the smooth track
+    if dropped:
+        print(f"[Clipper] ball track: dropped {dropped} jump/outlier detection(s) "
+              f"of {len(fb)} for a stable overlay")
+    return out
+
+
+def _make_ball_lookup(frame_balls, stride):
+    """Return ball_at(src_idx) -> (x, y, is_real) or None. Interpolates between
+    detections (matching the pipeline's ball track), but only across gaps up to
+    the pipeline's MAX_GAP (25 processed frames): a larger gap means the ball is
+    genuinely lost, and we draw nothing rather than inventing a position. is_real
+    is True when the bracketing detections are consecutive samples (real tracked
+    motion) and False when interpolated across a detection gap."""
+    if not frame_balls:
+        return None
+    bkeys = sorted(frame_balls.keys())
+    max_gap = 25 * max(1, stride)
+
+    def ball_at(src_idx):
+        if src_idx in frame_balls:
+            x, y = frame_balls[src_idx]
+            return (x, y, True)
+        lo = hi = None
+        for k in bkeys:
+            if k <= src_idx:
+                lo = k
+            else:
+                hi = k
+                break
+        if lo is None or hi is None or hi - lo > max_gap:
+            return None
+        t = (src_idx - lo) / (hi - lo)
+        (lx, ly), (hx, hy) = frame_balls[lo], frame_balls[hi]
+        return (lx + (hx - lx) * t, ly + (hy - ly) * t, hi - lo <= stride)
+
+    return ball_at
+
+
+def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
+                    zoom=False, frame_balls=None, frame_goals=None, frame_gks=None):
+    """Return a draw_hook(frame, src_idx) that boxes the event player, LOCKED to
+    a single moving target. When zoom=True the hook also crops tight on the
+    player's torso (from the real box coordinates, so it is immune to the
+    coloured advertising boards that fool pixel-based re-zooming) and upscales
+    to the clip's frame size — returning the transformed frame.
+
+    When frame_balls is supplied the hook also overlays the tracked ball (green
+    marker) and a line from the event player to it, so the clip visually proves
+    the event is ball-grounded. A solid marker is a real detection at that frame;
+    a hollow ring is interpolated across a detection gap; nothing is drawn when
+    the ball is genuinely lost (gap > pipeline MAX_GAP).
+
+    The box is anchored on the ACTOR — the box nearest the ball at the event
+    frame, which is exactly the owner the event engine credited. This is robust
+    to the id-space mismatch (debug_all_frames boxes carry raw ByteTrack track
+    ids; events carry remapped jersey numbers) that made id-matching land on the
+    wrong player or none. It then follows that box by spatial nearest-neighbour
+    across the clip, interpolating gaps, so the highlight stays glued to the
+    actor. When no ball is available it falls back to id-matching (correct when
+    box ids already ARE jersey numbers, i.e. after the production remap).
+    """
     if not frame_boxes or player_id is None:
         return None
     keys = sorted(frame_boxes.keys())
-    drew = {"any": False}
+    if not keys:
+        return None
+    drew = {"any": False, "ball": 0}
+    ball_at = _make_ball_lookup(frame_balls, stride)
 
-    def _nearest_box(src_idx):
-        # nearest sampled source frame within one stride
-        best, bestd = None, stride + 1
-        lo = src_idx - stride
-        for k in keys:
-            if k < lo:
+    def _center(b):
+        return ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5)
+
+    def _feet(b):
+        return ((b[0] + b[2]) * 0.5, b[3])   # bottom-centre = where the ball is
+
+    def _dist(a, b):
+        (ax, ay), (bx, by) = _center(a), _center(b)
+        return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+    def _dist_pt(box, pt):
+        cx, cy = _center(box)
+        return ((cx - pt[0]) ** 2 + (cy - pt[1]) ** 2) ** 0.5
+
+    def _dist_feet(box, pt):
+        fx, fy = _feet(box)
+        return ((fx - pt[0]) ** 2 + (fy - pt[1]) ** 2) ** 0.5
+
+    # 1. Anchor on the ACTOR: the box nearest the ball at the event frame. That
+    # is precisely the "owner" the event engine credited (ownership = nearest
+    # player to the ball), so it is robust to the box-id / jersey-number mismatch
+    # — debug_all_frames boxes carry raw ByteTrack track ids, but events carry
+    # remapped jersey numbers, so matching player_id against box ids lands on the
+    # wrong player (or none). Nearest-to-ball needs no id agreement.
+    anchor_src = event_src if event_src is not None else keys[len(keys) // 2]
+    anchor_i, anchor_box = None, None
+    if ball_at is not None:
+        for k in sorted(keys, key=lambda kk: abs(kk - anchor_src)):
+            bp = ball_at(k)
+            if bp is None:
                 continue
-            if k > src_idx + stride:
+            best, bestd = None, 1e18
+            for b in frame_boxes[k].values():
+                d = _dist_feet(b, bp)   # the carrier's FEET are on the ball, not their torso
+                if d < bestd:
+                    best, bestd = b, d
+            # Ownership only fires when a player is near the ball; a huge nearest
+            # distance means no plausible owner in this sampled frame — keep
+            # scanning outward for one before giving up.
+            if best is not None and bestd <= 500.0:
+                anchor_i, anchor_box = keys.index(k), best
                 break
-            d = abs(k - src_idx)
-            if d < bestd and player_id in frame_boxes[k]:
-                best, bestd = frame_boxes[k][player_id], d
-        return best
+    # 1b. Fallback (no ball, or no owner found): the old id-match anchor. Works
+    # when box ids ARE jersey numbers (production, orchestrator remap applied).
+    if anchor_box is None:
+        for k in sorted(keys, key=lambda kk: abs(kk - anchor_src)):
+            if player_id in frame_boxes[k]:
+                anchor_i, anchor_box = keys.index(k), frame_boxes[k][player_id]
+                break
+    if anchor_box is None:
+        return None  # no owner and player never detected -> draw nothing
+
+    # Jump gate scaled to the player's size: a player won't move more than a
+    # couple of body-lengths between sampled frames, so a larger step is an id
+    # collision, not real motion.
+    max_jump = max(120.0, 2.2 * max(anchor_box[3] - anchor_box[1], 40))
+
+    # 2. Walk out from the anchor in both directions, tracking by proximity.
+    track = {keys[anchor_i]: anchor_box}
+    for step in (1, -1):
+        prev = anchor_box
+        j = anchor_i + step
+        while 0 <= j < len(keys):
+            boxes = frame_boxes[keys[j]]
+            if player_id in boxes and _dist(boxes[player_id], prev) <= max_jump:
+                cand = boxes[player_id]                    # trust the label when plausible
+            else:
+                cand, bestd = None, max_jump               # else nearest box of any id
+                for b in boxes.values():
+                    d = _dist(b, prev)
+                    if d < bestd:
+                        cand, bestd = b, d
+            if cand is not None:
+                track[keys[j]] = cand
+                prev = cand
+            j += step
+
+    tkeys = sorted(track.keys())
+
+    def _interp_box(src_idx):
+        if src_idx <= tkeys[0]:
+            return track[tkeys[0]]
+        if src_idx >= tkeys[-1]:
+            return track[tkeys[-1]]
+        lo = max(k for k in tkeys if k <= src_idx)
+        hi = min(k for k in tkeys if k >= src_idx)
+        if hi == lo:
+            return track[lo]
+        a, b = track[lo], track[hi]
+        t = (src_idx - lo) / (hi - lo)
+        return tuple(a[i] + (b[i] - a[i]) * t for i in range(4))
+
+    # Constant zoom window sized to the player: ~3x the median tracked box
+    # height, keeping the clip's aspect ratio. Recomputed per clip.
+    _bhs = sorted(b[3] - b[1] for b in track.values())
+    crop_h0 = (_bhs[len(_bhs) // 2] if _bhs else 300.0) * 3.0
+
+    # Temporal smoothing state so the box and ball GLIDE instead of jittering
+    # frame-to-frame (raw detections wobble a few px each frame). EMA: a lower
+    # alpha is smoother but lags more; the ball resets on loss so it does not
+    # slide from a stale position when it re-appears.
+    _sm = {"box": None, "ball": None}
+    _BOX_ALPHA, _BALL_ALPHA = 0.4, 0.5
 
     def hook(frame, src_idx):
-        box = _nearest_box(src_idx)
+        box = _interp_box(src_idx)
         if not box:
-            return
-        x1, y1, x2, y2 = box
+            return None
+        if _sm["box"] is None:
+            _sm["box"] = list(box)
+        else:
+            _sm["box"] = [_BOX_ALPHA * box[k] + (1 - _BOX_ALPHA) * _sm["box"][k]
+                          for k in range(4)]
+        box = _sm["box"]
+        x1, y1, x2, y2 = (int(round(v)) for v in box)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 215, 255), 3)
         cv2.putText(frame, label, (x1, max(0, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2, cv2.LINE_AA)
         drew["any"] = True
+
+        # Shot context: draw the detected goal (red) and goalkeeper (pink) so a
+        # shot clip reads as "ball -> keeper-defended goal" — the exact thing the
+        # shot gate now requires. Only when supplied (shot clips), so other
+        # events stay uncluttered.
+        if frame_goals:
+            gb = _nearest_class_box(frame_goals, src_idx, 6 * stride)
+            if gb:
+                gx1, gy1, gx2, gy2 = (int(round(v)) for v in gb)
+                cv2.rectangle(frame, (gx1, gy1), (gx2, gy2), (40, 40, 235), 2)
+                cv2.putText(frame, "GOAL", (gx1, max(12, gy1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 40, 235), 2, cv2.LINE_AA)
+        if frame_gks:
+            kb = _nearest_class_box(frame_gks, src_idx, 6 * stride)
+            if kb:
+                kx1, ky1, kx2, ky2 = (int(round(v)) for v in kb)
+                cv2.rectangle(frame, (kx1, ky1), (kx2, ky2), (203, 92, 255), 2)
+                cv2.putText(frame, "GK", (kx1, max(12, ky1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (203, 92, 255), 2, cv2.LINE_AA)
+
+        # Ball overlay: draw the tracked ball, so the clip visually proves the
+        # event is ball-grounded. Drawn in full-frame coords BEFORE any zoom
+        # crop, so it scales with the crop. Solid marker = ball really tracked
+        # here; hollow ring = interpolated across a detection gap.
+        # The ownership line (player -> ball) is drawn ONLY while the ball is
+        # close enough to be owned; a long cross-pitch line would just mean the
+        # ball is elsewhere (before/after possession), which is noise, not signal.
+        if ball_at is not None:
+            bp = ball_at(src_idx)
+            if bp is not None:
+                # EMA-smooth the drawn ball so it glides. A big jump (a re-acquire
+                # after a loss, or a real fast kick) snaps instead of lagging.
+                _rx, _ry, is_real = bp[0], bp[1], bp[2]
+                if _sm["ball"] is None or ((_rx - _sm["ball"][0]) ** 2 + (_ry - _sm["ball"][1]) ** 2) ** 0.5 > 120:
+                    _sm["ball"] = [_rx, _ry]
+                else:
+                    _sm["ball"] = [_BALL_ALPHA * _rx + (1 - _BALL_ALPHA) * _sm["ball"][0],
+                                   _BALL_ALPHA * _ry + (1 - _BALL_ALPHA) * _sm["ball"][1]]
+                bx, by = int(round(_sm["ball"][0])), int(round(_sm["ball"][1]))
+                pcx, pcy = (x1 + x2) // 2, (y1 + y2) // 2
+                own_px = max(220.0, 2.5 * max(y2 - y1, 40))
+                if _dist_pt(box, (bx, by)) <= own_px:
+                    cv2.line(frame, (pcx, pcy), (bx, by), (0, 215, 255), 2, cv2.LINE_AA)
+                cv2.circle(frame, (bx, by), 10, (0, 0, 0),
+                           -1 if is_real else 2, cv2.LINE_AA)
+                cv2.circle(frame, (bx, by), 7, (60, 245, 60),
+                           -1 if is_real else 2, cv2.LINE_AA)
+                drew["ball"] += 1
+            else:
+                _sm["ball"] = None  # ball genuinely lost -> reset so it doesn't slide on return
+
+        if not zoom:
+            return None
+        # Crop tight on the torso (upper third of the box) and upscale to the
+        # clip's frame size. Uses the box coords, not colour detection.
+        h, w = frame.shape[:2]
+        crop_h = int(min(max(crop_h0, 200), h))
+        crop_w = int(min(max(crop_h * w / float(h), 200), w))
+        cx = (x1 + x2) / 2.0
+        cy = y1 + 0.30 * max(y2 - y1, 40)
+        left = int(min(max(cx - crop_w / 2.0, 0), w - crop_w))
+        top = int(min(max(cy - crop_h / 2.0, 0), h - crop_h))
+        crop = frame[top:top + crop_h, left:left + crop_w]
+        return cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
 
     hook.drew = drew  # inspect after writing to tally clips that got a box
     return hook
@@ -239,7 +547,9 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label):
 
 def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
                 event_types=DEFAULT_CLIP_TYPES, min_conf=None, max_conf=None,
-                max_clips=200, codec="h264", frame_boxes=None):
+                max_clips=200, codec="h264", frame_boxes=None, zoom=False,
+                valid_players=None, require_box=False, frame_balls=None,
+                clean_passes=True, frame_goals=None, frame_gks=None):
     """Write pad_s-padded clips for selected events + clips_manifest.json.
 
     events: the pipeline event list (raw_tracks.json content).
@@ -265,6 +575,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     pad_frames = int(round(pad_s * fps))
 
     selected = []
+    _dropped_pass = 0
+    _dropped_trackid = 0
     for ev in events:
         if not isinstance(ev, dict) or ev.get("type") not in event_types:
             continue
@@ -273,7 +585,79 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             continue
         if max_conf is not None and conf is not None and conf > max_conf:
             continue
+        # Drop events involving an unresolved track id (>99 — not a jersey) in
+        # ANY role (actor OR duel partner OR receiver). Jersey numbers are <=99,
+        # so a value above that is a raw ByteTrack fragment that never resolved
+        # to a player; one such fragment otherwise leaks into several events it
+        # cannot be attributed to (e.g. #108 -> a pass, a dribble, an interception).
+        if any(isinstance(v, (int, float)) and v > 99
+               for v in (ev.get(k) for k in ("player", "by", "from", "against", "on", "to"))):
+            _dropped_trackid += 1
+            continue
+        # Clean-pass filter: a "pass" highlight must be a genuine, completed pass
+        # to a teammate. Drop the misleading cases —
+        #   - complete is False -> the ball was intercepted; that moment is
+        #     already emitted as an interception by the opponent, so clipping it
+        #     as a "pass" double-represents it and looks false.
+        #   - the receiver is an unresolved track id (>99, not a jersey) -> we
+        #     can't say who received it, so it isn't a trustworthy pass clip.
+        if clean_passes and ev.get("type") in ("pass", "cross"):
+            if ev.get("complete") is False:
+                _dropped_pass += 1
+                continue
+            _to = ev.get("to")
+            if isinstance(_to, (int, float)) and _to > 99:
+                _dropped_pass += 1
+                continue
         selected.append(ev)
+    if _dropped_pass:
+        print(f"[Clipper] dropped {_dropped_pass} pass/cross events "
+              "(intercepted or unresolved receiver)")
+    if _dropped_trackid:
+        print(f"[Clipper] dropped {_dropped_trackid} events with an "
+              "unresolved track-id participant")
+
+    # Duel dedup: a FAILED dribble emits BOTH a "dribble" and a mirror "tackle"
+    # at the same frame (event_logic) — one physical duel between the same two
+    # players. Clipping both makes two clips of the same moment that look like a
+    # false duplicate. Keep the higher-confidence one of each duel.
+    _kept, _duel_at = [], {}
+    _dropped_dup = 0
+    for ev in selected:
+        et = ev.get("type")
+        if et in ("dribble", "tackle"):
+            pair = frozenset((ev.get("player") if et == "dribble" else ev.get("by"),
+                              ev.get("against") if et == "dribble" else ev.get("on")))
+            key = (ev.get("frame"), pair)
+            prev = _duel_at.get(key)
+            if prev is not None:
+                if (ev.get("confidence") or 0) > (_kept[prev].get("confidence") or 0):
+                    _kept[prev] = ev
+                _dropped_dup += 1
+                continue
+            _duel_at[key] = len(_kept)
+        _kept.append(ev)
+    selected = _kept
+    if _dropped_dup:
+        print(f"[Clipper] deduped {_dropped_dup} duplicate duel events "
+              "(same-frame dribble+tackle -> kept the higher-confidence one)")
+
+    # Content filter: only clip events attributed to a valid (roster) player.
+    # Drops referee / track-id / off-roster attributions — e.g. a "tackle"
+    # credited to #97 that is really a referee, or a track id that never
+    # resolved to a jersey number.
+    if valid_players is not None:
+        def _rostered(e):
+            try:
+                return int(_event_player(e)) in valid_players
+            except (TypeError, ValueError):
+                return False
+        _before = len(selected)
+        selected = [e for e in selected if _rostered(e)]
+        if _before - len(selected):
+            print(f"[Clipper] dropped {_before - len(selected)} events with "
+                  "off-roster / unresolved player ids")
+
     # Sort by frame so the capture only ever seeks forward
     selected.sort(key=lambda e: e.get("frame", 0))
     if len(selected) > max_clips:
@@ -305,7 +689,9 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
 
     manifest = []
     clips_with_box = 0
-    for idx, ev in enumerate(selected):
+    clips_with_ball = 0
+    kept = 0
+    for ev in selected:
         src_frame = (int(ev.get("frame", 0)) + 1) * max(1, vid_stride)
         start = max(0, src_frame - pad_frames)
         end = src_frame + pad_frames
@@ -315,14 +701,34 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             continue
 
         player = _event_player(ev)
-        name = f"{idx:03d}_{ev['type']}_p{player}_f{src_frame}.mp4"
-        clip_path = os.path.join(clips_dir, name)
+
+        # Label the box with the event; if the event carries a goal-gate verdict
+        # (goal_confirmed, added by stats.goal_gate) surface it, so a shot clip
+        # says up front whether a real goal was seen near the ball.
+        label = f"#{player} {ev['type']}"
+        if ev.get("type") == "shot" and "goal_confirmed" in ev:
+            label += " [ON GOAL]" if ev["goal_confirmed"] else " [NO GOAL NEARBY]"
 
         # Highlight the event player with a bounding box (keeps the full-frame
         # context so the admin can verify the play, not just the player).
+        # Shot clips also get the goal + goalkeeper drawn, so the shot reads as
+        # "ball -> keeper-defended goal" (Babak: focus on true shots on goal).
+        _is_shot = ev.get("type") == "shot"
         draw_hook = _make_draw_hook(
             cv2, frame_boxes, player, max(1, vid_stride),
-            label=f"#{player} {ev['type']}")
+            label=label, event_src=src_frame, zoom=zoom,
+            frame_balls=frame_balls,
+            frame_goals=frame_goals if _is_shot else None,
+            frame_gks=frame_gks if _is_shot else None)
+
+        # With require_box on, skip events whose player is never tracked in the
+        # clip window (draw_hook is None) — no highlightable subject, so a
+        # full-frame clip the admin can't act on. Removes the "no box" clips.
+        if require_box and draw_hook is None:
+            continue
+
+        name = f"{kept:03d}_{ev['type']}_p{player}_f{src_frame}.mp4"
+        clip_path = os.path.join(clips_dir, name)
 
         written, actual_codec = _write_clip(
             cv2, cap, clip_path, start, end, fps, width, height,
@@ -332,9 +738,13 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             _remove_file_quiet(clip_path)
             continue
 
-        boxed = bool(draw_hook is not None and getattr(draw_hook, "drew", {}).get("any"))
+        _drew = getattr(draw_hook, "drew", {}) if draw_hook is not None else {}
+        boxed = bool(_drew.get("any"))
+        ball_frames = int(_drew.get("ball", 0))
         if boxed:
             clips_with_box += 1
+        if ball_frames:
+            clips_with_ball += 1
 
         manifest.append({
             "clip": os.path.join("clips", name),
@@ -352,7 +762,9 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             "clip_start_s": round(start / fps, 2),
             "clip_end_s": round(end / fps, 2),
             "player_boxed": boxed,
+            "ball_frames": ball_frames,
         })
+        kept += 1
 
     cap.release()
 
@@ -360,7 +772,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
     box_note = f", {clips_with_box} with player box" if frame_boxes else ""
-    print(f"[Clipper] Wrote {len(manifest)} clip(s){box_note} to {clips_dir} "
+    ball_note = f", {clips_with_ball} showing the ball" if frame_balls else ""
+    print(f"[Clipper] Wrote {len(manifest)} clip(s){box_note}{ball_note} to {clips_dir} "
           "+ clips_manifest.json")
     return manifest
 
@@ -382,11 +795,55 @@ if __name__ == "__main__":
                         help="e.g. 0.75 → only low-confidence events (admin review queue)")
     parser.add_argument("--codec", choices=("h264", "mp4v"), default="h264",
                         help="Clip encoder: h264 via ffmpeg when available, or OpenCV mp4v")
+    parser.add_argument("--all_frames", default=None,
+                        help="debug_all_frames.json — enables the locked highlight box "
+                             "on the event player (omit to clip without boxes)")
+    parser.add_argument("--zoom", action="store_true",
+                        help="crop tight on the event player (needs --all_frames)")
+    parser.add_argument("--max_clips", type=int, default=200,
+                        help="cap the number of clips (per invocation)")
+    parser.add_argument("--roster", default=None,
+                        help="roster_input.json — only clip events for players on the roster")
+    parser.add_argument("--require_box", action="store_true",
+                        help="skip events whose player is not tracked at the event frame")
+    parser.add_argument("--no_ball", action="store_true",
+                        help="do NOT overlay the tracked ball + ownership line (needs --all_frames)")
+    parser.add_argument("--include_incomplete_passes", action="store_true",
+                        help="also clip intercepted / unresolved-receiver passes (off by default)")
     args = parser.parse_args()
+
+    valid_players = None
+    if args.roster:
+        _rj = json.load(open(args.roster))
+        valid_players = set()
+        for _t in (_rj.get("teams") or {}).values():
+            for _n in (_t.get("roster") or []):
+                try:
+                    valid_players.add(int(_n))
+                except (TypeError, ValueError):
+                    pass
+        print(f"[Clipper] roster filter: {len(valid_players)} valid jersey numbers")
 
     with open(args.events) as f:
         event_list = json.load(f)
+    frame_boxes = None
+    frame_balls = None
+    frame_goals = None
+    frame_gks = None
+    if args.all_frames:
+        with open(args.all_frames) as f:
+            _all = json.load(f)
+        frame_boxes = _build_frame_boxes(_all, args.vid_stride)
+        if not args.no_ball:
+            frame_balls = _build_frame_balls(_all, args.vid_stride)
+        # goal (cls 33) + goalkeeper marker (cls 34) boxes for shot-clip context
+        frame_goals = _build_frame_class_boxes(_all, args.vid_stride, 33)
+        frame_gks = _build_frame_class_boxes(_all, args.vid_stride, 34)
     clip_events(args.video, event_list, args.output_dir,
                 vid_stride=args.vid_stride, pad_s=args.pad_s,
                 event_types=tuple(t.strip() for t in args.types.split(",") if t.strip()),
-                min_conf=args.min_conf, max_conf=args.max_conf, codec=args.codec)
+                min_conf=args.min_conf, max_conf=args.max_conf, codec=args.codec,
+                frame_boxes=frame_boxes, zoom=args.zoom, max_clips=args.max_clips,
+                valid_players=valid_players, require_box=args.require_box,
+                frame_balls=frame_balls, clean_passes=not args.include_incomplete_passes,
+                frame_goals=frame_goals, frame_gks=frame_gks)
