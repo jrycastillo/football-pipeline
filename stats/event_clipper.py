@@ -16,6 +16,7 @@ Standalone use (re-clip from a finished run without re-running the pipeline):
         --output_dir output/run --types goal,shot,save --vid_stride 3
 """
 
+import bisect
 import json
 import os
 
@@ -204,6 +205,29 @@ def _build_frame_boxes(all_frames, vid_stride):
     return fb
 
 
+def _load_track_jersey(output_dir):
+    """Read track_jersey.json (written by the pipeline) -> {track_id: label},
+    where label is '#<jersey>' when the track locked a number, else ''. Lets the
+    clipper tag EVERY player box with its jersey, not just the actor. Returns {}
+    when the file is absent (older runs) — boxes then show only 'T<id>'."""
+    import json
+    path = os.path.join(output_dir or "", "track_jersey.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        raw = json.load(open(path))
+    except Exception:
+        return {}
+    out = {}
+    for tid, info in (raw or {}).items():
+        try:
+            jn = info.get("jersey") if isinstance(info, dict) else info
+            out[int(tid)] = f"#{jn}" if jn is not None else ""
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _build_frame_balls(all_frames, vid_stride):
     """Map source-frame index -> ball center (cx, cy) from the cls-32 ball boxes
     the pipeline writes per frame. Zoom re-acquisition balls are skipped — they
@@ -327,7 +351,8 @@ def _make_ball_lookup(frame_balls, stride):
 
 
 def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
-                    zoom=False, frame_balls=None, frame_goals=None, frame_gks=None):
+                    zoom=False, frame_balls=None, frame_goals=None, frame_gks=None,
+                    track_jersey=None, draw_all_boxes=False):
     """Return a draw_hook(frame, src_idx) that boxes the event player, LOCKED to
     a single moving target. When zoom=True the hook also crops tight on the
     player's torso (from the real box coordinates, so it is immune to the
@@ -472,6 +497,31 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
                           for k in range(4)]
         box = _sm["box"]
         x1, y1, x2, y2 = (int(round(v)) for v in box)
+
+        # Context boxes: every OTHER tracked player in this frame, drawn in cyan
+        # (distinct from the actor's amber) and labelled "T{track_id} #{jersey}"
+        # — jersey only when that track locked a number. Drawn first so the
+        # actor's amber box lands on top. Uses the nearest sampled frame (boxes
+        # exist only every `stride` frames); the actor's own box is skipped by
+        # nearest-centre match so it isn't double-drawn under the highlight.
+        if draw_all_boxes and keys:
+            _pos = bisect.bisect_left(keys, src_idx)
+            _cand = [keys[i] for i in (_pos - 1, _pos) if 0 <= i < len(keys)]
+            _nk = min(_cand, key=lambda k: abs(k - src_idx)) if _cand else None
+            if _nk is not None and abs(_nk - src_idx) <= stride:
+                _ex, _ey = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+                for _tid, _b in frame_boxes[_nk].items():
+                    bx1, by1, bx2, by2 = (int(round(v)) for v in _b)
+                    if abs((bx1 + bx2) * 0.5 - _ex) < 30 and abs((by1 + by2) * 0.5 - _ey) < 30:
+                        continue  # this is the actor — drawn amber below
+                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (255, 200, 0), 2)
+                    _lab = f"T{_tid}"
+                    _j = track_jersey.get(_tid, "") if track_jersey else ""
+                    if _j:
+                        _lab += f" {_j}"
+                    cv2.putText(frame, _lab, (bx1, max(10, by1 - 5)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1, cv2.LINE_AA)
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 215, 255), 3)
         cv2.putText(frame, label, (x1, max(0, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2, cv2.LINE_AA)
@@ -549,7 +599,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
                 event_types=DEFAULT_CLIP_TYPES, min_conf=None, max_conf=None,
                 max_clips=200, codec="h264", frame_boxes=None, zoom=False,
                 valid_players=None, require_box=False, frame_balls=None,
-                clean_passes=True, frame_goals=None, frame_gks=None):
+                clean_passes=True, frame_goals=None, frame_gks=None,
+                track_jersey=None, draw_all_boxes=False):
     """Write pad_s-padded clips for selected events + clips_manifest.json.
 
     events: the pipeline event list (raw_tracks.json content).
@@ -719,7 +770,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             label=label, event_src=src_frame, zoom=zoom,
             frame_balls=frame_balls,
             frame_goals=frame_goals if _is_shot else None,
-            frame_gks=frame_gks if _is_shot else None)
+            frame_gks=frame_gks if _is_shot else None,
+            track_jersey=track_jersey, draw_all_boxes=draw_all_boxes)
 
         # With require_box on, skip events whose player is never tracked in the
         # clip window (draw_hook is None) — no highlightable subject, so a
@@ -810,6 +862,9 @@ if __name__ == "__main__":
                         help="do NOT overlay the tracked ball + ownership line (needs --all_frames)")
     parser.add_argument("--include_incomplete_passes", action="store_true",
                         help="also clip intercepted / unresolved-receiver passes (off by default)")
+    parser.add_argument("--all_boxes", action="store_true",
+                        help="box EVERY tracked player (cyan T{id} #{jersey}), not just the "
+                             "actor (amber); reads track_jersey.json from --output_dir for numbers")
     args = parser.parse_args()
 
     valid_players = None
@@ -830,6 +885,7 @@ if __name__ == "__main__":
     frame_balls = None
     frame_goals = None
     frame_gks = None
+    track_jersey = None
     if args.all_frames:
         with open(args.all_frames) as f:
             _all = json.load(f)
@@ -839,6 +895,10 @@ if __name__ == "__main__":
         # goal (cls 33) + goalkeeper marker (cls 34) boxes for shot-clip context
         frame_goals = _build_frame_class_boxes(_all, args.vid_stride, 33)
         frame_gks = _build_frame_class_boxes(_all, args.vid_stride, 34)
+    if args.all_boxes:
+        track_jersey = _load_track_jersey(args.output_dir)
+        print(f"[Clipper] all-boxes on: {sum(1 for v in track_jersey.values() if v)} "
+              f"tracks carry a jersey number")
     clip_events(args.video, event_list, args.output_dir,
                 vid_stride=args.vid_stride, pad_s=args.pad_s,
                 event_types=tuple(t.strip() for t in args.types.split(",") if t.strip()),
@@ -846,4 +906,5 @@ if __name__ == "__main__":
                 frame_boxes=frame_boxes, zoom=args.zoom, max_clips=args.max_clips,
                 valid_players=valid_players, require_box=args.require_box,
                 frame_balls=frame_balls, clean_passes=not args.include_incomplete_passes,
-                frame_goals=frame_goals, frame_gks=frame_gks)
+                frame_goals=frame_goals, frame_gks=frame_gks,
+                track_jersey=track_jersey, draw_all_boxes=args.all_boxes)
