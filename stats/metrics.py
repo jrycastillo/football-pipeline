@@ -889,6 +889,7 @@ class StatsEngine:
                 "ball_recoveries_opp_half", "ball_recoveries_own_half",
                 "challenges_total", "challenges_won_total",
                 "goals", "goals_total", "goals_conceded",
+                "assists", "assists_total",
                 "shots_saved_total",
                 "close_range_shots", "mid_range_shots", "long_range_shots",
                 "short_passes", "medium_passes", "long_passes",
@@ -1060,9 +1061,12 @@ class StatsEngine:
                 id_frame_counts[jnum] = max_count
 
 
+        # Team color per roster team, computed once for the roster-unique team snap below.
+        roster_team_colors = roster_prior.canonical_team_colors() if roster_prior is not None else {}
+
         for id_key in all_ids:
             if id_key is None: continue
-            
+
             # --- FILTER NOISE ---
             # Calculate total time presence
             # If known jersey, we trust it more, but let's check actual track presence or usage?
@@ -1158,7 +1162,21 @@ class StatsEngine:
                 else:
                     team_name = id_manager.get_player_color(jersey_num) if id_manager else "Unknown"
                     if team_name == "Unknown": team_name = "Unknown"
-                
+
+                # Roster-unique team snap: a jersey number that appears on exactly
+                # one team's roster is a hard identity signal and overrides the
+                # (soft, sometimes wrong) color-classifier label. Fixes the
+                # scrambled-team bug where e.g. HSV-unique #18 was coloured with
+                # Bayern's kit. Snap to that team's canonical color so the output
+                # stays in one vocabulary; numbers shared by both rosters keep
+                # their color-derived label (the roster can't disambiguate them).
+                if roster_prior is not None:
+                    unique_team = roster_prior.team_for_unique_number(jersey_num)
+                    if unique_team:
+                        snap_color = roster_team_colors.get(unique_team)
+                        if snap_color:
+                            team_name = snap_color
+
                 player_name = f"Player {jersey_num}"
             else:
                 # Unknown Track
@@ -1214,6 +1232,7 @@ class StatsEngine:
                     
                     # Offensive (Target)
                     "goals_total": s["goals"],
+                    "assists_total": s.get("assists", 0),
                     "shots_on_target_total": s["shots_on_target"],
                     "shots_wide_total": 0, 
                     "penalty_total": 0,
