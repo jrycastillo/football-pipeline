@@ -118,7 +118,7 @@ import torch
 import math
 from collections import defaultdict, Counter, deque
 from stats.metrics import StatsEngine # Import new engine
-from vision.color_classifier import TeamColorClassifier, KitCoordinator  # Phase 139
+from vision.color_classifier import TeamColorClassifier, KitCoordinator, SigLIPTeamClassifier  # Phase 139
 from ultralytics import YOLO
 from vision.resnet_recognition import ResNetRecognizerV2 as JNRService # ResNet32 only
 from PIL import Image
@@ -646,12 +646,22 @@ class IdentityManager:
                 temporal_ok = majority >= 0.5
             else:
                 temporal_ok = True  # not enough history yet, rely on margin alone
-            if best_tally >= 1 and (best_score - second_score) >= 0.50 and temporal_ok:
+            # Lock gate — confidence-weighted with a MULTIPLICATIVE margin
+            # (jersey-accuracy fix, ported from Nabeel's Task 2). Three conditions
+            # so a single confident MISREAD can no longer lock a track for good:
+            #   (a) >= 2 reads of this number  (was 1 — one read could lock)
+            #   (b) accumulated weight >= min   (enough total evidence)
+            #   (c) leader beats runner-up 2:1  (was additive 0.50, which let a
+            #       track flickering 7/17 lock on whichever crossed 0.50 first)
+            _min_lock_weight = getattr(self, "jnr_min_lock_weight", 1.0)
+            _margin_ok = (second_score <= 1e-6) or (best_score >= 2.0 * second_score)
+            if (best_tally >= 2 and best_score >= _min_lock_weight
+                    and _margin_ok and temporal_ok):
                  if track_id not in self.locks:
                      # Check Global Uniqueness Logic
                      team = self.track_colors.get(track_id, "Unknown")
                      if self.try_lock(track_id, team, best_num, best_score, self.vote_counts):
-                         log(f"🔒 [IdentityManager] LOCKED Track {track_id} -> Jersey #{best_num} (Votes: {best_tally}, Score: {best_score:.1f}, Margin: {best_score-second_score:.1f})")
+                         log(f"🔒 [IdentityManager] LOCKED Track {track_id} -> Jersey #{best_num} (Votes: {best_tally}, Score: {best_score:.1f}, 2nd: {second_score:.1f})")
                          self._lock_identity(track_id, best_num)
                          self.locks[track_id] = {"jersey": best_num, "locked": True}
             
@@ -1778,6 +1788,9 @@ if __name__ == "__main__":
     parser.add_argument("--tracking_mode", type=str, default="bytetrack", choices=["bytetrack", "botsort"], help="Tracking backend (Legacy Arg)") 
     parser.add_argument('--tracker', choices=['bytetrack', 'botsort'], help="Legacy tracker arg, will override tracking_mode if set")
     parser.add_argument('--enable_reid', type=bool, default=False, help="Enable SigLIP ReID")
+    parser.add_argument('--siglip_teams', action='store_true',
+                        help="Use SigLIP semantic clustering for team assignment (fixes the "
+                             "colour-K-means team imbalance, e.g. 11-vs-5). Needs transformers.")
     parser.add_argument('--audit_rejections', type=bool, default=False, help="Enable Tracklet audit logging")
     parser.add_argument('--resize_h', type=int, default=None, help="Downsample height (e.g. 720) for speed")
     parser.add_argument('--start_frame', type=int, default=0, help="Start processing from this frame number")
@@ -1914,7 +1927,7 @@ if __name__ == "__main__":
 
 
 
-    # ReID Component — OSNet x0.25 (replaces SigLIP)
+    # ReID Component — OSNet x0.25 (replaces SigLIP for appearance matching)
     siglip_classifier = None
     osnet_reid = None
     if args.enable_reid:
@@ -1924,6 +1937,18 @@ if __name__ == "__main__":
         log("✅ [OSNetReID] Ready")
     else:
         log("💤 [OSNetReID] ReID DISABLED")
+    # SigLIP TEAM classifier — semantic (learned-embedding) two-team clustering.
+    # Replaces the HSV colour K-means that mis-splits teams under our lighting
+    # (produced 11-vs-5 instead of ~11-vs-11), which corrupts opponent labels on
+    # duels/shots and the same-team check assists depend on. Independent of ReID.
+    if getattr(args, "siglip_teams", False):
+        log("🚀 [SigLIP] Initializing semantic team classifier...")
+        try:
+            siglip_classifier = SigLIPTeamClassifier()
+            log("✅ [SigLIP] Team classifier ready")
+        except Exception as _e:
+            log(f"⚠️ [SigLIP] init failed ({_e}); falling back to colour clustering")
+            siglip_classifier = None
     
     visualizer = Visualizer()
     color_classifier = TeamColorClassifier()  # Phase 139
@@ -1950,6 +1975,23 @@ if __name__ == "__main__":
     _device = get_device().type  # cuda > mps > cpu
     player_model = YOLO(CONFIG['env']['DET_WEIGHTS']).to(_device)
     ball_model = YOLO(CONFIG['env']['BALL_MODEL_PATH']).to(_device)
+    # A multi-class detector (e.g. nabeel_best.pt: Ball/Goal/GK/Player/Referee)
+    # can serve as the ball model, but only its "Ball" class is the ball — the
+    # rest would otherwise be logged as cls-32 balls. Single-class ball models
+    # (yolo_ball.pt) have no "Ball"-named class, so keep every detection.
+    _ball_names = getattr(ball_model, "names", {}) or {}
+    _ball_keep_cls = {k for k, v in _ball_names.items() if str(v).lower() == "ball"}
+    if not _ball_keep_cls:
+        _ball_keep_cls = None  # single-class ball model -> accept all detections
+    # A multi-class ball model (nabeel_best.pt) also detects the goal — pull it
+    # from the SAME per-frame ball inference (dense, free) rather than a separate
+    # periodic pass. None -> the ball model has no Goal class; use goal_model.
+    _ball_goal_cls = next((k for k, v in _ball_names.items() if str(v).lower() == "goal"), None)
+    # ...and the goalkeeper. Our own player model does not reliably emit a GK
+    # class on this footage, but the ball model does — stored as a positional
+    # MARKER (cls 34, id None, like the ball/goal) so the shot gate can require a
+    # keeper-defended goal without touching any player-tracking/ownership logic.
+    _ball_gk_cls = next((k for k, v in _ball_names.items() if str(v).lower() == "goalkeeper"), None)
     # Effective ball inference settings — logged so an A/B can verify what
     # actually ran (a silent default once masked an inert config change).
     _ball_imgsz = CONFIG["heuristics"].get("BALL_IMG_SIZE", 832)
@@ -1963,6 +2005,30 @@ if __name__ == "__main__":
     ball_zoom_model = YOLO(CONFIG['env']['BALL_MODEL_PATH']).to(_device) if _ball_zoom_on else None
     log(f"🚀 [Device] Models loaded on: {_device} | ball imgsz={_ball_imgsz} conf={_ball_conf}"
         f" | zoom={'on' if _ball_zoom_on else 'off'}")
+    # Goal detector (optional): supplies the visual goal anchor the shot gate
+    # needs. A shot must have a real detected goal near the ball; without this,
+    # event_logic falls back to the homography distance gate, which mislocates
+    # fast midfield passes as shots (the dominant cause of passes counted as
+    # shots). Goals are large fixed structures, so a periodic cadence is plenty.
+    # Any detector exposing a "Goal" class works (e.g. models/nabeel_best.pt).
+    _goal_conf = float(CONFIG["heuristics"].get("GOAL_CONF", 0.35))
+    _goal_every = max(1, int(CONFIG["heuristics"].get("GOAL_DET_EVERY", 12)))
+    goal_model = None
+    _goal_cls_id = 1
+    if _ball_goal_cls is not None:
+        # Goals come from the ball model's own per-frame output — no extra model,
+        # and a goal on every processed frame (vs a sparse periodic pass).
+        log(f"🥅 [Goal] from ball model's 'Goal' class (cls={_ball_goal_cls}) every frame, conf={_goal_conf}")
+    else:
+        _goal_path = CONFIG['env'].get("GOAL_MODEL_PATH")
+        if _goal_path and os.path.exists(_goal_path):
+            goal_model = YOLO(_goal_path).to(_device)
+            _gids = [k for k, v in goal_model.names.items() if str(v).lower() == "goal"]
+            _goal_cls_id = _gids[0] if _gids else 1
+            log(f"🥅 [Goal] detector {_goal_path} loaded (Goal cls={_goal_cls_id}, "
+                f"every {_goal_every} src frames, conf={_goal_conf})")
+        else:
+            log("⚠️ [Goal] no goal source — shot gate uses homography fallback (less reliable)")
     loader = ThreadedVideoReader(video_path)
     time.sleep(1.0)
     
@@ -2192,16 +2258,18 @@ if __name__ == "__main__":
                     
                 player_res = MockResults(mock_boxes, f)
                     
-                # Ball Tracking: Keep independent for now (clean ByteTrack doesn't touch ball logic)
+                # Ball detection: PREDICT, not track. The ball's track id is
+                # discarded (the downstream BallTracker handles continuity), so
+                # botsort buys nothing — and on a MULTI-CLASS ball model it is
+                # catastrophic: measured 46.8% (predict) -> 8.5% (track) as the
+                # tracker tries to follow one tiny ball among 20+ players and
+                # loses it. Single-class models are unaffected (30% either way).
                 # The ball is a handful of pixels on wide-angle footage; the
-                # inference previously ran at ultralytics defaults (imgsz 640,
-                # conf 0.25) finding a ball on only ~4% of sampled frames.
-                # Measured sweep picked 832/0.10 (~10x the detection rate; 1280
-                # HURTS — the model is trained at 640 and large upscales break
-                # its scale prior). See config.yaml heuristics.
-                ball_res = ball_model.track(
-                    f, persist=True, tracker="botsort.yaml", verbose=False,
-                    imgsz=_ball_imgsz, conf=_ball_conf,
+                # sweep picked 832/0.10 (~10x the old 640/0.25 rate; 1280 HURTS —
+                # the model is trained at 640 and large upscales break its scale
+                # prior). See config.yaml heuristics.
+                ball_res = ball_model.predict(
+                    f, verbose=False, imgsz=_ball_imgsz, conf=_ball_conf,
                     device=get_device().type)[0]
                 
                 img = player_res.orig_img
@@ -2247,22 +2315,66 @@ if __name__ == "__main__":
                             "cls": cls_id  # Use actual class: 1=GK, 2=Player, 3=Referee
                         })
 
-                # Process Ball Detections
+                # Process Ball (and, on a multi-class model, Goal) detections
+                # from the single per-frame ball inference.
                 if hasattr(ball_res, "boxes"):
                     for b in ball_res.boxes:
+                        _bc = int(b.cls[0].item())
                         conf = float(b.conf[0].item())
-                        # Acceptance gate aligned with the inference threshold
-                        # (was a hardcoded 0.15, which silently discarded any
-                        # detections a lower BALL_CONF was tuned to admit).
-                        if conf < _ball_conf:
-                            continue
-                        frame_data["boxes"].append({
-                            "xyxy": b.xyxy[0].cpu().numpy().tolist(),
-                            "id": None, # Balls usually don't track well with ID
-                            "conf": conf,
-                            "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
-                        })
+                        is_ball = (_ball_keep_cls is None) or (_bc in _ball_keep_cls)
+                        is_goal = (_ball_goal_cls is not None) and (_bc == _ball_goal_cls)
+                        is_gk = (_ball_gk_cls is not None) and (_bc == _ball_gk_cls)
+                        if is_ball:
+                            # Acceptance gate aligned with the inference threshold
+                            # (was a hardcoded 0.15, which silently discarded any
+                            # detections a lower BALL_CONF was tuned to admit).
+                            if conf < _ball_conf:
+                                continue
+                            frame_data["boxes"].append({
+                                "xyxy": b.xyxy[0].cpu().numpy().tolist(),
+                                "id": None, # Balls usually don't track well with ID
+                                "conf": conf,
+                                "cls": 32 # Force Class 32 (Standard Ball) for EventDetector compatibility
+                            })
+                        elif is_goal:
+                            # Goal (cls 33): the shot gate's visual anchor. Higher
+                            # conf gate than the ball to avoid phantom goal boxes.
+                            if conf < _goal_conf:
+                                continue
+                            frame_data["boxes"].append({
+                                "xyxy": b.xyxy[0].cpu().numpy().tolist(),
+                                "id": None, "conf": conf, "cls": 33})
+                        elif is_gk:
+                            # Goalkeeper MARKER (cls 34): positional only, so the
+                            # shot gate can require a keeper-defended goal. id None
+                            # keeps it out of tracking/ownership; the player model
+                            # still handles field players.
+                            if conf < _goal_conf:
+                                continue
+                            frame_data["boxes"].append({
+                                "xyxy": b.xyxy[0].cpu().numpy().tolist(),
+                                "id": None, "conf": conf, "cls": 34})
+                        # else: Player/Referee from the ball model -> ignore
+                        # (we have a dedicated player model for those).
                         
+                # Goal detection (cls 33): the visual anchor event_logic's shot
+                # gate uses. Periodic cadence — goals are fixed structures, so
+                # detecting ~once a second is enough and keeps the extra model
+                # cheap. Best-effort; a failure must never break the frame.
+                if goal_model is not None and n % _goal_every == 0:
+                    try:
+                        _gr = goal_model.predict(f, imgsz=640, conf=_goal_conf,
+                                                 device=get_device().type, verbose=False)[0]
+                        for _gb in (getattr(_gr, "boxes", None) or []):
+                            if int(_gb.cls[0].item()) == _goal_cls_id:
+                                frame_data["boxes"].append({
+                                    "xyxy": _gb.xyxy[0].cpu().numpy().tolist(),
+                                    "id": None,
+                                    "conf": float(_gb.conf[0].item()),
+                                    "cls": 33})
+                    except Exception:
+                        pass  # goal pass is best-effort; never break the frame
+
                 # WS1.2 zoom second pass: full-frame missed the ball but we saw
                 # it within the last ~2s — re-look at a 640px crop around the
                 # last position, where the ball is much larger relative to the
@@ -2289,8 +2401,15 @@ if __name__ == "__main__":
                                 _crop, imgsz=640, conf=_ball_conf,
                                 device=get_device().type, verbose=False)[0]
                             _zb = getattr(_zr, "boxes", None)
-                            if _zb is not None and len(_zb) > 0:
-                                _bi = int(_zb.conf.argmax())
+                            # Restrict the crop's candidates to the Ball class for
+                            # a multi-class model, else the argmax could pick a
+                            # player/GK in the crop instead of the ball.
+                            _zidx = list(range(len(_zb))) if _zb is not None else []
+                            if _zb is not None and _ball_keep_cls is not None:
+                                _zidx = [j for j in _zidx
+                                         if int(_zb.cls[j].item()) in _ball_keep_cls]
+                            if _zidx:
+                                _bi = max(_zidx, key=lambda j: float(_zb.conf[j].item()))
                                 _bxy = _zb.xyxy[_bi].cpu().numpy().tolist()
                                 _bconf = float(_zb.conf[_bi].item())
                                 _bxy = [_bxy[0] + _x0, _bxy[1] + _y0,
@@ -2339,6 +2458,13 @@ if __name__ == "__main__":
                                    # Store Color with voting (Phase 139)
                                    color = color_classifier.predict_with_voting(crop, tid)
                                    id_manager.set_track_color(tid, color, cls_id=cls_id)
+
+                                   # SigLIP team clustering: feed OUTFIELD players
+                                   # only (cls 2) — a keeper's kit matches nobody
+                                   # and would pull a phantom third cluster. Self-
+                                   # throttled (every 30th obs, cap 10 per track).
+                                   if siglip_classifier is not None and cls_id == 2:
+                                       siglip_classifier.add_observation(tid, crop)
                                    
                                    # OSNet ReID — update appearance memory per track
                                    if osnet_reid:
