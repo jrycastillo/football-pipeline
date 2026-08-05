@@ -7,7 +7,15 @@ env:
   DET_WEIGHTS: "models/yolo_player.pt"
   POSE_WEIGHTS: "models/yolo_pitch.pt"
   JNR_WEIGHTS: "models/resnet34_clean.pt"
-  BALL_MODEL_PATH: "models/yolo_ball.pt"
+  # Ball detector: nabeel_best.pt (multi-class; we keep only its "Ball" class)
+  # measured 46.8% ball coverage @0.547 conf on the HB clip vs yolo_ball.pt's
+  # 30.0% @0.344 — 56% more balls, cleaner. Multi-class ball models are filtered
+  # to the Ball class in the loop; single-class ball models keep every detection.
+  BALL_MODEL_PATH: "models/nabeel_best.pt"
+  # Goal detector: visual anchor for the shot gate (a shot must have a real goal
+  # near the ball). Any detector with a "Goal" class works. Unset -> shot gate
+  # falls back to the homography distance gate (mislocates midfield passes as shots).
+  GOAL_MODEL_PATH: "models/nabeel_best.pt"
 
   # Output
   OUT_JSON: "players_stats.json"
