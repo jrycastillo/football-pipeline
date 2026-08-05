@@ -57,10 +57,23 @@ DIST_DRIBBLE_OPP = 3.0  # Phase 195: Increased from 2.0 to 3.0m for more dribble
 DIST_PASS_MIN = 3.0  # R18.2: raised 1.0 -> 3.0m. Sub-3m ownership flips are mapping noise in crowded areas, not real passes (engine fired ~49 transitions/min at 1m).
 TIME_DRIBBLE_RETAIN = 1.5  # Phase 195: Reduced from 2.0s to 1.5s for quicker dribble success
 SHOT_SPEED_THRESHOLD = 16.0  # Round 19: 16 m/s (58 km/h) — filters passes/clearances, keeps real shots
+MAX_BALL_SPEED_MPS = 45.0  # ~162 km/h. A projected speed above this is a homography
+                           # artifact, not a real ball — the frame's geometry (speed,
+                           # distance, xG) is untrustworthy and is flagged as such.
 
 def bbox_center(xyxy):
     x1, y1, x2, y2 = xyxy
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def bbox_feet(xyxy):
+    """Bottom-centre of the box — the player's feet, where the ball actually is.
+    Ball possession must be measured here, not at the torso centre: a teammate
+    standing behind the carrier can have a closer torso yet not have the ball.
+    Feet also sit on the ground plane the homography maps, so the projection to
+    metres is correct (a torso point floats above the pitch and mis-projects)."""
+    x1, y1, x2, y2 = xyxy
+    return ((x1 + x2) / 2.0, y2)
 
 def _clamp_conf(v):
     """Clamp a heuristic event confidence to [0.05, 0.98] for JSON output.
@@ -74,8 +87,13 @@ def _clamp_conf(v):
 class AdvancedEventDetector:
     def __init__(self, frame_width=None, frame_height=None):
         self.camera = Camera(frame_width=frame_width, frame_height=frame_height)
+        self.frame_width = frame_width or 1920
         self._frame_H = []
         self._has_frame_H = False
+        self._goal_centers = []
+        self._has_goals = False
+        self._gk_centers = []
+        self._has_gk = False
 
     def _load_frame_homographies(self, player_tracks):
         """Cache per-frame homographies stored by the pipeline
@@ -92,6 +110,84 @@ class AdvancedEventDetector:
         self._has_frame_H = found > 0
         if found:
             print(f"[Homography] Per-frame pitch homographies on {found}/{len(player_tracks)} frames")
+
+    # Goal detections (cls 33) written per frame by the pipeline. These are the
+    # ONLY reliable "is the ball near a goal" signal: the homography-based
+    # distance-to-goal gate mislocates midfield play as near-goal whenever the
+    # pitch fit is wrong (most frames), which is why passes were logged as shots.
+    def _load_goal_boxes(self, player_tracks):
+        self._goal_centers = [[] for _ in range(len(player_tracks))]
+        found = 0
+        for t, f in enumerate(player_tracks):
+            if not isinstance(f, dict):
+                continue
+            for b in f.get("boxes", []):
+                if b.get("cls") == 33:
+                    xy = b.get("xyxy")
+                    if xy:
+                        self._goal_centers[t].append(((xy[0] + xy[2]) * 0.5,
+                                                      (xy[1] + xy[3]) * 0.5))
+                        found += 1
+        self._has_goals = found > 0
+        if self._has_goals:
+            gframes = sum(1 for g in self._goal_centers if g)
+            print(f"[Shot gate] Visual goal anchor active: {found} goal detections "
+                  f"on {gframes}/{len(player_tracks)} frames — shots require a goal near the ball")
+        else:
+            print("[Shot gate] No goal detections in run — falling back to homography "
+                  "distance gate (less reliable; passes may be logged as shots)")
+
+    def _nearest_goal(self, frame_idx, ball_pt, window):
+        """Nearest detected goal center (pixels) to the ball within +/- window
+        frames, or None. The window tolerates goal-detector misses at the exact
+        shot frame (the goal is a fixed structure)."""
+        if ball_pt is None:
+            return None
+        n = len(self._goal_centers)
+        lo, hi = max(0, frame_idx - window), min(n - 1, frame_idx + window)
+        best, bestd2 = None, None
+        for t in range(lo, hi + 1):
+            for (gx, gy) in self._goal_centers[t]:
+                d2 = (gx - ball_pt[0]) ** 2 + (gy - ball_pt[1]) ** 2
+                if bestd2 is None or d2 < bestd2:
+                    best, bestd2 = (gx, gy), d2
+        return best
+
+    # Goalkeeper markers (cls 34, written by the pipeline from the ball model's
+    # Goalkeeper class — our own player model doesn't emit GKs reliably). A real
+    # shot is toward a DEFENDED goal, so a keeper near the target goal confirms it
+    # is the true goal (not a false goal box) and the shooter is attacking a keeper.
+    def _load_gk_boxes(self, player_tracks):
+        self._gk_centers = [[] for _ in range(len(player_tracks))]
+        found = 0
+        for t, f in enumerate(player_tracks):
+            if not isinstance(f, dict):
+                continue
+            for b in f.get("boxes", []):
+                if b.get("cls") == 34:
+                    xy = b.get("xyxy")
+                    if xy:
+                        self._gk_centers[t].append(((xy[0] + xy[2]) * 0.5,
+                                                    (xy[1] + xy[3]) * 0.5))
+                        found += 1
+        self._has_gk = found > 0
+        if self._has_gk:
+            print(f"[Shot gate] Goalkeeper corroboration active: {found} GK detections "
+                  "— shots must be toward a keeper-defended goal")
+
+    def _gk_near_point(self, frame_idx, pt, window, near_px):
+        """True if a goalkeeper is within near_px of pt at any frame within
+        +/- window (tolerates GK-detector misses at the exact shot frame)."""
+        if pt is None:
+            return False
+        n = len(self._gk_centers)
+        lo, hi = max(0, frame_idx - window), min(n - 1, frame_idx + window)
+        near2 = near_px * near_px
+        for t in range(lo, hi + 1):
+            for (gx, gy) in self._gk_centers[t]:
+                if (gx - pt[0]) ** 2 + (gy - pt[1]) ** 2 <= near2:
+                    return True
+        return False
 
     def _set_frame_h(self, t):
         """Point the camera at frame t's homography (no-op without one)."""
@@ -121,7 +217,14 @@ class AdvancedEventDetector:
             for b in boxes:
                 if b.get("id") is None: continue
                 # if b.get("cls") not in [1, 2]: continue # Player/GK
-                
+
+                # NOTE: feet (bbox_feet) is where the ball is and is the correct
+                # possession point, but switching ownership to it dropped the one
+                # detected shot — at the shot instant the ball has left the feet,
+                # so no player is within DIST_TOUCH and the shooter attribution
+                # fails. Kept on the torso centre until the shot's shooter lookback
+                # is hardened to survive that. The CLIP box anchor already uses
+                # feet, which is what fixes the visible "wrong player" box.
                 c = bbox_center(b["xyxy"])
                 dist_m = self.camera.calculate_distance(c, ball_pos)
                 
@@ -172,6 +275,8 @@ class AdvancedEventDetector:
             return not ev_bt[k]
 
         self._load_frame_homographies(player_tracks)
+        self._load_goal_boxes(player_tracks)
+        self._load_gk_boxes(player_tracks)
         stats = defaultdict(lambda: defaultdict(int))
         events = []
         
@@ -237,18 +342,24 @@ class AdvancedEventDetector:
         # Old formula (0.75 * exp(-0.15*dist) * angle*1.5) was inflated at close range
         # (always 0.99 under 3m). Logistic model calibrated to approximate StatsBomb values:
         #   5m → ~0.39, 11m → ~0.14, 20m → ~0.04, 30m → ~0.01
-        def calculate_xg(start_pos, header=False, under_pressure=False, goal_x=None):
+        def xg_shot_features(start_pos, goal_x=None):
+            # Geometric inputs to the xG model, in meters/radians. Single source
+            # of truth: calculate_xg() consumes these, and each shot event exposes
+            # them as xg_inputs for the downstream (Jerome's) xG model.
             if goal_x is None:
                 dist_to_right = abs(start_pos[0] - GOAL_X)
                 dist_to_left = abs(start_pos[0] - 0.0)
                 goal_x = GOAL_X if dist_to_right < dist_to_left else 0.0
-
             # X = distance from goal line, C = lateral offset from center
             X = abs(start_pos[0] - goal_x)
             C = abs(start_pos[1] - GOAL_CENTER_Y)
             if X < 0.5: X = 0.5
             angle_rad = math.atan2(7.32 * X, X * X + C * C - GOAL_WIDTH_HALF ** 2)
             if angle_rad < 0: angle_rad += math.pi
+            return goal_x, X, C, angle_rad
+
+        def calculate_xg(start_pos, header=False, under_pressure=False, goal_x=None):
+            goal_x, X, C, angle_rad = xg_shot_features(start_pos, goal_x)
 
             # Soccermatics open-source model (Wyscout data, 105x68m pitch).
             # Penalty (X=11,C=0)->0.77, 6yd box (X=5.5,C=0)->0.58, box edge (X=16.5,C=0)->0.12
@@ -683,6 +794,45 @@ class AdvancedEventDetector:
                 moving_left = m2[0] < m1[0]
 
                 if speed_mps > SHOT_SPEED_THRESHOLD and (moving_right or moving_left):
+                    visual_confirmed = False
+                    # VISUAL GOAL ANCHOR (primary gate when goal detection ran).
+                    # A real shot has a detected goal near the ball. This replaces
+                    # reliance on the homography distance gate, which mislocates
+                    # fast midfield passes as "near goal" on the many frames the
+                    # pitch fit is wrong — the dominant cause of passes counted as
+                    # shots. Falls back to the homography gate only when the run
+                    # has no goal detections at all (backward compatible).
+                    if self._has_goals:
+                        _gw = max(6, int(EFF_FPS))              # ~1s tolerance window
+                        _gnear = self.frame_width * 0.30        # goal within 30% frame width of ball
+                        _g = self._nearest_goal(i, p2, window=_gw)
+                        if _g is None:
+                            continue
+                        _d2 = math.hypot(p2[0] - _g[0], p2[1] - _g[1])   # ball->goal at end
+                        _d1 = math.hypot(p1[0] - _g[0], p1[1] - _g[1])   # ball->goal at start
+                        # Reject unless the ball is near the goal AND moving
+                        # toward it. A goal kick / defensive clearance sits near
+                        # the OWN goal but travels AWAY from it (d2 >= d1) — the
+                        # remaining source of false shots after the near-goal gate.
+                        if _d2 > _gnear or _d2 >= _d1:
+                            continue
+                        # GOALKEEPER CORROBORATION (Babak: precision on true shots
+                        # on goal). The target goal must be DEFENDED — a keeper
+                        # within 25% frame width of it confirms it's the real goal
+                        # and the shooter is attacking a keeper, not firing at a
+                        # false goal box or an empty end.
+                        if self._has_gk:
+                            _gk_w = max(6, int(EFF_FPS))
+                            if not self._gk_near_point(i, _g, window=_gk_w,
+                                                       near_px=self.frame_width * 0.25):
+                                continue
+                        # Visual gates passed: a fast ball toward a keeper-defended,
+                        # DETECTED goal. This is stronger evidence than the pitch
+                        # projection, so the homography gates below are skipped —
+                        # they were rejecting real shots (incl. off-target ones)
+                        # whenever the fit was poor, which is why only 1 fired.
+                        visual_confirmed = True
+
                     # Determine target goal based on direction
                     if moving_right:
                         goal_x = 105.0  # Right goal
@@ -691,27 +841,41 @@ class AdvancedEventDetector:
                         goal_x = 0.0    # Left goal
                         goal_center_y = 34.0
 
-                    # R19: Ball must be in attacking third (within 35m of target goal)
+                    # R19: Ball must be in attacking third (within 35m of target
+                    # goal). HOMOGRAPHY fallback only — when the visual gates
+                    # confirmed the shot, the detected goal already localises it.
                     dist_to_goal = abs(m2[0] - goal_x)
-                    if dist_to_goal > 35.0:
+                    if not visual_confirmed and dist_to_goal > 35.0:
                         continue  # Ball too far from goal to be a real shot
 
-                    # Check if inside goal coordinates
-                    # Simple linear projection
+                    # Projected goal-mouth crossing (on target). Used as a HARD
+                    # gate only in the homography fallback; when visually
+                    # confirmed it is just a confidence signal, not a filter —
+                    # off-target shots are still shots.
+                    y_at_goal = None
                     if abs(m2[0] - m1[0]) > 0.1:
                         slope = (m2[1] - m1[1]) / (m2[0] - m1[0])
                         y_at_goal = m2[1] + slope * (goal_x - m2[0])
+                    on_target = (y_at_goal is not None and 30.34 < y_at_goal < 37.66)
 
-                        if 30.34 < y_at_goal < 37.66:
-                            # Potential Shot on Target
-                            # Attribute to last possessor
-                            # Find who had ball last
-                            shooter = ownership[i] if i < len(ownership) else None
-                            # Confidence signal: shooter owned the ball at the shot
-                            # frame vs recovered from a 5-frame lookback
-                            shot_attrib_direct = shooter is not None
-                            if not shooter and i >= 5:
-                                shooter = ownership[i-5]  # Look back
+                    if visual_confirmed or on_target:
+                            # SHOOTER = the last player who possessed the ball
+                            # before the strike (they kicked it). At the shot
+                            # frame the ball is already racing to goal, so the
+                            # nearest player then is often a DEFENDER it is passing
+                            # (this credited an opponent). Walk back to the last
+                            # player who actually held the ball.
+                            shooter = None
+                            for _bk in range(0, int(EFF_FPS * 2) + 1):
+                                _j = i - _bk
+                                if 0 <= _j < len(ownership) and ownership[_j] is not None:
+                                    _cand = ownership[_j]
+                                    _held = sum(1 for _k in range(max(0, _j - 3), _j + 1)
+                                                if 0 <= _k < len(ownership) and ownership[_k] == _cand)
+                                    if _bk == 0 or _held >= 2:
+                                        shooter = _cand
+                                        break
+                            shot_attrib_direct = (i < len(ownership) and ownership[i] == shooter)
                             # FIX: Skip if shooter is a GK (cls_id=1) - goal kicks/punts shouldn't count as shots
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
                                 shooter = None
@@ -722,21 +886,29 @@ class AdvancedEventDetector:
                                 if not recent:
                                     # Check if under pressure
                                     under_pressure = self._is_opponent_near(i, shooter, player_tracks, dist_m=3.0) is not None
+                                    # Physical sanity of this frame's homography: a
+                                    # ball can't exceed ~45 m/s, so a higher projected
+                                    # speed means the meter geometry is bad. The shot
+                                    # is real (visual-goal gated), so still count it —
+                                    # but keep its untrustworthy xG / range out of the
+                                    # aggregates rather than inflate them.
+                                    geometry_reliable = speed_mps <= MAX_BALL_SPEED_MPS
                                     xg = calculate_xg(m1, goal_x=goal_x, under_pressure=under_pressure)
                                     stats[shooter]["shots_on_target"] += 1
-                                    # Categorize xG by pressure
-                                    if under_pressure:
-                                        stats[shooter]["xg_foot_opponent_present"] += xg
-                                    else:
-                                        stats[shooter]["xg_foot_no_opponent"] += xg
-                                    # Shots categorization - use distance to target goal
-                                    shot_dist = math.hypot(m2[0] - goal_x, m2[1] - goal_center_y)
-                                    if shot_dist <= 5:
-                                        stats[shooter]["close_range_shots"] += 1
-                                    elif shot_dist <= 16:
-                                        stats[shooter]["mid_range_shots"] += 1
-                                    else:
-                                        stats[shooter]["long_range_shots"] += 1
+                                    if geometry_reliable:
+                                        # Categorize xG by pressure
+                                        if under_pressure:
+                                            stats[shooter]["xg_foot_opponent_present"] += xg
+                                        else:
+                                            stats[shooter]["xg_foot_no_opponent"] += xg
+                                        # Shots categorization - use distance to target goal
+                                        shot_dist = math.hypot(m2[0] - goal_x, m2[1] - goal_center_y)
+                                        if shot_dist <= 5:
+                                            stats[shooter]["close_range_shots"] += 1
+                                        elif shot_dist <= 16:
+                                            stats[shooter]["mid_range_shots"] += 1
+                                        else:
+                                            stats[shooter]["long_range_shots"] += 1
 
                                     # Assign xA to previous passer
                                     if hasattr(self, 'last_pass_info') and self.last_pass_info:
@@ -751,18 +923,41 @@ class AdvancedEventDetector:
                                     # proximity to goal, how central the projected
                                     # trajectory hits the goal mouth, and shooter
                                     # attribution quality.
+                                    # geometry_reliable (computed above) is False when
+                                    # the homography mis-projected this frame. The shot
+                                    # is still real (visual-goal gated), so keep it but
+                                    # halve confidence and don't publish an impossible
+                                    # speed or a bogus xG.
                                     speed_norm = min(1.0, (speed_mps - SHOT_SPEED_THRESHOLD) / SHOT_SPEED_THRESHOLD)
                                     prox_norm = 1.0 - min(1.0, dist_to_goal / 35.0)
-                                    center_norm = 1.0 - min(1.0, abs(y_at_goal - 34.0) / GOAL_WIDTH_HALF)
+                                    # y_at_goal can be None (ball moving vertically, or
+                                    # visually confirmed without a usable projection).
+                                    center_norm = (1.0 - min(1.0, abs(y_at_goal - 34.0) / GOAL_WIDTH_HALF)
+                                                   if y_at_goal is not None else 0.5)
                                     attrib_norm = 1.0 if shot_attrib_direct else 0.5
                                     shot_conf = _clamp_conf(0.20 + 0.30 * speed_norm + 0.20 * prox_norm
                                                             + 0.15 * center_norm + 0.15 * attrib_norm)
+                                    if not geometry_reliable:
+                                        shot_conf = _clamp_conf(shot_conf * 0.5)  # geometry can't be trusted
+                                    # Raw xG inputs for the downstream xG model
+                                    # (meters / degrees). body_part is "foot" here —
+                                    # header shots are not distinguished yet.
+                                    _, _Xf, _Cf, _angf = xg_shot_features(m1, goal_x)
                                     events.append({
                                         "type": "shot",
                                         "player": shooter,
                                         "frame": i,
-                                        "xg": round(xg, 2),
-                                        "speed": round(speed_mps, 1),
+                                        "xg": round(xg, 2) if geometry_reliable else None,
+                                        "xg_inputs": {
+                                            "dist_to_goal_m": round(math.hypot(_Xf, _Cf), 2),
+                                            "dist_to_goal_line_m": round(_Xf, 2),
+                                            "lateral_offset_m": round(_Cf, 2),
+                                            "angle_to_goal_deg": round(math.degrees(_angf), 1),
+                                            "body_part": "foot",
+                                            "under_pressure": bool(under_pressure),
+                                        },
+                                        "speed": round(speed_mps, 1) if geometry_reliable else None,
+                                        "geometry_reliable": geometry_reliable,
                                         "direction": "right" if moving_right else "left",
                                         "confidence": shot_conf
                                     })
@@ -894,8 +1089,52 @@ class AdvancedEventDetector:
                                             if correct_shooter != shooter:
                                                 goal_conf_base -= 0.10
                                             goal_conf = _clamp_conf(goal_conf_base)
+
+                                            # ASSIST — the final pass that set up
+                                            # this goal (Opta/StatsBomb: the last
+                                            # touch by a TEAMMATE before the scorer
+                                            # scores). Search backwards through the
+                                            # events already emitted for the last
+                                            # COMPLETED pass, TO the scorer, by a
+                                            # different SAME-TEAM player, within ~15s.
+                                            # (last_pass_info is unreliable here: all
+                                            # passes are processed before this loop,
+                                            # so it holds the final pass of the video.)
+                                            assist_player = None
+                                            _assist_window = int(EFF_FPS * 15)
+                                            for _e in reversed(events):
+                                                if _e.get("type") != "pass":
+                                                    continue
+                                                _pf = _e.get("frame", 0)
+                                                if _pf > i:
+                                                    continue
+                                                if i - _pf > _assist_window:
+                                                    break  # older passes can't be the assist
+                                                if (_e.get("to") == correct_shooter
+                                                        and _e.get("from") not in (None, correct_shooter)
+                                                        and _e.get("complete") is not False):
+                                                    _same_team = True
+                                                    if team_map:
+                                                        _ta = team_map.get(str(_e["from"]))
+                                                        _tb = team_map.get(str(correct_shooter))
+                                                        _same_team = bool(_ta and _tb and _ta == _tb)
+                                                    if _same_team:
+                                                        assist_player = _e["from"]
+                                                        break
+                                            if assist_player is not None:
+                                                stats[assist_player]["assists"] += 1
+                                                stats[assist_player]["assists_total"] += 1
+                                                # Clippable assist event, anchored on the
+                                                # assist PASS (so the clip shows the ball
+                                                # played in), leading to the goal.
+                                                events.append({"type": "assist", "player": assist_player,
+                                                               "to": correct_shooter, "frame": _pf,
+                                                               "goal_frame": i,
+                                                               "confidence": _clamp_conf(goal_conf * 0.9)})
+                                                print(f"[Assist] Player #{assist_player} -> goal by #{correct_shooter}")
+
                                             events.append({"type": "goal", "player": correct_shooter, "frame": i,
-                                                           "assist": None, "confidence": goal_conf})
+                                                           "assist": assist_player, "confidence": goal_conf})
                                             print(f"[Goal] Confirmed: Player #{correct_shooter} (team={goal_team}) at frame {i}")
                                         else:
                                             print(f"[Goal] Debounced: Player #{correct_shooter} (team={goal_team}) at frame {i} — duplicate within 30s")
