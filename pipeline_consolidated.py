@@ -2699,6 +2699,30 @@ if __name__ == "__main__":
             json.dump(all_frames, f)
         log(f"Dumping debug_all_frames.json ({len(all_frames)} frames)")
 
+        # Track -> jersey/team map. debug_all_frames boxes carry RAW ByteTrack
+        # track ids (the Option A remap mutates them later, in place); jersey
+        # resolution lives only in id_manager. Dumping it here — before the remap
+        # and while box ids still equal id_manager.locks keys — lets the clipper
+        # label EVERY player box with "T{tid} #{jersey}", not just the actor.
+        try:
+            _tids = {b["id"] for fr in all_frames for b in fr.get("boxes", [])
+                     if b.get("id") is not None}
+            _tj = {}
+            for _tid in _tids:
+                _info = id_manager.locks.get(_tid)
+                _jn = _info["jersey"] if (_info and _info.get("locked")) else None
+                if _jn is None:
+                    _jn = id_manager.active_bindings.get(_tid)
+                _col = (getattr(id_manager, "track_colors", {}) or {}).get(_tid)
+                if _jn is not None or (_col not in (None, "Unknown")):
+                    _tj[str(_tid)] = {"jersey": _jn, "team": _col}
+            with open(os.path.join(output_dir, "track_jersey.json"), "w") as f:
+                json.dump(_tj, f)
+            _n_jn = sum(1 for v in _tj.values() if v["jersey"] is not None)
+            log(f"Track->jersey map: {_n_jn}/{len(_tids)} tracks with a jersey -> track_jersey.json")
+        except Exception as e:
+            log(f"[track_jersey] dump failed: {e}")
+
         # Fragment evidence dump for the identity-merge rework. Runs here, in
         # the finally block, because box IDs in all_frames are still RAW track
         # IDs (the Option A remap later mutates them in place) and the
