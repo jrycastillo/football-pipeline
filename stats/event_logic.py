@@ -88,6 +88,7 @@ class AdvancedEventDetector:
     def __init__(self, frame_width=None, frame_height=None):
         self.camera = Camera(frame_width=frame_width, frame_height=frame_height)
         self.frame_width = frame_width or 1920
+        self.frame_height = frame_height or 1080
         self._frame_H = []
         self._has_frame_H = False
         self._goal_centers = []
@@ -188,6 +189,114 @@ class AdvancedEventDetector:
                 if (gx - pt[0]) ** 2 + (gy - pt[1]) ** 2 <= near2:
                     return True
         return False
+
+    def _detect_goal_restarts(self, events, ev_bt):
+        """Babak's goal-confirmation cue: a kickoff from the CENTER circle.
+
+        In football, play always restarts from the center spot after a goal, so a
+        center kickoff is strong, independent evidence that a goal was just scored
+        (the only exceptions are the two half-start kickoffs). We detect the
+        restart and cross-reference it with the shots we already found:
+          * a shot in the ~90 s before a restart  -> that shot was probably a GOAL
+            (we tag it goal_confirmed_by_restart for the admin);
+          * a restart with NO preceding shot       -> a POSSIBLE MISSED goal the
+            admin should review.
+
+        Detection is in PIXEL space (not homography — the pitch fit is too sparse
+        to trust at the exact restart frame) and deliberately conservative, since
+        every emitted marker costs the admin a review click:
+          1. the broadcast camera centres on the ball at a kickoff, so the ball is
+             near the FRAME centre;
+          2. NO detected goal is near the ball  -> rules out a goalmouth scramble
+             (which also sits centre-frame because the camera pans to it);
+          3. the ball is nearly stationary for ~0.6 s (placed for the kick);
+          4. it ARRIVED after a real stoppage — the ball was undetected for >=2 s
+             just before (a goal celebration + walk-back), which open-play midfield
+             flow never produces;
+          5. then it moves off (the kick).
+        Emits `goal_restart` events (status unverified) for the admin to confirm.
+        Off-switch: env GOAL_RESTART=0.
+        """
+        if os.environ.get("GOAL_RESTART", "1") == "0":
+            return
+        n = len(ev_bt)
+        if n < int(EFF_FPS * 3) + 1:
+            return
+        fw, fh = self.frame_width, self.frame_height
+        cx_px, cy_px = fw * 0.5, fh * 0.5
+        settle   = max(2, int(EFF_FPS * 0.6))
+        gap_win  = max(3, int(EFF_FPS * 6.0))    # look back ~6 s for the stoppage
+        min_gap  = max(2, int(EFF_FPS * 2.0))    # >=2 s ball-undetected = real stoppage
+        CENTER_X = fw * 0.20                      # ball within 20% of frame centre-x
+        CENTER_Y = fh * 0.30
+        STILL    = fw * 0.035                     # stationary tolerance
+        GOAL_FAR = fw * 0.32                      # a goal within this = goalmouth, skip
+        MOVE     = fw * 0.06                      # kicked = moves this far after settling
+        debounce = int(EFF_FPS * 20)
+
+        def _goal_near(t, pt):
+            lo, hi = max(0, t - settle), min(len(self._goal_centers) - 1, t + settle)
+            for k in range(lo, hi + 1):
+                for (gx, gy) in self._goal_centers[k]:
+                    if (gx - pt[0]) ** 2 + (gy - pt[1]) ** 2 <= GOAL_FAR * GOAL_FAR:
+                        return True
+            return False
+
+        restarts, last = [], -10 ** 9
+        t = settle
+        while t < n - settle:
+            if t - last < debounce:
+                t += 1; continue
+            b = ev_bt[t]
+            if b is None or abs(b[0] - cx_px) > CENTER_X or abs(b[1] - cy_px) > CENTER_Y:
+                t += 1; continue
+            pts = [ev_bt[t + k] for k in range(-settle, settle + 1)
+                   if 0 <= t + k < n and ev_bt[t + k] is not None]
+            if len(pts) < 3 or max(math.hypot(a[0] - c[0], a[1] - c[1])
+                                   for a in pts for c in pts) > STILL:
+                t += 1; continue
+            if self._has_goals and _goal_near(t, b):
+                t += 1; continue
+            run = 0; stoppage = False
+            for k in range(max(0, t - gap_win), t - settle):
+                if ev_bt[k] is None:
+                    run += 1
+                    if run >= min_gap:
+                        stoppage = True; break
+                else:
+                    run = 0
+            if not stoppage:
+                t += 1; continue
+            moved = False
+            for k in range(t + settle, min(n, t + settle + int(EFF_FPS * 3))):
+                q = ev_bt[k]
+                if q is not None and math.hypot(q[0] - b[0], q[1] - b[1]) > MOVE:
+                    moved = True; break
+            if not moved:
+                t += 1; continue
+            restarts.append(t); last = t; t += settle
+
+        win = int(EFF_FPS * 90)
+        confirmed = 0
+        for rt in restarts:
+            prev = None
+            for e in events:
+                if e.get("type") in ("shot", "goal") and isinstance(e.get("frame"), (int, float)):
+                    if rt - win <= e["frame"] <= rt and (prev is None or e["frame"] > prev["frame"]):
+                        prev = e
+            events.append({
+                "type": "goal_restart", "frame": rt,
+                "goal_confirmation": prev is not None,
+                "preceding_shot_player": (prev.get("player") if prev else None),
+                "preceding_shot_frame": (prev.get("frame") if prev else None),
+                "confidence": 0.5,
+            })
+            if prev is not None:
+                prev["goal_confirmed_by_restart"] = True
+                confirmed += 1
+        if restarts:
+            print(f"[GoalRestart] {len(restarts)} center-kickoff restart(s) detected — "
+                  f"{confirmed} confirm a prior shot, {len(restarts) - confirmed} possible MISSED goal(s) for admin review")
 
     def _set_frame_h(self, t):
         """Point the camera at frame t's homography (no-op without one)."""
@@ -1514,6 +1623,20 @@ class AdvancedEventDetector:
         # "needs_review" (admin queue). Unset (default) keeps every event
         # "unverified" — the pre-decision behavior. Events with no confidence
         # are never auto-accepted.
+        # Goal-confirmation via center-circle kickoff (Babak). Runs after all
+        # shots/goals are known so it can cross-reference them. Uses the pristine
+        # full-frame ball track (ev_bt), same as the shot gate.
+        self._detect_goal_restarts(events, ev_bt)
+
+        # Timestamp every event: seconds into the SOURCE video. `frame` is the
+        # processed index; source_frame = (frame+1)*VID_STRIDE, time_s = /FPS.
+        # Surfaces mm:ss to the admin/clip/DB layer without re-deriving the map.
+        if FPS:
+            for e in events:
+                _fr = e.get("frame")
+                if isinstance(_fr, (int, float)):
+                    e["time_s"] = round(((_fr + 1) * VID_STRIDE) / float(FPS), 2)
+
         _verify_thr = os.environ.get("VERIFY_CONF_THRESHOLD")
         if _verify_thr is not None:
             try:
