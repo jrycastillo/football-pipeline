@@ -23,7 +23,7 @@ import os
 # Default clip-worthy types: the confirmed highlight events. Ball touches are
 # also clippable (--types touch) but produce hundreds of clips per match, so
 # they stay opt-in until the product decision on portal clip types is made.
-DEFAULT_CLIP_TYPES = ("goal", "assist", "shot", "save")
+DEFAULT_CLIP_TYPES = ("goal", "assist", "shot", "save", "goal_restart")
 _FFMPEG_PROBED = False
 _FFMPEG_PATH = None
 _FFMPEG_UNAVAILABLE_WARNED = False
@@ -32,6 +32,12 @@ _FFMPEG_UNAVAILABLE_WARNED = False
 def _load_cv2():
     import importlib
     return importlib.import_module("cv2")
+
+
+def _fmt_clock(seconds):
+    """Seconds -> mm:ss (the event/clip timestamp Babak wants labelled)."""
+    s = max(0, int(round(seconds)))
+    return f"{s // 60:02d}:{s % 60:02d}"
 
 
 def _event_player(event):
@@ -352,7 +358,7 @@ def _make_ball_lookup(frame_balls, stride):
 
 def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
                     zoom=False, frame_balls=None, frame_goals=None, frame_gks=None,
-                    track_jersey=None, draw_all_boxes=False):
+                    track_jersey=None, draw_all_boxes=False, fps=None):
     """Return a draw_hook(frame, src_idx) that boxes the event player, LOCKED to
     a single moving target. When zoom=True the hook also crops tight on the
     player's torso (from the real box coordinates, so it is immune to the
@@ -375,6 +381,27 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
     box ids already ARE jersey numbers, i.e. after the production remap).
     """
     if not frame_boxes or player_id is None:
+        # No actor to box (e.g. a goal_restart marker). Still stamp the running
+        # clock and draw the ball so the admin's restart clip is timestamped and
+        # ball-grounded — just without a highlighted player.
+        if fps or frame_balls:
+            _ball_at0 = _make_ball_lookup(frame_balls, stride)
+
+            def _minimal_hook(frame, src_idx):
+                if _ball_at0 is not None:
+                    bp = _ball_at0(src_idx)
+                    if bp is not None:
+                        bx, by = int(round(bp[0])), int(round(bp[1]))
+                        cv2.circle(frame, (bx, by), 10, (0, 0, 0), -1 if bp[2] else 2, cv2.LINE_AA)
+                        cv2.circle(frame, (bx, by), 7, (60, 245, 60), -1 if bp[2] else 2, cv2.LINE_AA)
+                if fps:
+                    _c = _fmt_clock(src_idx / fps)
+                    _h = frame.shape[0]
+                    cv2.putText(frame, _c, (12, _h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(frame, _c, (12, _h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+                return None
+            _minimal_hook.drew = {"any": False, "ball": 0}
+            return _minimal_hook
         return None
     keys = sorted(frame_boxes.keys())
     if not keys:
@@ -577,7 +604,20 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
             else:
                 _sm["ball"] = None  # ball genuinely lost -> reset so it doesn't slide on return
 
+        # Running match clock (mm:ss) bottom-left — the event/clip timestamp so
+        # the admin can locate + compare. Drawn last, in fixed screen coords, on
+        # whichever frame is returned (full frame, or the zoom crop) so it is
+        # never cropped out.
+        def _put_clock(target):
+            if not fps:
+                return
+            _c = _fmt_clock(src_idx / fps)
+            _h = target.shape[0]
+            cv2.putText(target, _c, (12, _h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(target, _c, (12, _h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+
         if not zoom:
+            _put_clock(frame)
             return None
         # Crop tight on the torso (upper third of the box) and upscale to the
         # clip's frame size. Uses the box coords, not colour detection.
@@ -589,7 +629,9 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
         left = int(min(max(cx - crop_w / 2.0, 0), w - crop_w))
         top = int(min(max(cy - crop_h / 2.0, 0), h - crop_h))
         crop = frame[top:top + crop_h, left:left + crop_w]
-        return cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
+        out = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
+        _put_clock(out)
+        return out
 
     hook.drew = drew  # inspect after writing to tally clips that got a box
     return hook
@@ -753,12 +795,20 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
 
         player = _event_player(ev)
 
-        # Label the box with the event; if the event carries a goal-gate verdict
-        # (goal_confirmed, added by stats.goal_gate) surface it, so a shot clip
-        # says up front whether a real goal was seen near the ball.
-        label = f"#{player} {ev['type']}"
+        # Label the box with the event + its timestamp (mm:ss) so the admin can
+        # locate and compare it (Babak: "timestamp of events should be labelled").
+        # Prefer the event's own time_s if present; else derive from the frame.
+        _ts = ev.get("time_s")
+        if _ts is None and fps:
+            _ts = src_frame / fps
+        _clk = f"  {_fmt_clock(_ts)}" if _ts is not None else ""
+        label = (f"#{player} {ev['type']}" if player is not None else ev["type"]) + _clk
         if ev.get("type") == "shot" and "goal_confirmed" in ev:
             label += " [ON GOAL]" if ev["goal_confirmed"] else " [NO GOAL NEARBY]"
+        # Surface the goal-restart cross-check right on the clip label.
+        if ev.get("type") == "goal_restart":
+            label = ("KICKOFF — CHECK GOAL" + _clk) if ev.get("goal_confirmation") \
+                else ("KICKOFF — POSSIBLE MISSED GOAL" + _clk)
 
         # Highlight the event player with a bounding box (keeps the full-frame
         # context so the admin can verify the play, not just the player).
@@ -771,7 +821,7 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             frame_balls=frame_balls,
             frame_goals=frame_goals if _is_shot else None,
             frame_gks=frame_gks if _is_shot else None,
-            track_jersey=track_jersey, draw_all_boxes=draw_all_boxes)
+            track_jersey=track_jersey, draw_all_boxes=draw_all_boxes, fps=fps)
 
         # With require_box on, skip events whose player is never tracked in the
         # clip window (draw_hook is None) — no highlightable subject, so a
