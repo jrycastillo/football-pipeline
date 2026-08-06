@@ -394,6 +394,7 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
                         bx, by = int(round(bp[0])), int(round(bp[1]))
                         cv2.circle(frame, (bx, by), 10, (0, 0, 0), -1 if bp[2] else 2, cv2.LINE_AA)
                         cv2.circle(frame, (bx, by), 7, (60, 245, 60), -1 if bp[2] else 2, cv2.LINE_AA)
+                        _minimal_hook.drew["ball"] += 1
                 if fps:
                     _c = _fmt_clock(src_idx / fps)
                     _h = frame.shape[0]
