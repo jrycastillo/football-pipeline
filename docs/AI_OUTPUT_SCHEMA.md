@@ -155,7 +155,7 @@ A flat JSON list; each event → one `events` row. **Common fields:**
 {
   "type":                 "shot",         // event type (table below)
   "frame":                655,            // int — PROCESSED frame index
-  "time_s":               78.72,          // float — seconds (COMING on raw events; already in clips + DB events.time_s)*
+  "time_s":               78.72,          // float — seconds into the source video (on every event)*
   "confidence":           0.43,           // float 0–1 — event confidence
   "identity_confidence":  0.90,           // float 0–1 — confidence in the player's jersey id
   "status":               "unverified"    // "unverified" | "verified" | "corrected" | "rejected"
@@ -178,9 +178,9 @@ the DB `events` table these collapse to `primary_player` (the actor: `player` /
 | `foul` | `by`, `on` | |
 | `touch` | `player`, `end_frame` (int) | possession spell |
 | `cross` | `from`, `to`, `complete` (bool) | CURRENT (appears when detected) |
-| `goal` | `player`, `assist` (jersey or null) | **COMING** — emitted when a shot is scored |
-| `assist` | `player`, `to`, `goal_frame` (int) | **COMING** — last pass to the scorer, ≤15s |
-| `goal_restart` / `kickoff` | `frame`, `time_s` | **COMING** — Babak's center-kickoff goal-confirmation cue |
+| `goal` | `player`, `assist` (jersey or null) | emitted when a shot is scored |
+| `assist` | `player`, `to`, `goal_frame` (int) | last completed pass to the scorer, ≤15s |
+| `goal_restart` | `frame`, `time_s`, `goal_confirmation` (bool), `preceding_shot_player`, `preceding_shot_frame` | center-kickoff goal-confirmation cue (Babak). A prior shot within ~90s is also tagged `goal_confirmed_by_restart` on that shot. Best-effort: precision-proven (0 false positives in 40 min), fires only when player/ball detection is clean enough to see the kickoff formation. Off-switch env `GOAL_RESTART=0`. |
 
 ---
 
@@ -304,8 +304,10 @@ You never get duplicate rows for the same video.
    this shared model — it's the whole architecture.
 4. **Team vs player:** `player_stats.json` / `ai_player_stats` are **per-player**;
    the dashboard row is **team totals** = aggregation of per-player fields.
-5. **COMING additive fields** (§4): `goal`/`assist`/`goal_restart` events + `time_s`
-   on raw events. Safe to build against now.
+5. **`goal_restart`** is best-effort goal-confirmation, not a guaranteed goal
+   detector — it's precision-proven (no false alarms) but only fires when the
+   footage is clean enough to resolve the kickoff formation. Treat its clips as an
+   admin *review cue*, not an authoritative goal.
 
 **To go live we need:** (a) your answer to §1 (blob vs normalized), (b) the rotated
 DB password (old one was committed, purged, must be rotated), (c) the live table

@@ -81,11 +81,11 @@ Player fields = jersey number (int) or null.
 | `foul` | `by` `on` |
 | `touch` | `player` `end_frame` |
 | `cross` | `from` `to` `complete` |
-| `goal` * | `player` `assist` |
-| `assist` * | `player` `to` `goal_frame` |
-| `goal_restart` * | `frame` `time_s` |
+| `goal` | `player` `assist` |
+| `assist` | `player` `to` `goal_frame` |
+| `goal_restart` | `frame` `goal_confirmation` `preceding_shot_player` `preceding_shot_frame` |
 
-\* coming soon (additive).
+`goal`/`assist`/`goal_restart` appear only when one occurs. `goal_restart` = center-kickoff goal-confirmation cue (best-effort review aid).
 
 ---
 
