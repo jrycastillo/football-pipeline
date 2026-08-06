@@ -234,7 +234,7 @@ class AdvancedEventDetector:
         STILL    = fw * 0.035                     # stationary tolerance
         GOAL_FAR = fw * 0.32                      # a goal within this = goalmouth, skip
         MOVE     = fw * 0.06                      # kicked = moves this far after settling
-        debounce = int(EFF_FPS * 20)
+        debounce = int(EFF_FPS * 30)   # dedupe near-duplicate fires around one kickoff
 
         def _goal_near(t, pt):
             lo, hi = max(0, t - settle), min(len(self._goal_centers) - 1, t + settle)
@@ -271,6 +271,32 @@ class AdvancedEventDetector:
                     right += 1
             return total >= 8 and n_near <= 3 and left >= 2 and right >= 2
 
+        def _players_static(t):
+            """A real kickoff has both teams LINED UP waiting for the whistle, so
+            players are nearly stationary; open play near the halfway line has them
+            running. Median player displacement over the settle window separates
+            them (measured on this footage: ~2.2-2.7% frame-width at real kickoffs
+            vs 3.8-5.3% in running open play). Rejects the running false positives."""
+            if t - settle < 0 or not isinstance(player_tracks[t], dict) \
+               or not isinstance(player_tracks[t - settle], dict):
+                return True   # can't tell -> don't block
+            prev = {}
+            for x in player_tracks[t - settle].get("boxes", []):
+                if x.get("id") is not None and x.get("cls") not in (3, 32, 33, 34) and x.get("xyxy"):
+                    xy = x["xyxy"]
+                    prev[x["id"]] = ((xy[0] + xy[2]) * 0.5, (xy[1] + xy[3]) * 0.5)
+            disps = []
+            for x in player_tracks[t].get("boxes", []):
+                pid = x.get("id")
+                if pid in prev and x.get("xyxy"):
+                    xy = x["xyxy"]
+                    disps.append(math.hypot((xy[0] + xy[2]) * 0.5 - prev[pid][0],
+                                            (xy[1] + xy[3]) * 0.5 - prev[pid][1]))
+            if len(disps) < 4:
+                return True   # too few matched tracks to judge -> don't block
+            disps.sort()
+            return disps[len(disps) // 2] <= fw * 0.032
+
         restarts, last = [], -10 ** 9
         t = settle
         while t < n - settle:
@@ -288,6 +314,8 @@ class AdvancedEventDetector:
                 t += 1; continue
             if not _kickoff_formation(t, b):
                 t += 1; continue          # throw-in / injury huddle, not a kickoff
+            if not _players_static(t):
+                t += 1; continue          # players running -> open play, not a kickoff
             run = 0; stoppage = False
             for k in range(max(0, t - gap_win), t - settle):
                 if ev_bt[k] is None:
