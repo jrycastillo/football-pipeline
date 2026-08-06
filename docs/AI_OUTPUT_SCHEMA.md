@@ -1,12 +1,18 @@
-# AI Output Schema — for Jhan (front-end / back-end integration)
+# AI Output & Database Schema — for Jhan (front-end / back-end integration)
 
-**What this is:** the complete schema our AI pipeline produces per match. This is
-the source of truth for the admin dashboard. Grounded in the actual current run
-output (not a mock-up). Companion to `DB_FIELDS_FOR_JHAN.md` (which covers the DB
-tables); this doc covers the **JSON the AI writes**.
+**Single source of truth** for everything the pipeline produces per match: the
+JSON the AI writes, how it's stored in the database, and how both map to the admin
+dashboard. Grounded in the actual current run output (not a mock-up).
 
-**Status legend used below:** `CURRENT` = produced today · `COMING` = additive,
-landing this week (nothing is removed or renamed — no breaking changes).
+**Data flow:**
+
+```
+AI pipeline ──▶ JSON files ──▶ Database ──▶ Front-end / admin dashboard
+                (§2–§6)        (§7 blob or normalized tables)     (§10 KPI row)
+```
+
+**Status legend:** `CURRENT` = produced today · `COMING` = additive, landing this
+week (nothing removed or renamed — no breaking changes).
 
 ---
 
@@ -17,53 +23,70 @@ The dashboard is a **derived view**. Every KPI comes from one of four sources �
 
 | Source | Meaning | Who produces it |
 |---|---|---|
-| **AI-tagged** | An event object the AI detects and tags (shot, pass, goal…). The admin **reviews & corrects** it. | **Our AI** + admin verification |
-| **admin-tagged** | A one-click event the AI can't reliably detect on single-camera (corner, throw-in, own goal). | **Admin only** |
-| **feed** | External feed — cards (`database`), and per the dashboard doc crosses/fouls (`afrisaut`). | **Not our AI** |
-| **calculated** | Derived from the above (conversion %, xG totals, chances). | Either side, one formula |
+| **AI-tagged** | An event the AI detects & tags (shot, pass, goal…); the admin **reviews & corrects** it. | **Our AI** + admin verification |
+| **admin-tagged** | A one-click event the AI can't reliably detect on single camera (corner, throw-in, own goal). | **Admin only** |
+| **feed** | External feed — cards (`database`), and per the dashboard spec crosses/fouls (`afrisaut`). | **Not our AI** |
+| **calculated** | Derived (conversion %, xG totals, chances). | Either side, one formula |
 
-So the AI's job is the **AI-tagged events** + the **~90 per-player metrics** below.
-The admin corrects them; the dashboard aggregates them into the home-vs-away KPI row.
+The AI's job = the **AI-tagged events** + the **~90 per-player metrics** (§3). The
+admin corrects them; the dashboard aggregates them into the home-vs-away KPI row.
 
 ---
 
-## 1. Output artifacts
+## 1. The ONE decision we need from you
+
+The pipeline writes results in **two shapes** — tell us which the front-end reads:
+
+- **(A) Legacy blob** — table `MatchesVideoAnalysis_test`, column `analysis`
+  (one JSON dump of the whole result). Written by `upsert_status_row()`.
+- **(B) Normalized tables** — the 6 queryable tables in §7. Written by
+  `persist_run_to_db()` (`--write_db`). **Recommended** — query per player / per
+  event without parsing a blob.
+
+Both are written and don't conflict; we just need to know which you build against
+so we validate the same thing.
+
+---
+
+## 2. Output artifacts (JSON the AI writes)
 
 | File | Shape | Purpose |
 |---|---|---|
-| `player_stats.json` | dict keyed by jersey number | Per-player metrics (§2) |
-| `raw_tracks.json` | list of event objects | The match event stream (§3) |
-| `clips_manifest.json` | list of clip objects | One entry per generated clip (§4) |
-| `track_jersey.json` | dict keyed by track id | Track-id → jersey/team map for overlays (§5) |
+| `player_stats.json` | dict keyed by jersey number | Per-player metrics (§3) |
+| `raw_tracks.json` | list of event objects | The match event stream (§4) |
+| `clips_manifest.json` | list of clip objects | One entry per generated clip (§5) |
+| `track_jersey.json` | dict keyed by track id | Track-id → jersey/team map for overlays (§6) |
 | `match_kits.json` | dict | Discovered team colours |
-| DB tables | 6 normalized tables | See `DB_FIELDS_FOR_JHAN.md` (§6) |
+
+These JSON files are the **inputs** to the DB layer (§7): `player_stats.json` →
+`ai_player_stats` + `matches.player_stats_json`; `raw_tracks.json` → `events`;
+`clips_manifest.json` → `clips`.
 
 ---
 
-## 2. `player_stats.json`
+## 3. `player_stats.json`
 
 Top level: `{ "<jersey_number>": <PlayerEntry> }` — key is the jersey number as a
-string.
+string. This object is stored verbatim in `matches.player_stats_json`; each entry
+becomes a row in `ai_player_stats` (its `stats` → `stats_json`).
 
-### 2.1 PlayerEntry (meta fields)
+### 3.1 PlayerEntry (meta fields)
 ```jsonc
 {
   "player_name":         "Player 8",      // string
   "jersey_number":       8,               // int
-  "team":                "White",         // string — team COLOUR, not club name*
+  "team":                "White",         // string — team COLOUR, not club name (see §8)
   "position":            "Player",        // string
   "role":                "Player",        // "Player" | "Goalkeeper" | "Referee"
   "observations":        1423,            // int — frames the player was tracked
   "confidence_score":    0.87,            // float 0–1 — identity confidence
   "verification_status": "unverified",    // "unverified" | "verified" | "corrected"
   "soft_registered":     false,           // bool — jersey bound but not hard-locked
-  "stats":               { ...§2.2 }
+  "stats":               { ...§3.2 }
 }
 ```
-\* `team` is the colour (`"White"`, `"Black"`). Map to club via `roster_players`
-(join on colour) — see `DB_FIELDS_FOR_JHAN.md` §3.
 
-### 2.2 `stats` — all metrics (CURRENT unless marked)
+### 3.2 `stats` — all metrics (CURRENT unless marked)
 
 Types: `_total`/counts = int; `_pct`/`percent` = float 0–100; `xg_*` = float;
 distances = float (metres); `_s` = float (seconds).
@@ -124,25 +147,26 @@ penalties_saved_total, freekick_saved_total, corners_saved_total
 
 ---
 
-## 3. `raw_tracks.json` — event stream
+## 4. `raw_tracks.json` — event stream
 
-A flat JSON list. Every event has these **common fields**:
+A flat JSON list; each event → one `events` row. **Common fields:**
 
 ```jsonc
 {
   "type":                 "shot",         // event type (table below)
   "frame":                655,            // int — PROCESSED frame index
-  "time_s":               78.72,          // float — seconds (COMING on raw events; already in clips + DB)**
+  "time_s":               78.72,          // float — seconds (COMING on raw events; already in clips + DB events.time_s)*
   "confidence":           0.43,           // float 0–1 — event confidence
   "identity_confidence":  0.90,           // float 0–1 — confidence in the player's jersey id
   "status":               "unverified"    // "unverified" | "verified" | "corrected" | "rejected"
 }
 ```
-\*\* `time_s = source_frame / fps`, where `source_frame = (frame + 1) * vid_stride`
-(stride 3, 25 fps in these runs). Present today in `clips_manifest.json` and the DB
-`events.time_s`; being added onto the raw event objects too.
+\* `time_s = source_frame / fps`, `source_frame = (frame + 1) * vid_stride`
+(stride 3, 25 fps in these runs).
 
-Per-type extra fields (player fields are **jersey numbers**, int, or `null`):
+Per-type extra fields (player fields are **jersey numbers**, int, or `null`). In
+the DB `events` table these collapse to `primary_player` (the actor: `player` /
+`from` / `by`) and `secondary_player` (`to` / `on` / `against`):
 
 | type | extra fields | notes |
 |---|---|---|
@@ -160,11 +184,11 @@ Per-type extra fields (player fields are **jersey numbers**, int, or `null`):
 
 ---
 
-## 4. `clips_manifest.json` — one entry per clip  (CURRENT)
+## 5. `clips_manifest.json` — one entry per clip  (CURRENT) → `clips` table
 
 ```jsonc
 {
-  "clip":                          "clips/000_shot_p42_f1968.mp4", // string, relative path
+  "clip":                          "clips/000_shot_p42_f1968.mp4", // string, relative path → clip_path
   "type":                          "shot",       // event type
   "player":                        42,            // int jersey (primary actor)
   "confidence":                    0.43,          // float
@@ -172,7 +196,7 @@ Per-type extra fields (player fields are **jersey numbers**, int, or `null`):
   "identity_confidence_receiver":  null,          // float | null (passes)
   "codec":                         "h264",        // "h264" | "mp4v"
   "size_bytes":                    3058847,       // int
-  "status":                        "unverified",  // review state
+  "status":                        "unverified",  // review state → upload_status/status
   "event_frame":                   655,           // int — processed frame
   "source_frame":                  1968,          // int — original-video frame
   "time_s":                        78.72,         // float — event timestamp (seconds)
@@ -185,25 +209,59 @@ Per-type extra fields (player fields are **jersey numbers**, int, or `null`):
 
 ---
 
-## 5. `track_jersey.json` — overlay map  (CURRENT)
+## 6. `track_jersey.json` — overlay map  (CURRENT)
 
 `{ "<track_id>": { "jersey": <int|null>, "team": <colour|null> } }`
 
-Maps raw tracker IDs → jersey/team. Powers the "box every player with T{id}
+Maps raw tracker IDs → jersey/team; powers the "box every player with T{id}
 #{jersey}" overlay. `jersey` is `null` for tracks that never locked a number.
 
 ---
 
-## 6. DB tables
+## 7. Database — normalized tables (shape B)
 
-Six normalized tables (`matches`, `ai_player_stats`, `events`, `clips`,
-`roster_players`, `roster_known_stats`) — full field lists and the **one open
-decision** (JSON blob vs normalized tables) are in **`DB_FIELDS_FOR_JHAN.md`**.
-Note `events.time_s` already exists there.
+| Table | One row per | Key fields the front-end will use |
+|---|---|---|
+| `matches` | video | `analysis_id`, `matches_video_id`, `user_id`, `source_url`, `status`, `roster_json`, `player_stats_json`, `created_at`, `updated_at` |
+| `ai_player_stats` | player | `player_key`, `jersey_number`, `team_name`* , `player_name`, `verification_status`, `stats_json` (the §3.2 object, ~90 metrics), `player_json` |
+| `events` | event | `event_index`, `event_type`, `frame`, `time_s`, `primary_player`, `secondary_player`, `confidence`, `identity_confidence`, `identity_confidence_receiver`, `status` |
+| `clips` | clip | `clip_index`, `clip_path`, `event_type`, `player`, `player_boxed`, `upload_status`, `time_s`, `event_frame`, `size_bytes` |
+| `roster_players` | roster entry | `team_name`, `team_color`, `jersey_number` |
+| `roster_known_stats` | metric/team | `metric`, `team_name`, `stat_value_json` |
+
+All child tables key back to `matches.analysis_id` (foreign key, cascade delete).
+\* `team_name` here is a **colour** — see §8.
 
 ---
 
-## 7. Dashboard KPI → schema (the 5 blocks in Jhan's doc)
+## 8. Important join note (`team_name` is a colour, not the club name)
+
+`ai_player_stats.team_name` holds the player's **team colour** (`"White"`,
+`"Black"`) — not the club name. `roster_players` holds both `team_name`
+(`"Hamburger SV"`) **and** `team_color` (`"white"`).
+
+**To map a player to their club, join on colour:**
+`ai_player_stats.team_name` (colour) → `roster_players.team_color`.
+
+Roster-unique jersey numbers get the **correct** colour (a fix shipped for ~5
+previously-mislabelled players). Numbers on *both* rosters (e.g. #1, #9, #17) are
+colour-derived and can't be club-resolved by number alone — treat as "colour
+known, club ambiguous" if surfaced.
+
+---
+
+## 9. Same-video handling (idempotent — no duplicates)
+
+Re-processing a video is safe:
+- `matches` upserts on `analysis_id` (`ON DUPLICATE KEY UPDATE`).
+- Child rows are deleted-and-reinserted by `analysis_id`.
+- `is_video_processed()` skips finished videos and reclaims crashed runs.
+
+You never get duplicate rows for the same video.
+
+---
+
+## 10. Dashboard KPI → schema (the 5 blocks in the admin-dashboard spec)
 
 `AI` = we produce it · `admin` = admin one-click tags it · `feed` = external ·
 `calc` = derived.
@@ -234,16 +292,22 @@ Note `events.time_s` already exists there.
 
 ---
 
-## 8. Gaps & open decisions (for the team)
+## 11. Gaps, open decisions & go-live checklist
 
+**Gaps / decisions (for the team):**
 1. **AI can't detect** own goals, corners, throw-ins-in-final-third on single
    camera → **admin one-click tags** them (matches the dashboard's "tagged" model).
 2. **Cards** = `database` feed, not AI. **Crosses/Fouls** listed as `afrisaut`
    feed but the AI *also* computes them → pick one source of truth. **What is
    `afrisaut`?** — confirm whether it's a live feed.
 3. **"tagged" = AI-pre-tagged + admin-verified**, not manual-from-scratch. Confirm
-   this is the shared model (it is the whole architecture).
-4. Team-vs-player: `player_stats.json` is **per-player**; the dashboard row is
-   **team totals** = aggregation of per-player fields.
-5. **COMING additive fields** (§3): `goal`/`assist`/`goal_restart` events,
-   `time_s` on raw events. Safe to build against now.
+   this shared model — it's the whole architecture.
+4. **Team vs player:** `player_stats.json` / `ai_player_stats` are **per-player**;
+   the dashboard row is **team totals** = aggregation of per-player fields.
+5. **COMING additive fields** (§4): `goal`/`assist`/`goal_restart` events + `time_s`
+   on raw events. Safe to build against now.
+
+**To go live we need:** (a) your answer to §1 (blob vs normalized), (b) the rotated
+DB password (old one was committed, purged, must be rotated), (c) the live table
+name (config points at `MatchesVideoAnalysis_test`). Then one real end-to-end write
+and you can point the front-end at it.
