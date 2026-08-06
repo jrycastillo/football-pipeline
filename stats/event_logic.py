@@ -228,7 +228,7 @@ class AdvancedEventDetector:
         cx_px, cy_px = fw * 0.5, fh * 0.5
         settle   = max(2, int(EFF_FPS * 0.6))
         gap_win  = max(3, int(EFF_FPS * 60.0))   # look back ~60 s: the goal celebration/replay gap sits WELL before the kickoff (by kickoff time the ball is placed & re-detected), not in the last few seconds
-        min_gap  = max(2, int(EFF_FPS * 5.0))    # >=5 s CONTINUOUS ball-undetected = a real stoppage (goal celebration / replay), which open play never produces
+        min_gap  = max(2, int(EFF_FPS * 7.0))    # >=7 s CONTINUOUS ball-undetected = a real goal stoppage (measured: 9.7-21.8 s celebration gaps at real kickoffs vs 5.8 s for a brief open-play detection blip)
         CENTER_X = fw * 0.20                      # ball within 20% of frame centre-x
         CENTER_Y = fh * 0.30
         STILL    = fw * 0.035                     # stationary tolerance
@@ -297,6 +297,29 @@ class AdvancedEventDetector:
             disps.sort()
             return disps[len(disps) // 2] <= fw * 0.032
 
+        def _kicker_on_ball(t):
+            """A kickoff has the kicker standing right OVER the ball (about to tap
+            it), so a player is essentially on it; the residual false positives are
+            LOOSE balls in open play with the nearest player several body-lengths
+            away. Min over the settle window, so it still passes if the kicker steps
+            up mid-window. Measured: nearest player 1.5-2.2% frame-width at real
+            kickoffs vs 4.7-7.2% at the false positives — a clean separation."""
+            best = 1e18
+            for k in range(t - settle, t + settle + 1):
+                if not (0 <= k < n):
+                    continue
+                p = ev_bt[k]
+                if p is None or not isinstance(player_tracks[k], dict):
+                    continue
+                for x in player_tracks[k].get("boxes", []):
+                    if x.get("id") is None or x.get("cls") in (3, 32, 33, 34) or not x.get("xyxy"):
+                        continue
+                    xy = x["xyxy"]
+                    d = math.hypot((xy[0] + xy[2]) * 0.5 - p[0], (xy[1] + xy[3]) * 0.5 - p[1])
+                    if d < best:
+                        best = d
+            return best <= fw * 0.035
+
         restarts, last = [], -10 ** 9
         t = settle
         while t < n - settle:
@@ -316,6 +339,8 @@ class AdvancedEventDetector:
                 t += 1; continue          # throw-in / injury huddle, not a kickoff
             if not _players_static(t):
                 t += 1; continue          # players running -> open play, not a kickoff
+            if not _kicker_on_ball(t):
+                t += 1; continue          # loose ball, no kicker on it -> not a kickoff
             run = 0; stoppage = False
             for k in range(max(0, t - gap_win), t - settle):
                 if ev_bt[k] is None:
