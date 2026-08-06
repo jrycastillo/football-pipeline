@@ -210,9 +210,11 @@ class AdvancedEventDetector:
           2. NO detected goal is near the ball  -> rules out a goalmouth scramble
              (which also sits centre-frame because the camera pans to it);
           3. the ball is nearly stationary for ~0.6 s (placed for the kick);
-          4. it ARRIVED after a real stoppage — the ball was undetected for >=2 s
-             just before (a goal celebration + walk-back), which open-play midfield
-             flow never produces;
+          4. it ARRIVED after a real stoppage — a >=5 s CONTINUOUS ball-undetected
+             stretch somewhere in the ~60 s before it (the goal celebration/replay;
+             by kickoff time the ball is placed and re-detected, so the gap sits
+             well before, not in the last few seconds), which open-play flow never
+             produces;
           5. then it moves off (the kick).
         Emits `goal_restart` events (status unverified) for the admin to confirm.
         Off-switch: env GOAL_RESTART=0.
@@ -225,8 +227,8 @@ class AdvancedEventDetector:
         fw, fh = self.frame_width, self.frame_height
         cx_px, cy_px = fw * 0.5, fh * 0.5
         settle   = max(2, int(EFF_FPS * 0.6))
-        gap_win  = max(3, int(EFF_FPS * 6.0))    # look back ~6 s for the stoppage
-        min_gap  = max(2, int(EFF_FPS * 2.0))    # >=2 s ball-undetected = real stoppage
+        gap_win  = max(3, int(EFF_FPS * 60.0))   # look back ~60 s: the goal celebration/replay gap sits WELL before the kickoff (by kickoff time the ball is placed & re-detected), not in the last few seconds
+        min_gap  = max(2, int(EFF_FPS * 5.0))    # >=5 s CONTINUOUS ball-undetected = a real stoppage (goal celebration / replay), which open play never produces
         CENTER_X = fw * 0.20                      # ball within 20% of frame centre-x
         CENTER_Y = fh * 0.30
         STILL    = fw * 0.035                     # stationary tolerance
