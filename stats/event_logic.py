@@ -190,7 +190,7 @@ class AdvancedEventDetector:
                     return True
         return False
 
-    def _detect_goal_restarts(self, events, ev_bt):
+    def _detect_goal_restarts(self, events, ev_bt, player_tracks):
         """Babak's goal-confirmation cue: a kickoff from the CENTER circle.
 
         In football, play always restarts from the center spot after a goal, so a
@@ -242,6 +242,33 @@ class AdvancedEventDetector:
                         return True
             return False
 
+        near_c = fw * 0.15
+        def _kickoff_formation(t, ball):
+            """The signature that separates a real center kickoff from a throw-in
+            or an injury/foul huddle (both of which also give a central stationary
+            ball after a stoppage): the two teams line up in their OWN halves, so
+            the center circle around the ball is nearly EMPTY while BOTH sides are
+            populated. A throw-in is few players on one touchline; an injury is a
+            cluster bunched AT the center — both fail this."""
+            if not (0 <= t < len(player_tracks)) or not isinstance(player_tracks[t], dict):
+                return False
+            left = right = n_near = total = 0
+            for b in player_tracks[t].get("boxes", []):
+                if b.get("id") is None or b.get("cls") in (3, 32, 33, 34):
+                    continue  # skip referee + ball-model markers; count only players
+                xy = b.get("xyxy")
+                if not xy:
+                    continue
+                total += 1
+                dx = (xy[0] + xy[2]) * 0.5 - ball[0]
+                if abs(dx) <= near_c:
+                    n_near += 1
+                elif dx < 0:
+                    left += 1
+                else:
+                    right += 1
+            return total >= 8 and n_near <= 3 and left >= 2 and right >= 2
+
         restarts, last = [], -10 ** 9
         t = settle
         while t < n - settle:
@@ -257,6 +284,8 @@ class AdvancedEventDetector:
                 t += 1; continue
             if self._has_goals and _goal_near(t, b):
                 t += 1; continue
+            if not _kickoff_formation(t, b):
+                t += 1; continue          # throw-in / injury huddle, not a kickoff
             run = 0; stoppage = False
             for k in range(max(0, t - gap_win), t - settle):
                 if ev_bt[k] is None:
@@ -1626,7 +1655,7 @@ class AdvancedEventDetector:
         # Goal-confirmation via center-circle kickoff (Babak). Runs after all
         # shots/goals are known so it can cross-reference them. Uses the pristine
         # full-frame ball track (ev_bt), same as the shot gate.
-        self._detect_goal_restarts(events, ev_bt)
+        self._detect_goal_restarts(events, ev_bt, player_tracks)
 
         # Timestamp every event: seconds into the SOURCE video. `frame` is the
         # processed index; source_frame = (frame+1)*VID_STRIDE, time_s = /FPS.
