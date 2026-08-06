@@ -642,7 +642,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
                 max_clips=200, codec="h264", frame_boxes=None, zoom=False,
                 valid_players=None, require_box=False, frame_balls=None,
                 clean_passes=True, frame_goals=None, frame_gks=None,
-                track_jersey=None, draw_all_boxes=False):
+                track_jersey=None, draw_all_boxes=False,
+                pad_before_s=None, pad_after_s=None):
     """Write pad_s-padded clips for selected events + clips_manifest.json.
 
     events: the pipeline event list (raw_tracks.json content).
@@ -665,7 +666,13 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    pad_frames = int(round(pad_s * fps))
+    # Asymmetric padding: pad_before_s / pad_after_s override pad_s per side, so a
+    # clip can lead in with the build-up and run on to show the outcome — enough
+    # to read the whole event, not just the instant.
+    _pb = pad_before_s if pad_before_s is not None else pad_s
+    _pa = pad_after_s if pad_after_s is not None else pad_s
+    pad_before_frames = int(round(_pb * fps))
+    pad_after_frames = int(round(_pa * fps))
 
     selected = []
     _dropped_pass = 0
@@ -786,8 +793,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     kept = 0
     for ev in selected:
         src_frame = (int(ev.get("frame", 0)) + 1) * max(1, vid_stride)
-        start = max(0, src_frame - pad_frames)
-        end = src_frame + pad_frames
+        start = max(0, src_frame - pad_before_frames)
+        end = src_frame + pad_after_frames
         if total_frames > 0:
             end = min(end, total_frames - 1)
         if end <= start:
@@ -892,6 +899,10 @@ if __name__ == "__main__":
     parser.add_argument("--vid_stride", type=int, default=1,
                         help="vid_stride the pipeline ran with (frame index mapping)")
     parser.add_argument("--pad_s", type=float, default=3.0, help="Seconds of padding each side")
+    parser.add_argument("--pad_before_s", type=float, default=None,
+                        help="Seconds BEFORE the event (overrides --pad_s for the lead-in)")
+    parser.add_argument("--pad_after_s", type=float, default=None,
+                        help="Seconds AFTER the event (overrides --pad_s for the outcome)")
     parser.add_argument("--min_conf", type=float, default=None)
     parser.add_argument("--max_conf", type=float, default=None,
                         help="e.g. 0.75 → only low-confidence events (admin review queue)")
@@ -951,6 +962,7 @@ if __name__ == "__main__":
               f"tracks carry a jersey number")
     clip_events(args.video, event_list, args.output_dir,
                 vid_stride=args.vid_stride, pad_s=args.pad_s,
+                pad_before_s=args.pad_before_s, pad_after_s=args.pad_after_s,
                 event_types=tuple(t.strip() for t in args.types.split(",") if t.strip()),
                 min_conf=args.min_conf, max_conf=args.max_conf, codec=args.codec,
                 frame_boxes=frame_boxes, zoom=args.zoom, max_clips=args.max_clips,
