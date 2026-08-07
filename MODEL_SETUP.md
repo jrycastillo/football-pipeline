@@ -1,43 +1,48 @@
-# Model Setup Guide
+# Model Setup
 
-This pipeline requires 4 specific model weight files to function. 
+The pipeline loads its model weights from `models/` (relative to the repo root).
+`models/` is **git-ignored** — weights are large (~350 MB core) and are stored
+outside git. Download them and place them in `models/` before running.
 
-## 1. Download Models
-Download the models from the shared Google Drive:
-[Google Drive Link](https://drive.google.com/drive/folders/1lePXabD0EbDKVzN5eHTSTxKH6-pq74WL?usp=sharing)
+## Required models (must match `config.yaml`)
 
-## 2. Model Files
-You should have the following 4 files:
+| File | Role | config.yaml key | Approx size | Required? |
+|---|---|---|---|---|
+| `yolo_player.pt` | Player/GK/referee detection (YOLOv8) | `DET_WEIGHTS` | ~131 MB | **Yes** |
+| `resnet34_clean.pt` | Jersey-number recognition (ResNet34) | `JNR_WEIGHTS` | ~82 MB | **Yes** |
+| `nabeel_best.pt` | Ball **and** goal detection (multi-class) | `BALL_MODEL_PATH`, `GOAL_MODEL_PATH` | ~43 MB | **Yes** |
+| `yolo_pitch.pt` | Pitch-keypoint homography | `POSE_WEIGHTS` | ~134 MB | Optional* |
 
-| File Name | Description | Size |
-|-----------|-------------|------|
-| `resnet34_rgb_jnr.pt` | **JNR**: RGB-Fine-Tuned ResNet34 for Jersey Number Recog | ~82MB |
-| `yolo_player.pt` | **Detection**: YOLOv8 Player/Person Detection | ~131MB |
-| `yolo_ball.pt` | **Ball**: YOLOv8 Ball Detection | ~131MB |
-| `yolo_pitch.pt` | **Pitch**: YOLOv8 Pitch Keypoint Detection | ~134MB |
+\* **Optional** — only used with `--pitch_homography`. Without it the pipeline runs
+normally; pitch homography (distance/xG geometry) just stays off. If you don't have
+`yolo_pitch.pt`, leave `POSE_WEIGHTS` as-is and don't pass `--pitch_homography`.
 
-## 3. Installation
-1. Create a `models/` directory in the root of the project:
-   ```bash
-   mkdir -p models
-   ```
+> These are the **current** model names. Older docs referenced
+> `resnet34_rgb_jnr.pt` / `yolo_ball.pt` — those are superseded. Always match the
+> filenames in `config.yaml`.
 
-2. Place the 4 `.pt` files inside the `models/` directory.
+## Install
 
-   Your structure should look like:
-   ```
-   football/
-   ├── models/
-   │   ├── resnet34_rgb_jnr.pt
-   │   ├── yolo_player.pt
-   │   ├── yolo_ball.pt
-   │   └── yolo_pitch.pt
-   ├── orchestrator.py
-   ├── pipeline_consolidated.py
-   └── ...
-   ```
+```bash
+mkdir -p models
+# copy/download the files into models/, e.g.:
+#   models/yolo_player.pt
+#   models/resnet34_clean.pt
+#   models/nabeel_best.pt
+#   models/yolo_pitch.pt        # optional
+```
 
-## 4. Configuration
-If you placed the files in `models/` as above, update your `config.yaml` or pass arguments to the pipeline.
+Source of the weights: the team's shared storage. **For production, host them in
+object storage (S3 / GCS / DigitalOcean Spaces)** and pull them in at deploy time —
+not Google Drive, which isn't reliable for automated setup.
 
-**Recommended:** The `pipeline_consolidated.py` script checks `models/` by default for some, but you may need to specify paths if they differ from legacy hardcoded paths.
+## Verify
+
+```bash
+python check_setup.py            # checks models/config are in place
+# or manually:
+ls -lh models/{yolo_player,resnet34_clean,nabeel_best}.pt
+```
+
+If a required file is missing or misnamed, the pipeline fails at model load with a
+clear "file not found" — check the name against `config.yaml`.

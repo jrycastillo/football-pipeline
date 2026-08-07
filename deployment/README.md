@@ -1,4 +1,8 @@
-# Deployment Guide
+# Deployment — systemd service files
+
+> **Full end-to-end setup (clone → models → config → DB → run) is in
+> [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md).** This directory just holds the
+> systemd unit + installer referenced there.
 
 This directory contains files for deploying the Football Pipeline as a systemd service on Linux servers (Ubuntu/Debian).
 

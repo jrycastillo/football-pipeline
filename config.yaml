@@ -5,6 +5,8 @@
 env:
   SRC_VIDEO: "test_videos/g5718885-fullhd.mp4"
   DET_WEIGHTS: "models/yolo_player.pt"
+  # POSE_WEIGHTS is OPTIONAL — pitch-keypoint homography only (used with
+  # --pitch_homography). The pipeline runs without it (homography stays off).
   POSE_WEIGHTS: "models/yolo_pitch.pt"
   JNR_WEIGHTS: "models/resnet34_clean.pt"
   # Ball detector: nabeel_best.pt (multi-class; we keep only its "Ball" class)
@@ -28,9 +30,10 @@ env:
   MYSQL_DB: "footballgallery"
   TABLE_NAME: "MatchesVideoAnalysis_test"
 
-  # ScoutBridge API
+  # ScoutBridge API — SECRETS COME FROM .env, NOT here (see .env.example).
+  # SBG_BASE may stay (non-secret URL); SBG_TOKEN must be set in .env.
   SBG_BASE: "https://api-staging.scoutbridge.net/football-gallery/api"
-  SBG_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzQzNDQzMTEsInN1YiI6ImFudG9uaW9qaGFuY2Vkcmljays1QGdtYWlsLmNvbSIsInVzZXJfaWQiOiJlZTIyYWFlNiJ9.Y2fPbgUPxlKX6xbmbuJzYc_SXI_7rO47rN0LAPKQvdk"
+  SBG_TOKEN: ""   # set SBG_TOKEN in .env — do NOT commit a token here
 
 # Heuristics & Thresholds - OPTIMIZED FOR H100 (SPEED + QUALITY BALANCE)
 heuristics:
