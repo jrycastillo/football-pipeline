@@ -381,13 +381,32 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
     box ids already ARE jersey numbers, i.e. after the production remap).
     """
     if not frame_boxes or player_id is None:
-        # No actor to box (e.g. a goal_restart marker). Still stamp the running
-        # clock and draw the ball so the admin's restart clip is timestamped and
-        # ball-grounded — just without a highlighted player.
-        if fps or frame_balls:
+        # No single actor to box (e.g. a goal_restart / kickoff marker). Still make
+        # the clip legible: a big event-LABEL banner at the top (so it clearly reads
+        # as a KICKOFF, not raw footage), every player boxed (the kickoff formation),
+        # the ball, and the running clock.
+        if fps or frame_balls or frame_boxes:
             _ball_at0 = _make_ball_lookup(frame_balls, stride)
+            _keys0 = sorted(frame_boxes.keys()) if frame_boxes else []
 
             def _minimal_hook(frame, src_idx):
+                _h, _w = frame.shape[:2]
+                # every player boxed (cyan T{id} #{jersey}) at the nearest sample
+                if draw_all_boxes and _keys0:
+                    _pos = bisect.bisect_left(_keys0, src_idx)
+                    _cand = [_keys0[i] for i in (_pos - 1, _pos) if 0 <= i < len(_keys0)]
+                    _nk = min(_cand, key=lambda k: abs(k - src_idx)) if _cand else None
+                    if _nk is not None and abs(_nk - src_idx) <= stride:
+                        for _tid, _b in frame_boxes[_nk].items():
+                            bx1, by1, bx2, by2 = (int(round(v)) for v in _b)
+                            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (255, 200, 0), 2)
+                            _lab = f"T{_tid}"
+                            _j = track_jersey.get(_tid, "") if track_jersey else ""
+                            if _j:
+                                _lab += f" {_j}"
+                            cv2.putText(frame, _lab, (bx1, max(10, by1 - 5)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1, cv2.LINE_AA)
+                # ball
                 if _ball_at0 is not None:
                     bp = _ball_at0(src_idx)
                     if bp is not None:
@@ -395,13 +414,18 @@ def _make_draw_hook(cv2, frame_boxes, player_id, stride, label, event_src=None,
                         cv2.circle(frame, (bx, by), 10, (0, 0, 0), -1 if bp[2] else 2, cv2.LINE_AA)
                         cv2.circle(frame, (bx, by), 7, (60, 245, 60), -1 if bp[2] else 2, cv2.LINE_AA)
                         _minimal_hook.drew["ball"] += 1
+                # prominent event-label banner (top-centre) so it reads as a KICKOFF
+                (_tw, _th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3)
+                _lx = max(10, (_w - _tw) // 2)
+                cv2.rectangle(frame, (_lx - 14, 18), (_lx + _tw + 14, 34 + _th + 14), (0, 0, 0), -1)
+                cv2.putText(frame, label, (_lx, 34 + _th), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 215, 255), 3, cv2.LINE_AA)
+                # running clock
                 if fps:
                     _c = _fmt_clock(src_idx / fps)
-                    _h = frame.shape[0]
                     cv2.putText(frame, _c, (12, _h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
                     cv2.putText(frame, _c, (12, _h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
                 return None
-            _minimal_hook.drew = {"any": False, "ball": 0}
+            _minimal_hook.drew = {"any": True, "ball": 0}
             return _minimal_hook
         return None
     keys = sorted(frame_boxes.keys())
@@ -815,8 +839,8 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             label += " [ON GOAL]" if ev["goal_confirmed"] else " [NO GOAL NEARBY]"
         # Surface the goal-restart cross-check right on the clip label.
         if ev.get("type") == "goal_restart":
-            label = ("KICKOFF — CHECK GOAL" + _clk) if ev.get("goal_confirmation") \
-                else ("KICKOFF — POSSIBLE MISSED GOAL" + _clk)
+            label = ("KICKOFF - CHECK GOAL" + _clk) if ev.get("goal_confirmation") \
+                else ("KICKOFF - POSSIBLE MISSED GOAL" + _clk)
 
         # Highlight the event player with a bounding box (keeps the full-frame
         # context so the admin can verify the play, not just the player).
