@@ -880,7 +880,7 @@ class StatsEngine:
             #   time periods so distance is additive (unlike events which could double-count
             #   if same event appears in multiple fragments, distance physically cannot)
             _EVENT_KEYS = {
-                "distance_m", "touch_frames",  # accumulative but additive across non-overlapping fragments
+                "touch_frames",  # additive across fragments; distance_m handled separately (max, not sum)
                 "tackles", "tackles_successful", "shots_on_target",
                 "dribbles", "dribbles_successful",
                 "passes_total", "passes_complete",
@@ -928,6 +928,15 @@ class StatsEngine:
                                 if isinstance(val, (int, float)) and val > 0:
                                     merged[key] = merged.get(key, 0) + val
                                     recovered_events += 1
+                    # distance_m: take the MAX single-fragment distance, not the SUM.
+                    # ByteTrack fragments overlap in time, so summing double-counts and
+                    # inflates distance past the physical cap — which then clamps every
+                    # over-cap player to the SAME capped value (e.g. #42 and #44 both
+                    # 1611.1m). Max is a physical lower bound and keeps players distinct.
+                    _fd = [sd.get("distance_m", 0) for _, sd, _ in merge_candidates
+                           if isinstance(sd.get("distance_m"), (int, float))]
+                    if _fd:
+                        merged["distance_m"] = max(_fd)
                     # R20: Goal rescue with dedup — scan remaining fragments for goals,
                     # but only rescue if top-N merge found 0 goals for this player.
                     # Cap at 2 goals per player max (hat-tricks are rare edge cases).
