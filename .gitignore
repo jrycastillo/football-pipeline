@@ -82,6 +82,21 @@ ground_truth/
 *.rar
 full_stats_report_*.md
 
+# --- Non-runtime code excluded from production branch ---
+basketball/
+sam2/
+scripts/
+tools/
+.agent/
+ai-analysis-pipeline/
+test_*.py
+debug_*.py
+export_models.py
+download_soccernet_jnr.py
+cleanup_for_production.sh
+config_m4pro.yaml
+config_backup*.yaml
+
 # --- Exceptions (Do not ignore) ---
 !config.yaml
 !schemas.py
