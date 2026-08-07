@@ -217,7 +217,7 @@ def main():
     downloader.downloadDataTask(task="jersey-2023", split=SPLITS)
 
     print("\n" + "=" * 60)
-    print("✅ Download complete!")
+    print(" Download complete!")
     print(f"Dataset location: {LOCAL_DIR}/jersey-2023/")
     print("=" * 60)
 

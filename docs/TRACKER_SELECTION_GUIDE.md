@@ -13,14 +13,14 @@ The pipeline supports three tracking backends:
 - **Accuracy**: Good for continuous tracking, struggles with long occlusions
 
 #### When to Use ByteTrack
-✅ **Best for:**
+**Best for:**
 - High frame rate videos (>25 fps)
 - Continuous camera view (minimal cuts/panning)
 - Speed-critical applications
 - Videos with few occlusions
 - Standard broadcast football matches
 
-❌ **Avoid when:**
+**Avoid when:**
 - Video has frequent camera cuts
 - Players are heavily occluded for extended periods
 - Jersey colors are very similar
@@ -42,14 +42,14 @@ python orchestrator.py --local_video video.mp4 --tracking_mode bytetrack
 - **Accuracy**: Best ID consistency, robust to occlusions
 
 #### When to Use BoT-SORT
-✅ **Best for:**
+**Best for:**
 - Long videos where ID consistency is critical
 - Videos with frequent occlusions (players crossing paths)
 - Camera panning or zoom changes
 - Production environments requiring highest accuracy
 - Post-match analysis where precision matters
 
-❌ **Avoid when:**
+**Avoid when:**
 - Real-time processing required
 - Limited compute resources
 - Very short clips (<30 seconds)
@@ -72,13 +72,13 @@ python orchestrator.py --local_video video.mp4 --tracking_mode botsort
 - **Accuracy**: Excellent segmentation, experimental for tracking
 
 #### When to Use SAM2
-✅ **Best for:**
+**Best for:**
 - Research and experimentation
 - Cases requiring pixel-perfect player masks
 - Videos with extreme occlusions or unusual angles
 - Scenarios where traditional trackers fail
 
-❌ **Avoid when:**
+**Avoid when:**
 - Production use (not battle-tested)
 - Limited GPU memory (<16GB VRAM)
 - Real-time processing needed
@@ -120,11 +120,11 @@ Experimental features needed?
 
 ## Performance Comparison
 
-| Tracker   | Speed (GPU) | ID Switches | Memory | Best For |
+| Tracker | Speed (GPU) | ID Switches | Memory | Best For |
 |-----------|-------------|-------------|--------|----------|
-| ByteTrack | ⚡⚡⚡ 100 FPS | ~5-10% | 2GB | Standard matches |
-| BoT-SORT  | ⚡⚡ 50 FPS | ~1-3% | 4GB | High accuracy |
-| SAM2      | ⚡ 10 FPS | ~2-5% | 16GB | Research |
+| ByteTrack | 100 FPS | ~5-10% | 2GB | Standard matches |
+| BoT-SORT | 50 FPS | ~1-3% | 4GB | High accuracy |
+| SAM2 | 10 FPS | ~2-5% | 16GB | Research |
 
 *Benchmarks based on 1080p video, YOLO detection model, RTX 3090*
 

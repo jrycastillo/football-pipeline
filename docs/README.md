@@ -4,17 +4,17 @@
 
 ---
 
-## 📖 Documentation Overview
+## Documentation Overview
 
 This directory contains comprehensive documentation for the Football Analysis Pipeline system.
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 **New to the pipeline?** Start here:
 
-1. **[Pipeline Usage Guide](PIPELINE_USAGE.md)** ⭐
+1. **[Pipeline Usage Guide](PIPELINE_USAGE.md)**
    - Complete command-line reference
    - All arguments explained
    - Common workflows and examples
@@ -32,7 +32,7 @@ This directory contains comprehensive documentation for the Football Analysis Pi
 
 ---
 
-## 📚 Reference Documentation
+## Reference Documentation
 
 ### Architecture & Design
 
@@ -80,7 +80,7 @@ This directory contains comprehensive documentation for the Football Analysis Pi
 
 ---
 
-## 🎯 Quick Links by Task
+## Quick Links by Task
 
 ### I want to...
 
@@ -110,7 +110,7 @@ This directory contains comprehensive documentation for the Football Analysis Pi
 
 ---
 
-## 📋 Command Reference
+## Command Reference
 
 ### Main Commands
 
@@ -130,7 +130,7 @@ See [Quick Reference](QUICK_REFERENCE.md) for more commands.
 
 ---
 
-## 🧪 Testing & Validation
+## Testing & Validation
 
 ### Test Scripts
 
@@ -161,7 +161,7 @@ python test_stats_computation.py output/player_stats.json
 
 ---
 
-## 🛠️ Configuration Files
+## Configuration Files
 
 | File | Purpose | Documentation |
 |------|---------|---------------|
@@ -171,7 +171,7 @@ python test_stats_computation.py output/player_stats.json
 
 ---
 
-## 📊 Output Files
+## Output Files
 
 After processing, the pipeline generates:
 
@@ -189,7 +189,7 @@ See [Pipeline Usage: Output Files](PIPELINE_USAGE.md#output-files) for details.
 
 ---
 
-## 🔧 Common Workflows
+## Common Workflows
 
 ### Development
 
@@ -226,7 +226,7 @@ See [Pipeline Usage: Output Files](PIPELINE_USAGE.md#output-files) for details.
 
 ---
 
-## 🆘 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -241,7 +241,7 @@ See [Full Troubleshooting Guide](PIPELINE_USAGE.md#troubleshooting).
 
 ---
 
-## 📈 Performance Optimization
+## Performance Optimization
 
 ### Speed vs Accuracy
 
@@ -253,21 +253,21 @@ See [Full Troubleshooting Guide](PIPELINE_USAGE.md#troubleshooting).
 
 ---
 
-## 🔄 Recent Updates
+## Recent Updates
 
 ### Latest Changes (2026-01-30)
 
-- ✅ Fixed resource leak in thread pool executor
-- ✅ Implemented graceful shutdown
-- ✅ Fixed color classifier boundary overlaps
-- ✅ Improved error handling (removed bare except clauses)
-- ✅ Added comprehensive documentation
+- Fixed resource leak in thread pool executor
+- Implemented graceful shutdown
+- Fixed color classifier boundary overlaps
+- Improved error handling (removed bare except clauses)
+- Added comprehensive documentation
 
 See [Pipeline Issues Fixed](../PIPELINE_ISSUES_FIXED.md) for details.
 
 ---
 
-## 📞 Support
+## Support
 
 ### Self-Service
 
@@ -286,7 +286,7 @@ See [Pipeline Issues Fixed](../PIPELINE_ISSUES_FIXED.md) for details.
 
 ---
 
-## 📝 Contributing
+## Contributing
 
 When updating documentation:
 
@@ -297,7 +297,7 @@ When updating documentation:
 
 ---
 
-## 📄 License
+## License
 
 See [LICENSE](../LICENSE) for details.
 

@@ -312,9 +312,9 @@ Controls how jersey numbers are assigned to tracks:
 
 | Mode | Speed | Accuracy | ReID | Description |
 |------|-------|----------|------|-------------|
-| **bytetrack** | ⚡⚡⚡ | ⭐⭐⭐ | No | **Default.** Fast, reliable motion-based tracking |
-| **botsort** | ⚡⚡ | ⭐⭐⭐⭐ | Yes | Slower, uses appearance features for re-identification |
-| **sam2** | ⚡ | ⭐⭐⭐⭐⭐ | Yes | Experimental. Segmentation-based, very slow |
+| **bytetrack** | | | No | **Default.** Fast, reliable motion-based tracking |
+| **botsort** | | | Yes | Slower, uses appearance features for re-identification |
+| **sam2** | | | Yes | Experimental. Segmentation-based, very slow |
 
 **Recommendation:** Use `bytetrack` for speed, `botsort` for accuracy.
 
@@ -465,11 +465,11 @@ Output:
 DATABASE STATUS
 ================================================================================
 
-🔄 Running: 3
-✅ Finished: 53
-❌ Failed: 0
+ Running: 3
+ Finished: 53
+ Failed: 0
 
-⏰ Updated in last hour: 3
+ Updated in last hour: 3
    • ID   124 | running    | Updated: 2026-01-30 12:30:45
    • ID   123 | running    | Updated: 2026-01-30 12:25:12
    • ID   122 | running    | Updated: 2026-01-30 12:20:33

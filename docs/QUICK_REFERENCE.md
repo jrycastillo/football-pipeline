@@ -176,9 +176,9 @@ output/
 
 | Mode | Speed | Accuracy | Best For |
 |------|-------|----------|----------|
-| **1** | ⚡⚡⚡ | ⭐⭐ | Quick tests |
-| **2** | ⚡⚡ | ⭐⭐⭐ | **Production (default)** |
-| **3** | ⚡ | ⭐⭐⭐⭐ | Critical accuracy |
+| **1** | | | Quick tests |
+| **2** | | | **Production (default)** |
+| **3** | | | Critical accuracy |
 
 ---
 
@@ -186,9 +186,9 @@ output/
 
 | Mode | Speed | Accuracy | ReID | Best For |
 |------|-------|----------|------|----------|
-| **bytetrack** | ⚡⚡⚡ | ⭐⭐⭐ | No | **Default/Production** |
-| **botsort** | ⚡⚡ | ⭐⭐⭐⭐ | Yes | High accuracy |
-| **sam2** | ⚡ | ⭐⭐⭐⭐⭐ | Yes | Experimental |
+| **bytetrack** | | | No | **Default/Production** |
+| **botsort** | | | Yes | High accuracy |
+| **sam2** | | | Yes | Experimental |
 
 ---
 

@@ -1,8 +1,8 @@
-# Football Analysis Pipeline ⚽📊
+# Football Analysis Pipeline
 
 **Production-ready computer vision system for automated football match analysis**
 
-> 🚀 **Deploying?** See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (setup) ·
+> **Deploying?** See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (setup) ·
 > **[MODEL_SETUP.md](MODEL_SETUP.md)** (models) · **[PRODUCTION_CHECKLIST.md](PRODUCTION_CHECKLIST.md)** (go-live).
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -11,25 +11,25 @@
 
 ---
 
-## 🎯 What It Does
+## What It Does
 
 Automatically analyze football match videos to extract:
 
-- ✅ **Player Tracking** - Persistent IDs across the entire match
-- ✅ **Team Assignment** - Automatic jersey color detection
-- ✅ **Jersey Numbers** - Hybrid CNN + VLM recognition
-- ✅ **Ball Tracking** - Frame-by-frame ball detection
-- ✅ **Match Events** - Passes, tackles, interceptions, crosses, dribbles
-- ✅ **Shot Analysis** - Expected Goals (xG) calculation
-- ✅ **Goal Detection** - Automatic goal validation
-- ✅ **Statistics** - Comprehensive per-player and team metrics
+- **Player Tracking** - Persistent IDs across the entire match
+- **Team Assignment** - Automatic jersey color detection
+- **Jersey Numbers** - Hybrid CNN + VLM recognition
+- **Ball Tracking** - Frame-by-frame ball detection
+- **Match Events** - Passes, tackles, interceptions, crosses, dribbles
+- **Shot Analysis** - Expected Goals (xG) calculation
+- **Goal Detection** - Automatic goal validation
+- **Statistics** - Comprehensive per-player and team metrics
 
 **Input**: Match video (MP4, AVI, MOV)
 **Output**: JSON/CSV with detailed statistics + optional annotated video
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Install
 
@@ -54,7 +54,7 @@ nano .env  # Add your database password and API token
 
 Download required models from Google Drive:
 
-📦 **[Models (Google Drive)](https://drive.google.com/drive/folders/1-AbCdEfGhIjKlMnOpQrStUvWxYz123?usp=sharing)**
+**[Models (Google Drive)](https://drive.google.com/drive/folders/1-AbCdEfGhIjKlMnOpQrStUvWxYz123?usp=sharing)**
 
 Place the downloaded files in the `models/` directory:
 ```
@@ -70,7 +70,7 @@ models/
 
 Sample videos for testing:
 
-🎬 **[Test Videos (Google Drive)](https://drive.google.com/drive/folders/1-XyZaBcDeFgHiJkLmNoPqRsTuVwXyZ?usp=sharing)**
+**[Test Videos (Google Drive)](https://drive.google.com/drive/folders/1-XyZaBcDeFgHiJkLmNoPqRsTuVwXyZ?usp=sharing)**
 
 ```
 test_videos/
@@ -94,7 +94,7 @@ python orchestrator.py \
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 ### Getting Started
 - **[Pipeline Usage Guide](docs/PIPELINE_USAGE.md)** - Complete command-line reference and examples
@@ -113,7 +113,7 @@ python orchestrator.py \
 
 ---
 
-## 💡 Usage Examples
+## Usage Examples
 
 ### Local Video Analysis
 
@@ -157,7 +157,7 @@ python orchestrator.py \
 
 ---
 
-## 🎬 Sample Output
+## Sample Output
 
 ### JSON Statistics (player_stats.json)
 
@@ -190,7 +190,7 @@ red,7,64,75.0,2,0.52
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 Three-tier configuration system (CLI > ENV > config.yaml):
 
@@ -224,7 +224,7 @@ VID_STRIDE=2
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────┐
@@ -254,7 +254,7 @@ VID_STRIDE=2
 
 ---
 
-## 📊 Performance
+## Performance
 
 **Test Setup**: 1080p video, 5 minutes, 25 FPS (7500 frames), RTX 3090
 
@@ -266,7 +266,7 @@ VID_STRIDE=2
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -289,7 +289,7 @@ See [Troubleshooting Guide](docs/PIPELINE_GUIDE.md#troubleshooting) for detailed
 
 ---
 
-## 🚢 Production Deployment
+## Production Deployment
 
 ### Systemd Service (Auto-Start on Boot)
 
@@ -323,7 +323,7 @@ cat output/health_snapshot.json
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions!
 
@@ -335,13 +335,13 @@ We welcome contributions!
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see LICENSE file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **YOLOv8** by Ultralytics
 - **ByteTrack** by ByteDance
@@ -351,7 +351,7 @@ This project is licensed under the MIT License - see LICENSE file for details.
 
 ---
 
-## 📞 Support
+## Support
 
 - **Documentation**: [docs/PIPELINE_GUIDE.md](docs/PIPELINE_GUIDE.md)
 - **Issues**: [GitHub Issues](https://github.com/your-org/football-pipeline/issues)
@@ -360,6 +360,6 @@ This project is licensed under the MIT License - see LICENSE file for details.
 
 ---
 
-**Made with ⚽ by the Football Analytics Team**
+**Made by ScoutBridge Pro**
 
 *Last Updated: 2026-01-29*

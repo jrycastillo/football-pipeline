@@ -184,7 +184,7 @@ the DB `events` table these collapse to `primary_player` (the actor: `player` /
 
 ---
 
-## 5. `clips_manifest.json` — one entry per clip  (CURRENT) → `clips` table
+## 5. `clips_manifest.json` — one entry per clip (CURRENT) → `clips` table
 
 ```jsonc
 {
@@ -209,7 +209,7 @@ the DB `events` table these collapse to `primary_player` (the actor: `player` /
 
 ---
 
-## 6. `track_jersey.json` — overlay map  (CURRENT)
+## 6. `track_jersey.json` — overlay map (CURRENT)
 
 `{ "<track_id>": { "jersey": <int|null>, "team": <colour|null> } }`
 

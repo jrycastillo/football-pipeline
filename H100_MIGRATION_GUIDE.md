@@ -304,7 +304,7 @@ The pipeline already uses FP16 for VLM models. Verify it's enabled:
 # In vision/hybrid_recognition.py (already configured)
 self.vl_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     self.vl_model_path,
-    torch_dtype=torch.float16,  # ✓ Already using FP16
+    torch_dtype=torch.float16,  #  Already using FP16
     device_map="auto"
 )
 ```
@@ -536,7 +536,7 @@ sudo systemctl start football-pipeline
 
 ## Success Criteria
 
-✅ **H100 migration is successful when:**
+**H100 migration is successful when:**
 
 1. **Performance:** Full match processes in <18 minutes
 2. **Throughput:** 15+ videos/hour with 5 workers
@@ -574,21 +574,21 @@ After stable operation:
 
 ### H100 Advantages
 
-✅ **3-4x faster processing**
-✅ **5x parallel workers (vs 3 previously)**
-✅ **Higher accuracy possible (larger input sizes)**
-✅ **Future-proof for larger models**
-✅ **Better energy efficiency per video**
+**3-4x faster processing**
+**5x parallel workers (vs 3 previously)**
+**Higher accuracy possible (larger input sizes)**
+**Future-proof for larger models**
+**Better energy efficiency per video**
 
 ### Considerations
 
-⚠️ **Higher power consumption (700W)**
-⚠️ **Requires CUDA 12.1+ and updated drivers**
-⚠️ **Need to tune configurations for optimal performance**
+**Higher power consumption (700W)**
+**Requires CUDA 12.1+ and updated drivers**
+**Need to tune configurations for optimal performance**
 
 ---
 
-**Migration Status:** [ ] Not Started  [→] In Progress  [✓] Completed
+**Migration Status:** [ ] Not Started [→] In Progress [] Completed
 
 **Next Steps:**
 1. [ ] Run cleanup script

@@ -1,4 +1,4 @@
-# 🚀 Staging Server Setup Guide
+# Staging Server Setup Guide
 
 **Quick reference for deploying the Football Pipeline on your staging server**
 
@@ -72,13 +72,13 @@ nano .env
 MYSQL_HOST=your-db-host.ondigitalocean.com
 MYSQL_PORT=25060
 MYSQL_USER=scoutbridge
-MYSQL_PASSWORD=YOUR_ACTUAL_PASSWORD_HERE  # ⚠️ CHANGE THIS
+MYSQL_PASSWORD=YOUR_ACTUAL_PASSWORD_HERE  #  CHANGE THIS
 MYSQL_DB=footballgallery
 TABLE_NAME=MatchesVideoAnalysis_test
 
 # API (REQUIRED)
 SBG_BASE=https://api-staging.scoutbridge.net/football-gallery/api
-SBG_TOKEN=YOUR_ACTUAL_JWT_TOKEN_HERE      # ⚠️ CHANGE THIS
+SBG_TOKEN=YOUR_ACTUAL_JWT_TOKEN_HERE      #  CHANGE THIS
 ```
 
 Save and exit (Ctrl+X, Y, Enter).
@@ -134,10 +134,10 @@ python -c "
 from orchestrator import _conn
 try:
     conn = _conn()
-    print('✅ Database connection successful')
+    print(' Database connection successful')
     conn.close()
 except Exception as e:
-    print(f'❌ Database connection failed: {e}')
+    print(f' Database connection failed: {e}')
 "
 ```
 
@@ -154,11 +154,11 @@ sudo deployment/install-service.sh
 Expected output:
 ```
 ==== Football Pipeline Service Installer ====
-📁 Creating directories...
-📋 Installing service file...
-🔄 Reloading systemd...
-✅ Enabling service...
-🚀 Starting service...
+ Creating directories...
+ Installing service file...
+ Reloading systemd...
+ Enabling service...
+ Starting service...
 ● football-pipeline.service - Football Analysis Pipeline
    Loaded: loaded
    Active: active (running)
@@ -435,11 +435,11 @@ Before going to production:
 
 ## Next Steps
 
-1. ✅ Service is running and processing videos
-2. 📊 Set up monitoring dashboard (Grafana recommended)
-3. 🔔 Configure alerts for failures
-4. 📈 Optimize based on your video characteristics
-5. 🚀 Deploy to production when ready
+1. Service is running and processing videos
+2. Set up monitoring dashboard (Grafana recommended)
+3. Configure alerts for failures
+4. Optimize based on your video characteristics
+5. Deploy to production when ready
 
 ---
 
@@ -452,6 +452,6 @@ Before going to production:
 
 ---
 
-**You're all set! The pipeline is now running and will automatically process incoming videos.** 🎉
+**You're all set! The pipeline is now running and will automatically process incoming videos.**
 
 *For any issues, check the logs first: `tail -f logs/pipeline.log`*

@@ -44,11 +44,11 @@ sudo deployment/install-service.sh
 ```
 
 The service will:
-- ✅ Auto-start on system boot
-- ✅ Restart automatically if it crashes
-- ✅ Poll for new videos every 60 seconds
-- ✅ Process 3 videos in parallel
-- ✅ Log to `/home/ubuntu/football/logs/`
+- Auto-start on system boot
+- Restart automatically if it crashes
+- Poll for new videos every 60 seconds
+- Process 3 videos in parallel
+- Log to `/home/ubuntu/football/logs/`
 
 ## Service Management
 
