@@ -668,7 +668,7 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
                 valid_players=None, require_box=False, frame_balls=None,
                 clean_passes=True, frame_goals=None, frame_gks=None,
                 track_jersey=None, draw_all_boxes=False,
-                pad_before_s=None, pad_after_s=None):
+                pad_before_s=None, pad_after_s=None, kickoff_lookback_s=75.0):
     """Write pad_s-padded clips for selected events + clips_manifest.json.
 
     events: the pipeline event list (raw_tracks.json content).
@@ -698,6 +698,11 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     _pa = pad_after_s if pad_after_s is not None else pad_s
     pad_before_frames = int(round(_pb * fps))
     pad_after_frames = int(round(_pa * fps))
+    # A kickoff follows a goal by ~30-75s, so a goal_restart clip leads in far
+    # enough (kickoff_lookback_s) to also contain the GOAL + celebration — the
+    # admin can then actually SEE the goal the kickoff is confirming, not just
+    # the restart.
+    kickoff_lookback_frames = int(round(kickoff_lookback_s * fps))
 
     selected = []
     _dropped_pass = 0
@@ -818,7 +823,10 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
     kept = 0
     for ev in selected:
         src_frame = (int(ev.get("frame", 0)) + 1) * max(1, vid_stride)
-        start = max(0, src_frame - pad_before_frames)
+        # goal_restart: lead in far enough to include the goal that preceded the
+        # kickoff, so the clip shows goal -> celebration -> kickoff.
+        _pbf = kickoff_lookback_frames if ev.get("type") == "goal_restart" else pad_before_frames
+        start = max(0, src_frame - _pbf)
         end = src_frame + pad_after_frames
         if total_frames > 0:
             end = min(end, total_frames - 1)
@@ -928,6 +936,9 @@ if __name__ == "__main__":
                         help="Seconds BEFORE the event (overrides --pad_s for the lead-in)")
     parser.add_argument("--pad_after_s", type=float, default=None,
                         help="Seconds AFTER the event (overrides --pad_s for the outcome)")
+    parser.add_argument("--kickoff_lookback_s", type=float, default=75.0,
+                        help="Lead-in for goal_restart clips so they include the GOAL "
+                             "before the kickoff (default 75s)")
     parser.add_argument("--min_conf", type=float, default=None)
     parser.add_argument("--max_conf", type=float, default=None,
                         help="e.g. 0.75 → only low-confidence events (admin review queue)")
@@ -988,6 +999,7 @@ if __name__ == "__main__":
     clip_events(args.video, event_list, args.output_dir,
                 vid_stride=args.vid_stride, pad_s=args.pad_s,
                 pad_before_s=args.pad_before_s, pad_after_s=args.pad_after_s,
+                kickoff_lookback_s=args.kickoff_lookback_s,
                 event_types=tuple(t.strip() for t in args.types.split(",") if t.strip()),
                 min_conf=args.min_conf, max_conf=args.max_conf, codec=args.codec,
                 frame_boxes=frame_boxes, zoom=args.zoom, max_clips=args.max_clips,
