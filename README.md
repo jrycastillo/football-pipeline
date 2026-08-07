@@ -6,7 +6,7 @@
 > **[MODEL_SETUP.md](MODEL_SETUP.md)** (models) · **[PRODUCTION_CHECKLIST.md](PRODUCTION_CHECKLIST.md)** (go-live).
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![License: Proprietary](https://img.shields.io/badge/license-proprietary-red.svg)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 ---
@@ -337,7 +337,7 @@ We welcome contributions!
 
 ## License
 
-This project is licensed under the MIT License - see LICENSE file for details.
+(c) 2026 ScoutBridge Pro. All rights reserved. This software is proprietary and confidential - unauthorized copying, distribution, or use is prohibited.
 
 ---
 
@@ -362,4 +362,4 @@ This project is licensed under the MIT License - see LICENSE file for details.
 
 **Made by ScoutBridge Pro**
 
-*Last Updated: 2026-01-29*
+*Last Updated: 2026-08-07*

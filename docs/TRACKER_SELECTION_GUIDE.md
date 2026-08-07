@@ -217,4 +217,4 @@ For issues or questions about tracker selection:
 2. Review health metrics: `output/health_snapshot.json`
 3. Report issues with video characteristics and chosen tracker
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-08-07

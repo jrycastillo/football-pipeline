@@ -599,4 +599,4 @@ After stable operation:
 6. [ ] Monitor for 48 hours
 7. [ ] Optimize configuration
 
-Last Updated: 2026-01-30
+Last Updated: 2026-08-07
