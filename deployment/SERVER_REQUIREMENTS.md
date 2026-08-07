@@ -50,7 +50,7 @@ or even one **RTX 4090 / 3090-class** box for low volume.
 
 - Runs as a **systemd service** (`orchestrator.py --poll`): polls for new videos,
   processes them, writes stats/events to MySQL, uploads clips.
-- Full step-by-step setup: **[DEPLOYMENT.md](DEPLOYMENT.md)** (prerequisites,
+- Full step-by-step setup: **[DEPLOYMENT.md](../docs/DEPLOYMENT.md)** (prerequisites,
   install, models, config, DB schema, service).
 
 ---
