@@ -304,20 +304,39 @@ def _stabilize_ball_track(fb, stride):
     (throw-in, restart on the far side) is not rejected forever."""
     if len(fb) < 3:
         return fb
-    MAX_PX_PER_SRC_FRAME = 55.0    # generous ceiling for real ball motion @1080p
-    BASE_PX = 45.0                 # slack for jitter on a near-static ball
+    MAX_PX_PER_SRC_FRAME = 42.0    # ceiling for real ball motion @1080p (tightened)
+    BASE_PX = 40.0                 # slack for jitter on a near-static ball
     reseed_gap = 30 * stride       # src frames with no accepted ball -> trust next
-    out, last_k, last_p, dropped = {}, None, None, 0
+    # Pass 1 — forward jump-gate: a real ball can't teleport, so drop any detection
+    # that jumps faster than the ceiling from the last accepted point.
+    fwd, last_k, last_p, dropped = {}, None, None, 0
     for k in sorted(fb.keys()):
         p = fb[k]
         if last_p is None:
-            out[k] = p; last_k, last_p = k, p; continue
+            fwd[k] = p; last_k, last_p = k, p; continue
         gap = k - last_k
         d = ((p[0] - last_p[0]) ** 2 + (p[1] - last_p[1]) ** 2) ** 0.5
         if d <= BASE_PX + MAX_PX_PER_SRC_FRAME * gap or gap > reseed_gap:
-            out[k] = p; last_k, last_p = k, p
+            fwd[k] = p; last_k, last_p = k, p
         else:
-            dropped += 1  # teleport -> false positive, keep the smooth track
+            dropped += 1  # teleport -> false positive
+    # Pass 2 — bidirectional spike removal: a forward-only gate still lets a ball
+    # detected on player A, then B, then C slip through (each hop is in range).
+    # A real ball sits ON the line between its accepted neighbours; a false
+    # player-to-player detection jumps off it and back. Drop those spikes — this
+    # is what stops the marker bouncing between players.
+    SPIKE_PX = 55.0
+    ks = sorted(fwd.keys())
+    out = dict(fwd)
+    for i in range(1, len(ks) - 1):
+        ka, kb, kc = ks[i - 1], ks[i], ks[i + 1]
+        if kc - ka > reseed_gap:
+            continue                      # neighbours too far apart to judge
+        a, b, c = fwd[ka], fwd[kb], fwd[kc]
+        t = (kb - ka) / float(kc - ka)
+        ix, iy = a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t   # a->c at b's time
+        if ((b[0] - ix) ** 2 + (b[1] - iy) ** 2) ** 0.5 > SPIKE_PX:
+            out.pop(kb, None); dropped += 1
     if dropped:
         print(f"[Clipper] ball track: dropped {dropped} jump/outlier detection(s) "
               f"of {len(fb)} for a stable overlay")
