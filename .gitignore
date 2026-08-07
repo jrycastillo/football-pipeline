@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .DS_Store
+.env
 !.env.example
 .venv/
 venv/
@@ -65,6 +66,21 @@ backup_*/
 .vscode/
 .idea/
 *.swp
+
+# --- Reports, experiments, documents, archives (production cleanup) ---
+reports/
+fix/
+fix-h100-report/
+weekly_demo_report/
+Jersey-Number-Detection-1/
+tracknet/
+ground_truth/
+.claude/
+*.pdf
+*.docx
+*.xlsx
+*.rar
+full_stats_report_*.md
 
 # --- Exceptions (Do not ignore) ---
 !config.yaml
