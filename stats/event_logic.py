@@ -228,7 +228,7 @@ class AdvancedEventDetector:
         cx_px, cy_px = fw * 0.5, fh * 0.5
         settle   = max(2, int(EFF_FPS * 0.6))
         gap_win  = max(3, int(EFF_FPS * 60.0))   # look back ~60 s: the goal celebration/replay gap sits WELL before the kickoff (by kickoff time the ball is placed & re-detected), not in the last few seconds
-        min_gap  = max(2, int(EFF_FPS * 7.0))    # >=7 s CONTINUOUS ball-undetected = a real goal stoppage (measured: 9.7-21.8 s celebration gaps at real kickoffs vs 5.8 s for a brief open-play detection blip)
+        min_gap  = max(2, int(EFF_FPS * 13.0))   # >=13 s CONTINUOUS ball-undetected = a real goal stoppage. Measured on the full HB match (scoreboard-verified): real goal kickoffs sat behind 16.0 & 21.8 s celebration gaps, while every false positive (0-0, 1-0-unchanged, 2-2-unchanged center restarts) sat behind only ~9.2-9.7 s. 13 s is the clean midpoint — kills all 3 FPs, keeps both real goals.
         CENTER_X = fw * 0.20                      # ball within 20% of frame centre-x
         CENTER_Y = fh * 0.30
         STILL    = fw * 0.035                     # stationary tolerance
