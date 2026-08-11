@@ -256,8 +256,12 @@ class AdvancedEventDetector:
                 return False
             left = right = n_near = total = 0
             for b in player_tracks[t].get("boxes", []):
-                if b.get("id") is None or b.get("cls") in (3, 32, 33, 34):
-                    continue  # skip referee + ball-model markers; count only players
+                if b.get("cls") in (3, 32, 33, 34):
+                    continue  # referee + ball/goal/GK markers, not outfield players
+                # Count DETECTED players regardless of track id: right after a goal the
+                # camera cuts to celebration/replay and back, so ByteTrack has dropped
+                # every id at the kickoff frame. Requiring an id here blanked the
+                # formation (tot=0) at the exact restart we need — the top recall bug.
                 xy = b.get("xyxy")
                 if not xy:
                     continue
@@ -312,8 +316,8 @@ class AdvancedEventDetector:
                 if p is None or not isinstance(player_tracks[k], dict):
                     continue
                 for x in player_tracks[k].get("boxes", []):
-                    if x.get("id") is None or x.get("cls") in (3, 32, 33, 34) or not x.get("xyxy"):
-                        continue
+                    if x.get("cls") in (3, 32, 33, 34) or not x.get("xyxy"):
+                        continue  # any detected player, incl. id-less post-goal kicker
                     xy = x["xyxy"]
                     d = math.hypot((xy[0] + xy[2]) * 0.5 - p[0], (xy[1] + xy[3]) * 0.5 - p[1])
                     if d < best:
