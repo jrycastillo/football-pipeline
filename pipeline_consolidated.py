@@ -664,7 +664,35 @@ class IdentityManager:
                          log(f"🔒 [IdentityManager] LOCKED Track {track_id} -> Jersey #{best_num} (Votes: {best_tally}, Score: {best_score:.1f}, 2nd: {second_score:.1f})")
                          self._lock_identity(track_id, best_num)
                          self.locks[track_id] = {"jersey": best_num, "locked": True}
-            
+
+            # --- R7 instrumentation (measurement only, no behaviour change) ---
+            # Attribute why each track has not locked, keyed by track id. Runs on
+            # a JNR read update (not the per-frame hot path). Last evaluation wins,
+            # so the final record reflects the track's strongest evidence. This
+            # block only READS gate state and writes a separate dict; it never
+            # touches locks, locked_map, votes, or any lock decision.
+            if not hasattr(self, "lock_refusals"):
+                self.lock_refusals = {}
+            if track_id not in self.locks:
+                _r7_fails = []
+                if best_tally < 2: _r7_fails.append("tally")
+                if best_score < _min_lock_weight: _r7_fails.append("weight")
+                if not _margin_ok: _r7_fails.append("margin")
+                if not temporal_ok: _r7_fails.append("temporal")
+                if _r7_fails:
+                    _r7_reason, _r7_inc = _r7_fails[0], None
+                else:
+                    # gate passed but still unlocked -> try_lock uniqueness refusal
+                    _r7_team = self.track_colors.get(track_id, "Unknown")
+                    _r7_reason, _r7_fails = "uniqueness", ["uniqueness"]
+                    _r7_inc = self.locked_map.get((_r7_team, best_num))
+                self.lock_refusals[track_id] = {
+                    "reason": _r7_reason, "all": _r7_fails, "best_num": best_num,
+                    "best_tally": int(best_tally), "best_score": round(float(best_score), 3),
+                    "second_score": round(float(second_score), 3), "incumbent": _r7_inc}
+            else:
+                self.lock_refusals.pop(track_id, None)
+
             # 3. Unlocking / Hysteresis (Only if locked)
             # User instruction: "never change unless you have overwhelming evidence"
             # Logic: If locked to A, but B is winning by HUGE margin (e.g. +8.0), maybe switch?
@@ -2762,6 +2790,15 @@ if __name__ == "__main__":
                 log(f"Fragment dump: {len(_frag)} tracks -> fragments_dump.json")
             except Exception as e:
                 log(f"Fragment dump failed (non-fatal): {e}")
+
+            # R7: lock-refusal census (identity funnel attribution), keyed by track id.
+            try:
+                _lr = getattr(id_manager, "lock_refusals", {}) or {}
+                with open(os.path.join(output_dir, "lock_refusals.json"), "w") as f:
+                    json.dump({str(k): v for k, v in _lr.items()}, f)
+                log(f"Lock-refusal census: {len(_lr)} never-locked tracks -> lock_refusals.json")
+            except Exception as e:
+                log(f"Lock-refusal census failed (non-fatal): {e}")
 
     # Fail fast before stats: a crashed or frameless run must never be
     # reported 'finished' with empty/partial numbers (debug dumps above are
