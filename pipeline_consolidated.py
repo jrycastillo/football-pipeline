@@ -565,6 +565,12 @@ class IdentityManager:
         if score > (owner_score + 3.0):
             log(f"⚔️ [IdentityManager] STEAL: Track {tid} (Score {score:.1f}) takes Jersey #{num} from Track {owner} (Score {owner_score:.1f})")
             self.locked_map[key] = tid
+            # R9 repair: the victim lost this jersey — clear its now-stale lock and
+            # binding so it is not still flagged as owning a jersey it no longer
+            # holds. Mirrors the unlock path's paired self.locks/active_bindings
+            # cleanup (see the reconcile/unlock branch); confined to the steal path.
+            self.locks.pop(owner, None)
+            self.active_bindings.pop(owner, None)
             return True
 
         # Denied
