@@ -670,6 +670,12 @@ class IdentityManager:
                          log(f"🔒 [IdentityManager] LOCKED Track {track_id} -> Jersey #{best_num} (Votes: {best_tally}, Score: {best_score:.1f}, 2nd: {second_score:.1f})")
                          self._lock_identity(track_id, best_num)
                          self.locks[track_id] = {"jersey": best_num, "locked": True}
+                         # R10 instrumentation (measurement only): capture the team
+                         # string that keyed this lock, to compare against the final
+                         # colour later (team-resolution-timing audit).
+                         if not hasattr(self, "lock_teams"):
+                             self.lock_teams = {}
+                         self.lock_teams[track_id] = team
 
             # --- R7 instrumentation (measurement only, no behaviour change) ---
             # Attribute why each track has not locked, keyed by track id. Runs on
@@ -695,7 +701,8 @@ class IdentityManager:
                 self.lock_refusals[track_id] = {
                     "reason": _r7_reason, "all": _r7_fails, "best_num": best_num,
                     "best_tally": int(best_tally), "best_score": round(float(best_score), 3),
-                    "second_score": round(float(second_score), 3), "incumbent": _r7_inc}
+                    "second_score": round(float(second_score), 3), "incumbent": _r7_inc,
+                    "team": self.track_colors.get(track_id, "Unknown")}  # R10: lock-time team string
             else:
                 self.lock_refusals.pop(track_id, None)
 
@@ -2805,6 +2812,15 @@ if __name__ == "__main__":
                 log(f"Lock-refusal census: {len(_lr)} never-locked tracks -> lock_refusals.json")
             except Exception as e:
                 log(f"Lock-refusal census failed (non-fatal): {e}")
+
+            # R10: lock-time team strings (team-resolution-timing audit), keyed by track id.
+            try:
+                _lt = getattr(id_manager, "lock_teams", {}) or {}
+                with open(os.path.join(output_dir, "lock_teams.json"), "w") as f:
+                    json.dump({str(k): v for k, v in _lt.items()}, f)
+                log(f"Lock-team capture: {len(_lt)} locked tracks -> lock_teams.json")
+            except Exception as e:
+                log(f"Lock-team capture failed (non-fatal): {e}")
 
     # Fail fast before stats: a crashed or frameless run must never be
     # reported 'finished' with empty/partial numbers (debug dumps above are
