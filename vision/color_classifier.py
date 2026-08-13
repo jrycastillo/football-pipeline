@@ -313,9 +313,19 @@ class TeamColorClassifier:
                 # Correct if hue distance is small (≤ 30° = adjacent color)
                 if best_kit and best_dist <= 30:
                     color_name = best_kit
-        
+
+        # R11 instrumentation (measurement-only, no behaviour change): record the
+        # dominant HSV that fed _classify_hsv and the final label, per track. Used
+        # offline to test whether a per-match calibrated cut separates the kits.
+        if track_id is not None:
+            if not hasattr(self, "hsv_samples"):
+                self.hsv_samples = defaultdict(list)
+            self.hsv_samples[track_id].append(
+                (round(float(h_val), 1), round(float(s_val), 1),
+                 round(float(v_val), 1), color_name))
+
         return color_name
-    
+
     def predict_with_voting(self, crop, track_id):
         """Predict color with temporal voting for stability."""
         color = self.predict(crop, track_id=track_id)

@@ -2822,6 +2822,15 @@ if __name__ == "__main__":
             except Exception as e:
                 log(f"Lock-team capture failed (non-fatal): {e}")
 
+            # R11: per-track dominant HSV samples (colour-calibration audit).
+            try:
+                _hs = getattr(color_classifier, "hsv_samples", {}) or {}
+                with open(os.path.join(output_dir, "hsv_samples.json"), "w") as f:
+                    json.dump({str(k): v for k, v in _hs.items()}, f)
+                log(f"HSV-sample capture: {len(_hs)} tracks -> hsv_samples.json")
+            except Exception as e:
+                log(f"HSV-sample capture failed (non-fatal): {e}")
+
     # Fail fast before stats: a crashed or frameless run must never be
     # reported 'finished' with empty/partial numbers (debug dumps above are
     # already saved for diagnosis). Missing player_stats.json makes the
