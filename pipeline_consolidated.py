@@ -666,7 +666,20 @@ class IdentityManager:
                  if track_id not in self.locks:
                      # Check Global Uniqueness Logic
                      team = self.track_colors.get(track_id, "Unknown")
-                     if self.try_lock(track_id, team, best_num, best_score, self.vote_counts):
+                     # R12-02: off-roster precision filter (opt-in, default off).
+                     # Refuse a lock whose number is exclusive to the OTHER team's
+                     # roster — a provably-inconsistent lock. Does not touch
+                     # try_lock or uniqueness; simply declines to lock this track.
+                     _offr = getattr(self, "_off_roster", None)
+                     _off_roster_hit = False
+                     if _offr and team in _offr:
+                         try:
+                             _off_roster_hit = int(best_num) in _offr[team]
+                         except (TypeError, ValueError):
+                             _off_roster_hit = False
+                     if _off_roster_hit:
+                         log(f"🚫 [IdentityManager] REFUSED off-roster lock Track {track_id} -> #{best_num} (team {team}; number exclusive to other roster)")
+                     elif self.try_lock(track_id, team, best_num, best_score, self.vote_counts):
                          log(f"🔒 [IdentityManager] LOCKED Track {track_id} -> Jersey #{best_num} (Votes: {best_tally}, Score: {best_score:.1f}, 2nd: {second_score:.1f})")
                          self._lock_identity(track_id, best_num)
                          self.locks[track_id] = {"jersey": best_num, "locked": True}
@@ -1695,10 +1708,12 @@ class StatsAdapter:
         from stats.metrics import StatsEngine
         self.engine = StatsEngine(frame_width=frame_width, frame_height=frame_height)
 
-    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None,
+                       disjoint_distance=False):
         # Delegate to new engine
         # returns (formatted_stats, events)
-        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits, siglip_teams=siglip_teams, roster_prior=roster_prior)
+        formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits, siglip_teams=siglip_teams, roster_prior=roster_prior,
+                                                             disjoint_distance=disjoint_distance)
         
         # Return in order expected by pipeline: raw_tracks, player_stats
         return events, formatted_stats
@@ -1837,6 +1852,13 @@ if __name__ == "__main__":
                              "team-colour labels, folding low-S skin/number/logo reads "
                              "back to the achromatic White/Black split. Default off "
                              "(flag-off behaviour is byte-identical).")
+    parser.add_argument('--disjoint_distance', action='store_true',
+                        help="R12-02: publish total_distance as the sum over temporally "
+                             "disjoint fragments (default off = longest single fragment).")
+    parser.add_argument('--off_roster_filter', type=str, default=None,
+                        help="R12-02: path to a roster JSON (teams->color+roster). Drops "
+                             "locks whose number is exclusive to the other team's roster. "
+                             "Precision-only; published count unchanged. Default off.")
     parser.add_argument('--audit_rejections', type=bool, default=False, help="Enable Tracklet audit logging")
     parser.add_argument('--resize_h', type=int, default=None, help="Downsample height (e.g. 720) for speed")
     parser.add_argument('--start_frame', type=int, default=0, help="Start processing from this frame number")
@@ -1948,6 +1970,26 @@ if __name__ == "__main__":
     jnr_crop_buffer = defaultdict(lambda: deque(maxlen=10))  # Store up to 10 recent torso crops per track 
     # Init Components
     id_manager = IdentityManager()
+    # R12-02: off-roster precision filter (opt-in). Build the reject-set
+    # {team_colour: numbers exclusive to the OTHER team} and hand it to the
+    # IdentityManager so the lock gate can refuse a provably-inconsistent lock
+    # (a number exclusive to the other team's roster). Loaded directly, not via
+    # RosterPrior (unrelated, currently broken). Default off -> attribute stays
+    # None -> lock gate is byte-identical.
+    if getattr(args, "off_roster_filter", None):
+        try:
+            with open(args.off_roster_filter) as _rf:
+                _teams = json.load(_rf)["teams"]
+            _by_colour = {t["color"].capitalize(): set(t["roster"]) for t in _teams.values()}
+            _cols = list(_by_colour)
+            if len(_cols) == 2:
+                _a, _b = _cols
+                id_manager._off_roster = {_a: _by_colour[_b] - _by_colour[_a],
+                                          _b: _by_colour[_a] - _by_colour[_b]}
+                logging.info(f"🚫 [R12-02] off-roster lock filter active: "
+                             f"{ {k: sorted(v) for k, v in id_manager._off_roster.items()} }")
+        except Exception as _e:
+            logging.warning(f"⚠️ [R12-02] off-roster filter load failed ({_e}); disabled")
     # Phase 196 Revert: Switch back to Qwen (JNRService) as requested
     # Update: Switching to SmolVLM2Service to resolve    # Phase 200: Hybrid JNR (ResNet + Qwen Verification)
 
@@ -2912,7 +2954,8 @@ if __name__ == "__main__":
     # --- 9. STATS GENERATION (Entity Resolution) ---
     stats_adapter = StatsAdapter(camera, pitch_manager, frame_width=width, frame_height=height)
     kits = kit_coordinator.get_discovery_result()
-    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams, roster_prior=roster_prior)
+    raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams, roster_prior=roster_prior,
+                                                            disjoint_distance=getattr(args, "disjoint_distance", False))
     
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:

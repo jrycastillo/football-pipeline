@@ -656,9 +656,15 @@ class StatsEngine:
                 event["identity_confidence_receiver"] = self._identity_confidence_for_actor(
                     event.get("to"), id_manager, track_to_jersey, roster_prior)
 
-    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None):
+    def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None,
+                       disjoint_distance=False):
         """
         Process full video history to generate stats.
+
+        R12-02: disjoint_distance sums total_distance over temporally disjoint
+        fragments (default off -> max, byte-identical). The off-roster precision
+        filter lives at the IdentityManager lock gate (stats-layer placement can't
+        see raw lock identities once boxes are jersey-resolved).
         """
         # Layer 2 (roster reconciliation): authoritative roster used to constrain
         # and assign track identities. None -> behaves exactly as before.
@@ -906,6 +912,22 @@ class StatsEngine:
             # on Hamburg/Bayern, so top-5 was only capturing ~7% of events per player.
             # High-risk events (goals, tackles) are still capped after merge.
             _MERGE_TOP_N = 20  # Sum events from primary + top 19 fragments
+
+            # R12-02: per-fragment temporal span (frame indices) for the disjoint
+            # distance sum — same raw box appearances the R3/R4 stitch step reads.
+            _tid_span = {}
+            if disjoint_distance:
+                for _fi, _fr in enumerate(all_frames):
+                    for _b in _fr.get("boxes", []):
+                        _t = _b.get("id")
+                        if _t is None:
+                            continue
+                        _t = str(_t)
+                        if _t not in _tid_span:
+                            _tid_span[_t] = [_fi, _fi]
+                        else:
+                            _tid_span[_t][1] = _fi
+
             for candidate_key, candidates in jersey_candidates.items():
                 jersey_num = candidate_key[1] if isinstance(candidate_key, tuple) else candidate_key
                 if len(candidates) == 1:
@@ -935,7 +957,30 @@ class StatsEngine:
                     # 1611.1m). Max is a physical lower bound and keeps players distinct.
                     _fd = [sd.get("distance_m", 0) for _, sd, _ in merge_candidates
                            if isinstance(sd.get("distance_m"), (int, float))]
-                    if _fd:
+                    if disjoint_distance and _tid_span:
+                        # R12-02: sum distance over temporally DISJOINT fragments.
+                        # max() reports only the longest single fragment while the
+                        # field name asserts a total; naive sum double-counts
+                        # overlapping ByteTrack fragments. Now that spans are
+                        # identifiable (R3/R4), greedily accept fragments (largest
+                        # first) whose frame interval does not overlap an accepted
+                        # one, and sum those. Not a merge — same fragments already
+                        # attributed to this record.
+                        _cand = sorted(
+                            ((sd.get("distance_m", 0), _tid_span.get(str(tid)))
+                             for tid, sd, _ in merge_candidates
+                             if isinstance(sd.get("distance_m"), (int, float)) and sd.get("distance_m", 0) > 0),
+                            key=lambda x: -x[0])
+                        _acc = []
+                        _tot = 0.0
+                        for _dist, _iv in _cand:
+                            if _iv is None:
+                                continue
+                            if not any(min(_iv[1], b) - max(_iv[0], a) > 0 for a, b in _acc):
+                                _tot += _dist
+                                _acc.append(_iv)
+                        merged["distance_m"] = _tot if _tot > 0 else (max(_fd) if _fd else 0)
+                    elif _fd:
                         merged["distance_m"] = max(_fd)
                     # R20: Goal rescue with dedup — scan remaining fragments for goals,
                     # but only rescue if top-N merge found 0 goals for this player.
