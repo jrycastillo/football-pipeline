@@ -1832,6 +1832,11 @@ if __name__ == "__main__":
     parser.add_argument('--siglip_teams', action='store_true',
                         help="Use SigLIP semantic clustering for team assignment (fixes the "
                              "colour-K-means team imbalance, e.g. 11-vs-5). Needs transformers.")
+    parser.add_argument('--team_color_v2', action='store_true',
+                        help="R12-01: apply a saturation floor (S<120) to chromatic "
+                             "team-colour labels, folding low-S skin/number/logo reads "
+                             "back to the achromatic White/Black split. Default off "
+                             "(flag-off behaviour is byte-identical).")
     parser.add_argument('--audit_rejections', type=bool, default=False, help="Enable Tracklet audit logging")
     parser.add_argument('--resize_h', type=int, default=None, help="Downsample height (e.g. 720) for speed")
     parser.add_argument('--start_frame', type=int, default=0, help="Start processing from this frame number")
@@ -1992,7 +1997,7 @@ if __name__ == "__main__":
             siglip_classifier = None
     
     visualizer = Visualizer()
-    color_classifier = TeamColorClassifier()  # Phase 139
+    color_classifier = TeamColorClassifier(team_color_v2=getattr(args, "team_color_v2", False))  # Phase 139 / R12-01
     kit_coordinator = KitCoordinator()  # Phase 168
     # Phase 2 (user-input): if the user supplied team colors, force them as the
     # two player kits instead of discovering via K-means.
@@ -2830,6 +2835,27 @@ if __name__ == "__main__":
                 log(f"HSV-sample capture: {len(_hs)} tracks -> hsv_samples.json")
             except Exception as e:
                 log(f"HSV-sample capture failed (non-fatal): {e}")
+
+            # R12-01 Item 4(a): per-track bright-pixel fractions (achromatic-split bake-off).
+            try:
+                _bf = getattr(color_classifier, "bright_frac", {}) or {}
+                with open(os.path.join(output_dir, "bright_frac.json"), "w") as f:
+                    json.dump({str(k): v for k, v in _bf.items()}, f)
+                log(f"Bright-fraction capture: {len(_bf)} tracks -> bright_frac.json")
+            except Exception as e:
+                log(f"Bright-fraction capture failed (non-fatal): {e}")
+
+            # R12-01 Item 4(b): per-track mean SigLIP embedding (team-cluster bake-off).
+            try:
+                if siglip_classifier is not None and getattr(siglip_classifier, "embeddings", None):
+                    import numpy as _np
+                    _emb = {str(t): _np.mean(_np.stack(v), axis=0).round(4).tolist()
+                            for t, v in siglip_classifier.embeddings.items() if v}
+                    with open(os.path.join(output_dir, "siglip_embed.json"), "w") as f:
+                        json.dump(_emb, f)
+                    log(f"SigLIP-embed capture: {len(_emb)} tracks -> siglip_embed.json")
+            except Exception as e:
+                log(f"SigLIP-embed capture failed (non-fatal): {e}")
 
     # Fail fast before stats: a crashed or frameless run must never be
     # reported 'finished' with empty/partial numbers (debug dumps above are

@@ -54,13 +54,15 @@ def _football_color(color_name):
 class TeamColorClassifier:
     """HSV-based color classifier with K-means clustering and wide tolerance."""
     
-    def __init__(self):
+    def __init__(self, team_color_v2=False):
         # Color voting buffer per track ID
         self.color_buffer = {}  # {track_id: [color1, color2, ...]}
         self.buffer_size = 30
         # Round 6.1: Kit-aware color correction
         # Set by pipeline after KitCoordinator discovers player kit colors
         self.known_kit_colors = None  # e.g., ["Green", "Red"]
+        # R12-01: saturation floor on chromatic labels (opt-in, default off).
+        self.team_color_v2 = team_color_v2
     
     def _mask_grass(self, hsv_image):
         """Create mask to exclude grass (green pitch) pixels."""
@@ -179,7 +181,19 @@ class TeamColorClassifier:
             if v > 150: return "White"
             if v < 80:  return "Black"  # Round 18: was V<60; dark jerseys (V 60-80) are Black not White
             return "White"  # Light gray -> White for football
-            
+
+        # R12-01 (--team_color_v2): chromatic saturation floor. Skin / jersey-number
+        # / logo pixels read H 10-35 at S 70-120 and leak through the Gold band
+        # (S_min=40) as Gold->Yellow — R12-01 Item 2 attributed 95% of spurious
+        # votes to this band, not the fallback. Genuine kit fabric is S>120 (the
+        # Yellow band already uses this floor). Below it, fall through to the
+        # achromatic V split so no spurious chromatic lock forms. Opt-in so a real
+        # chromatic fixture (e.g. dark-red vs black) is unaffected when flag is off.
+        if self.team_color_v2 and s < 120:
+            if v > 150: return "White"
+            if v < 80:  return "Black"
+            return "White"
+
         # 2. Check Specific Color Ranges if adequately saturated
         for color_name, ranges in HSV_COLOR_RANGES.items():
             for r in ranges:
@@ -277,7 +291,19 @@ class TeamColorClassifier:
 
         if len(kept_pixels) < 10:
             return "Unknown"
-        
+
+        # R12-01 instrumentation (measurement-only): bright-pixel fraction over the
+        # grass-masked torso, for the achromatic-split bake-off. R11 showed the
+        # single dominant-V is bimodal (snaps to shadow OR highlight); the fraction
+        # of bright pixels integrates over both modes. Recorded per track at several
+        # V thresholds so t can be swept offline. Touches no classification.
+        if track_id is not None:
+            if not hasattr(self, "bright_frac"):
+                self.bright_frac = defaultdict(list)
+            _vv = kept_pixels[:, 2]
+            self.bright_frac[track_id].append(
+                tuple(round(float((_vv > t).mean()), 3) for t in (120, 150, 180, 200)))
+
         # Step 4: Find dominant HSV via K-Means
         dominant_hsv = self._find_dominant_hsv(kept_pixels)
         
