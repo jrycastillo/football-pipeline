@@ -54,7 +54,7 @@ def _football_color(color_name):
 class TeamColorClassifier:
     """HSV-based color classifier with K-means clustering and wide tolerance."""
     
-    def __init__(self, team_color_v2=False):
+    def __init__(self, team_color_v2=False, team_color_v3=False):
         # Color voting buffer per track ID
         self.color_buffer = {}  # {track_id: [color1, color2, ...]}
         self.buffer_size = 30
@@ -62,7 +62,17 @@ class TeamColorClassifier:
         # Set by pipeline after KitCoordinator discovers player kit colors
         self.known_kit_colors = None  # e.g., ["Green", "Red"]
         # R12-01: saturation floor on chromatic labels (opt-in, default off).
-        self.team_color_v2 = team_color_v2
+        # R13: v3 also calibrates the achromatic White/Black V boundary per-match
+        # (implies v2's saturation floor).
+        self.team_color_v3 = team_color_v3
+        self.team_color_v2 = team_color_v2 or team_color_v3
+        # R13: per-match achromatic V boundary. Default 150 == current behaviour.
+        # Estimated once enough achromatic-subset samples accumulate; self-gates
+        # back to 150 for chromatic/single-kit fixtures.
+        self._achro_v = []
+        self._v_cut = 150.0
+        self._v_cut_locked = False
+        self._achro_v_target = 800
     
     def _mask_grass(self, hsv_image):
         """Create mask to exclude grass (green pitch) pixels."""
@@ -172,12 +182,57 @@ class TeamColorClassifier:
             result[2] = peak_v
             return result
     
+    def _calibrate_v_cut(self):
+        """R13: estimate the per-match White/Black V boundary from the achromatic
+        subset via 1-D 2-means (k=2). Self-gates: too few samples, poorly-separated
+        clusters, or a degenerate split -> keep 150 and log the fallback. This gates
+        chromatic / single-kit fixtures out without explicit fixture classification."""
+        self._v_cut_locked = True
+        vs = sorted(self._achro_v)
+        n = len(vs)
+        if n < 200:
+            print(f"[R13 v-cut] achromatic subset too small ({n}); keeping V=150")
+            return
+        c0, c1 = vs[n // 5], vs[4 * n // 5]
+        for _ in range(25):
+            lo = [x for x in vs if abs(x - c0) <= abs(x - c1)]
+            hi = [x for x in vs if abs(x - c0) > abs(x - c1)]
+            if not lo or not hi:
+                break
+            nc0, nc1 = sum(lo) / len(lo), sum(hi) / len(hi)
+            if abs(nc0 - c0) < 0.5 and abs(nc1 - c1) < 0.5:
+                c0, c1 = nc0, nc1
+                break
+            c0, c1 = nc0, nc1
+        cut = (c0 + c1) / 2.0
+        frac_lo = sum(1 for x in vs if x <= cut) / n
+        if (c1 - c0) < 40:
+            print(f"[R13 v-cut] clusters not separated (Δ={c1 - c0:.0f} < 40); keeping V=150 (fallback)")
+            return
+        if frac_lo < 0.10 or frac_lo > 0.90:
+            print(f"[R13 v-cut] degenerate split (frac_lo={frac_lo:.2f}); keeping V=150 (fallback)")
+            return
+        self._v_cut = cut
+        print(f"[R13 v-cut] calibrated per-match V boundary = {cut:.0f} "
+              f"(clusters {c0:.0f}/{c1:.0f}, n={n}, frac_dark={frac_lo:.2f})")
+
     def _classify_hsv(self, h, s, v):
         """Classify HSV values to color name with wide tolerance."""
+        # R13: accumulate the achromatic subset (S below the R12 floor) and, once
+        # enough have accrued, calibrate the White/Black V boundary from the
+        # match's own data. Measurement + one-time estimate; self-gated.
+        if self.team_color_v3 and s < 120 and not self._v_cut_locked:
+            self._achro_v.append(v)
+            if len(self._achro_v) >= self._achro_v_target:
+                self._calibrate_v_cut()
+        _vcut = self._v_cut if self.team_color_v3 else 150.0
         # 1. Heuristic Fallbacks for very desaturated
         # Match the achromatic threshold (S <= 70) used in _find_dominant_hsv
         # WARNING: Do NOT raise above 70. S=160 broke all color detection.
         if s <= 70:
+            if self.team_color_v3:
+                # Single per-match calibrated boundary (falls back to 150 if un-calibrated).
+                return "White" if v > _vcut else "Black"
             if v > 150: return "White"
             if v < 80:  return "Black"  # Round 18: was V<60; dark jerseys (V 60-80) are Black not White
             return "White"  # Light gray -> White for football
@@ -190,6 +245,8 @@ class TeamColorClassifier:
         # achromatic V split so no spurious chromatic lock forms. Opt-in so a real
         # chromatic fixture (e.g. dark-red vs black) is unaffected when flag is off.
         if self.team_color_v2 and s < 120:
+            if self.team_color_v3:
+                return "White" if v > _vcut else "Black"
             if v > 150: return "White"
             if v < 80:  return "Black"
             return "White"

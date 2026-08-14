@@ -928,11 +928,14 @@ class StatsEngine:
                         else:
                             _tid_span[_t][1] = _fi
 
+            _fd_len_dist = []  # R13 Item 4: len(_fd) per published record
             for candidate_key, candidates in jersey_candidates.items():
                 jersey_num = candidate_key[1] if isinstance(candidate_key, tuple) else candidate_key
                 if len(candidates) == 1:
                     _, stats_dict, _ = candidates[0]
                     remapped_stats[candidate_key] = stats_dict
+                    _fd_len_dist.append(sum(1 for _, sd, _ in candidates
+                                            if isinstance(sd.get("distance_m"), (int, float))))
                 else:
                     # Sort by weight (most data first = primary)
                     candidates.sort(key=lambda x: x[2], reverse=True)
@@ -957,6 +960,7 @@ class StatsEngine:
                     # 1611.1m). Max is a physical lower bound and keeps players distinct.
                     _fd = [sd.get("distance_m", 0) for _, sd, _ in merge_candidates
                            if isinstance(sd.get("distance_m"), (int, float))]
+                    _fd_len_dist.append(len(_fd))
                     if disjoint_distance and _tid_span:
                         # R12-02: sum distance over temporally DISJOINT fragments.
                         # max() reports only the longest single fragment while the
@@ -1058,6 +1062,10 @@ class StatsEngine:
             for track_id, stats_dict in unmapped.items():
                 remapped_stats[track_id] = stats_dict
 
+            import collections as _collections
+            print(f"[R13 Item4] len(_fd) distribution across {len(_fd_len_dist)} records: "
+                  f"{dict(sorted(_collections.Counter(_fd_len_dist).items()))} "
+                  f"(1 => max==sum trivially; >1 => max may undercount if disjoint)")
             raw_stats = remapped_stats
             identity_track_to_jersey = track_to_jersey
             print(f"[Phase 216] Remapped {remap_count} track IDs to jersey numbers (pick-primary, no summing)")

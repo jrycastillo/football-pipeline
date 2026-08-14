@@ -1852,6 +1852,10 @@ if __name__ == "__main__":
                              "team-colour labels, folding low-S skin/number/logo reads "
                              "back to the achromatic White/Black split. Default off "
                              "(flag-off behaviour is byte-identical).")
+    parser.add_argument('--team_color_v3', action='store_true',
+                        help="R13: --team_color_v2 plus a per-match calibrated achromatic "
+                             "White/Black V boundary estimated from the match (self-gated, "
+                             "falls back to V=150). Default off; flag-off byte-identical.")
     parser.add_argument('--disjoint_distance', action='store_true',
                         help="R12-02: publish total_distance as the sum over temporally "
                              "disjoint fragments (default off = longest single fragment).")
@@ -2039,7 +2043,8 @@ if __name__ == "__main__":
             siglip_classifier = None
     
     visualizer = Visualizer()
-    color_classifier = TeamColorClassifier(team_color_v2=getattr(args, "team_color_v2", False))  # Phase 139 / R12-01
+    color_classifier = TeamColorClassifier(team_color_v2=getattr(args, "team_color_v2", False),
+                                           team_color_v3=getattr(args, "team_color_v3", False))  # Phase 139 / R12-01 / R13
     kit_coordinator = KitCoordinator()  # Phase 168
     # Phase 2 (user-input): if the user supplied team colors, force them as the
     # two player kits instead of discovering via K-means.
