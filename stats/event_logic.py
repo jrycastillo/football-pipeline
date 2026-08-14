@@ -210,7 +210,7 @@ class AdvancedEventDetector:
           2. NO detected goal is near the ball  -> rules out a goalmouth scramble
              (which also sits centre-frame because the camera pans to it);
           3. the ball is nearly stationary for ~0.6 s (placed for the kick);
-          4. it ARRIVED after a real stoppage — a >=5 s CONTINUOUS ball-undetected
+          4. it ARRIVED after a real stoppage — a >=13 s CONTINUOUS ball-undetected
              stretch somewhere in the ~60 s before it (the goal celebration/replay;
              by kickoff time the ball is placed and re-detected, so the gap sits
              well before, not in the last few seconds), which open-play flow never
