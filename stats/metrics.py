@@ -657,7 +657,7 @@ class StatsEngine:
                     event.get("to"), id_manager, track_to_jersey, roster_prior)
 
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None,
-                       disjoint_distance=False):
+                       disjoint_distance=False, publish_lock_team=False):
         """
         Process full video history to generate stats.
 
@@ -665,6 +665,12 @@ class StatsEngine:
         fragments (default off -> max, byte-identical). The off-roster precision
         filter lives at the IdentityManager lock gate (stats-layer placement can't
         see raw lock identities once boxes are jersey-resolved).
+
+        R14 (H2): publish_lock_team reads the published team from the identity
+        lock (majority White/Black lock-time team per jersey) instead of the
+        recomputed team_map. R14 measured lock-time team at 73% vs team_map 53%
+        against visual truth. team_map is demoted to a fallback for jerseys with
+        no White/Black lock. Default off -> byte-identical.
         """
         # Layer 2 (roster reconciliation): authoritative roster used to constrain
         # and assign track identities. None -> behaves exactly as before.
@@ -1126,6 +1132,26 @@ class StatsEngine:
         # Team color per roster team, computed once for the roster-unique team snap below.
         roster_team_colors = roster_prior.canonical_team_colors() if roster_prior is not None else {}
 
+        # R14 (H2 fix): per-jersey team from the identity lock. Publication should
+        # read the team the identity system already committed to at lock time
+        # rather than recompute it via team_map (measured 73% vs 53% vs truth).
+        # Only White/Black lock labels override; spurious chromatic labels defer.
+        _lock_team_by_jersey = {}
+        if publish_lock_team and id_manager is not None:
+            _lockt = getattr(id_manager, "lock_teams", {}) or {}
+            _t2j = identity_track_to_jersey or {}
+            _t2j_str = {str(k): v for k, v in _t2j.items()}
+            _acc = defaultdict(lambda: defaultdict(int))
+            for _tid, _tm in _lockt.items():
+                if _tm not in ("White", "Black"):
+                    continue
+                _jn = _t2j.get(_tid, _t2j_str.get(str(_tid)))
+                if _jn is not None:
+                    _acc[str(_jn)][_tm] += 1
+            for _jn, _c in _acc.items():
+                _lock_team_by_jersey[_jn] = max(_c, key=_c.get)
+            print(f"[R14 publish_lock_team] per-jersey lock team for {len(_lock_team_by_jersey)} jerseys")
+
         for id_key in all_ids:
             if id_key is None: continue
 
@@ -1216,8 +1242,11 @@ class StatsEngine:
 
                 # Use team stored on stat dict from Phase 216 remap first
                 team_from_stats = raw_stats.get(id_key, {}).get("team") if isinstance(raw_stats.get(id_key), dict) else None
-                # Use Clustered Team Map if available
-                if hasattr(self, "team_map") and final_key in self.team_map:
+                # R14 (H2): prefer the identity lock's team over the recomputed
+                # team_map (measured more accurate); team_map stays the fallback.
+                if publish_lock_team and final_key in _lock_team_by_jersey:
+                    team_name = _lock_team_by_jersey[final_key]
+                elif hasattr(self, "team_map") and final_key in self.team_map:
                     team_name = self.team_map[final_key]
                 elif team_from_stats and team_from_stats not in ("Unknown", None):
                     team_name = team_from_stats

@@ -1709,11 +1709,11 @@ class StatsAdapter:
         self.engine = StatsEngine(frame_width=frame_width, frame_height=frame_height)
 
     def process_events(self, all_frames, id_manager=None, match_kits=None, siglip_teams=None, roster_prior=None,
-                       disjoint_distance=False):
+                       disjoint_distance=False, publish_lock_team=False):
         # Delegate to new engine
         # returns (formatted_stats, events)
         formatted_stats, events = self.engine.process_events(all_frames, id_manager, match_kits=match_kits, siglip_teams=siglip_teams, roster_prior=roster_prior,
-                                                             disjoint_distance=disjoint_distance)
+                                                             disjoint_distance=disjoint_distance, publish_lock_team=publish_lock_team)
         
         # Return in order expected by pipeline: raw_tracks, player_stats
         return events, formatted_stats
@@ -1856,6 +1856,10 @@ if __name__ == "__main__":
                         help="R13: --team_color_v2 plus a per-match calibrated achromatic "
                              "White/Black V boundary estimated from the match (self-gated, "
                              "falls back to V=150). Default off; flag-off byte-identical.")
+    parser.add_argument('--publish_lock_team', action='store_true',
+                        help="R14 (H2): publish the identity lock's team (majority White/Black "
+                             "lock-time team per jersey) instead of the recomputed team_map. "
+                             "team_map stays a fallback. Default off; flag-off byte-identical.")
     parser.add_argument('--disjoint_distance', action='store_true',
                         help="R12-02: publish total_distance as the sum over temporally "
                              "disjoint fragments (default off = longest single fragment).")
@@ -2960,8 +2964,23 @@ if __name__ == "__main__":
     stats_adapter = StatsAdapter(camera, pitch_manager, frame_width=width, frame_height=height)
     kits = kit_coordinator.get_discovery_result()
     raw_tracks, player_stats = stats_adapter.process_events(all_frames, id_manager, match_kits=kits, siglip_teams=siglip_teams, roster_prior=roster_prior,
-                                                            disjoint_distance=getattr(args, "disjoint_distance", False))
+                                                            disjoint_distance=getattr(args, "disjoint_distance", False),
+                                                            publish_lock_team=getattr(args, "publish_lock_team", False))
     
+    # R14 instrumentation (measurement-only): dump the published team-assignment
+    # inputs for the H1-H4 attribution — team_map (jersey/track -> team) and
+    # per-jersey player_colors. No behaviour change.
+    try:
+        _tm = getattr(stats_adapter.engine, "team_map", {}) or {}
+        with open(os.path.join(output_dir, "team_map.json"), "w") as f:
+            json.dump({str(k): v for k, v in _tm.items()}, f)
+        _pc = getattr(id_manager, "player_colors", {}) or {}
+        with open(os.path.join(output_dir, "player_colors.json"), "w") as f:
+            json.dump({str(k): v for k, v in _pc.items()}, f)
+        log(f"R14: dumped team_map ({len(_tm)}) + player_colors ({len(_pc)})")
+    except Exception as _e:
+        log(f"R14 team_map dump failed (non-fatal): {_e}")
+
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
         json.dump(raw_tracks, f, indent=2)
