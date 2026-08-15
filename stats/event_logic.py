@@ -962,7 +962,20 @@ class AdvancedEventDetector:
         # Round 2 fix: Only compute velocity on raw ball detections (not interpolated)
         # Interpolated positions create false velocity spikes at gap boundaries
         frames_count = len(ev_bt)
-        _shot_debug = {"raw_pairs": 0, "interp_skipped": 0}
+        # R16 Item 3: ablation hooks (env-var gated; unset -> normal, byte-identical).
+        import os as _os
+        _SPEED_THR = float(_os.environ.get("R16_SHOT_SPEED", SHOT_SPEED_THRESHOLD))
+        _DIS_ANCHOR = bool(_os.environ.get("R16_DISABLE_ANCHOR"))
+        _DIS_GK = bool(_os.environ.get("R16_DISABLE_GK"))
+        # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
+        # speed-passing pair is a candidate; its final outcome names the gate that
+        # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
+        _shot_debug = {"raw_pairs": 0, "interp_skipped": 0,
+                       "gate3_goal_anchor": 0, "gate4_near_approach": 0,
+                       "gate5_sustained": 0, "gate6a_gk_far": 0, "gate6b_gk_on_ball": 0,
+                       "gate7a_homog_dist": 0, "gate7b_off_target": 0,
+                       "gate7c_unattributable": 0, "gate7d_debounce": 0,
+                       "emitted": 0, "candidates": []}
         for i in range(2, frames_count):
             if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip if either frame is interpolated
@@ -990,7 +1003,9 @@ class AdvancedEventDetector:
                 moving_right = m2[0] > m1[0]
                 moving_left = m2[0] < m1[0]
 
-                if speed_mps > SHOT_SPEED_THRESHOLD and (moving_right or moving_left):
+                if speed_mps > _SPEED_THR and (moving_right or moving_left):
+                    _ci = len(_shot_debug["candidates"])
+                    _shot_debug["candidates"].append([i, round(speed_mps, 1), "pending"])
                     visual_confirmed = False
                     # VISUAL GOAL ANCHOR (primary gate when goal detection ran).
                     # A real shot has a detected goal near the ball. This replaces
@@ -999,11 +1014,12 @@ class AdvancedEventDetector:
                     # pitch fit is wrong — the dominant cause of passes counted as
                     # shots. Falls back to the homography gate only when the run
                     # has no goal detections at all (backward compatible).
-                    if self._has_goals:
+                    if self._has_goals and not _DIS_ANCHOR:
                         _gw = max(6, int(EFF_FPS))              # ~1s tolerance window
                         _gnear = self.frame_width * 0.30        # goal within 30% frame width of ball
                         _g = self._nearest_goal(i, p2, window=_gw)
                         if _g is None:
+                            _shot_debug["candidates"][_ci][2] = "gate3_goal_anchor"; _shot_debug["gate3_goal_anchor"] += 1
                             continue
                         _d2 = math.hypot(p2[0] - _g[0], p2[1] - _g[1])   # ball->goal at end
                         _d1 = math.hypot(p1[0] - _g[0], p1[1] - _g[1])   # ball->goal at start
@@ -1012,6 +1028,7 @@ class AdvancedEventDetector:
                         # the OWN goal but travels AWAY from it (d2 >= d1) — the
                         # remaining source of false shots after the near-goal gate.
                         if _d2 > _gnear or _d2 >= _d1:
+                            _shot_debug["candidates"][_ci][2] = "gate4_near_approach"; _shot_debug["gate4_near_approach"] += 1
                             continue
                         # SUSTAINED APPROACH — the ball must be closer to the goal
                         # now than ~0.6s ago. A goalkeeper distribution / clearance
@@ -1022,16 +1039,18 @@ class AdvancedEventDetector:
                         _wb = max(2, int(EFF_FPS * 0.6))
                         _pe = ev_bt[i - _wb] if i - _wb >= 0 else None
                         if _pe is not None and math.hypot(_pe[0] - _g[0], _pe[1] - _g[1]) <= _d2:
+                            _shot_debug["candidates"][_ci][2] = "gate5_sustained"; _shot_debug["gate5_sustained"] += 1
                             continue
                         # GOALKEEPER CORROBORATION (Babak: precision on true shots
                         # on goal). The target goal must be DEFENDED — a keeper
                         # within 25% frame width of it confirms it's the real goal
                         # and the shooter is attacking a keeper, not firing at a
                         # false goal box or an empty end.
-                        if self._has_gk:
+                        if self._has_gk and not _DIS_GK:
                             _gk_w = max(6, int(EFF_FPS))
                             if not self._gk_near_point(i, _g, window=_gk_w,
                                                        near_px=self.frame_width * 0.25):
+                                _shot_debug["candidates"][_ci][2] = "gate6a_gk_far"; _shot_debug["gate6a_gk_far"] += 1
                                 continue
                             # ...but if a keeper is essentially ON the ball, the
                             # KEEPER HAS it — a catch, goal-kick or distribution,
@@ -1043,6 +1062,7 @@ class AdvancedEventDetector:
                             # them and still keeps the goal.
                             if self._gk_near_point(i, p2, window=_gk_w,
                                                    near_px=self.frame_width * 0.02):
+                                _shot_debug["candidates"][_ci][2] = "gate6b_gk_on_ball"; _shot_debug["gate6b_gk_on_ball"] += 1
                                 continue
                         # Visual gates passed: a fast ball toward a keeper-defended,
                         # DETECTED goal. This is stronger evidence than the pitch
@@ -1064,6 +1084,7 @@ class AdvancedEventDetector:
                     # confirmed the shot, the detected goal already localises it.
                     dist_to_goal = abs(m2[0] - goal_x)
                     if not visual_confirmed and dist_to_goal > 35.0:
+                        _shot_debug["candidates"][_ci][2] = "gate7a_homog_dist"; _shot_debug["gate7a_homog_dist"] += 1
                         continue  # Ball too far from goal to be a real shot
 
                     # Projected goal-mouth crossing (on target). Used as a HARD
@@ -1076,6 +1097,8 @@ class AdvancedEventDetector:
                         y_at_goal = m2[1] + slope * (goal_x - m2[0])
                     on_target = (y_at_goal is not None and 30.34 < y_at_goal < 37.66)
 
+                    if not (visual_confirmed or on_target):
+                        _shot_debug["candidates"][_ci][2] = "gate7b_off_target"; _shot_debug["gate7b_off_target"] += 1
                     if visual_confirmed or on_target:
                             # SHOOTER = the last player who possessed the ball
                             # before the strike (they kicked it). At the shot
@@ -1097,11 +1120,28 @@ class AdvancedEventDetector:
                             # FIX: Skip if shooter is a GK (cls_id=1) - goal kicks/punts shouldn't count as shots
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
                                 shooter = None
+                            if not shooter:
+                                _shot_debug["candidates"][_ci][2] = "gate7c_unattributable"; _shot_debug["gate7c_unattributable"] += 1
+                                # R16 Item 4: emit the shot for the clipper with no
+                                # shooter (an unnamed shot clip beats no clip). Touches
+                                # no stats[shooter], so it never lands on a player card.
+                                if _os.environ.get("R16_EMIT_UNATTRIB"):
+                                    _sd = max(10, int(EFF_FPS * 5))
+                                    if not [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < _sd]:
+                                        events.append({"type": "shot", "player": None, "frame": i,
+                                                       "unattributable": True, "geometry_reliable": False,
+                                                       "xg": None, "speed": None,
+                                                       "direction": "right" if moving_right else "left",
+                                                       "confidence": 0.3})
+                                        _shot_debug["candidates"][_ci][2] = "emitted_unattributed"; _shot_debug["emitted"] += 1
                             if shooter:
                                 # Round 19: Shot debounce 5s (was 2s) to reduce over-count
                                 shot_debounce = max(10, int(EFF_FPS * 5))
                                 recent = [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < shot_debounce]
+                                if recent:
+                                    _shot_debug["candidates"][_ci][2] = "gate7d_debounce"; _shot_debug["gate7d_debounce"] += 1
                                 if not recent:
+                                    _shot_debug["candidates"][_ci][2] = "emitted"; _shot_debug["emitted"] += 1
                                     # Check if under pressure
                                     under_pressure = self._is_opponent_near(i, shooter, player_tracks, dist_m=3.0) is not None
                                     # Physical sanity of this frame's homography: a
@@ -1361,6 +1401,20 @@ class AdvancedEventDetector:
 
         print(f"[ShotDebug] Raw pairs evaluated: {_shot_debug['raw_pairs']}, "
               f"interpolated skipped: {_shot_debug['interp_skipped']}")
+        # R16 Item 1: per-gate rejection census (speed-passing candidates only).
+        _cands = _shot_debug["candidates"]
+        _gate2 = _shot_debug["raw_pairs"] - len(_cands)
+        print(f"[ShotGates] candidates(speed-pass)={len(_cands)} | "
+              f"gate1_interp={_shot_debug['interp_skipped']} gate2_speed={_gate2} "
+              f"gate3_goal_anchor={_shot_debug['gate3_goal_anchor']} "
+              f"gate4_near_approach={_shot_debug['gate4_near_approach']} "
+              f"gate5_sustained={_shot_debug['gate5_sustained']} "
+              f"gate6a_gk_far={_shot_debug['gate6a_gk_far']} gate6b_gk_on_ball={_shot_debug['gate6b_gk_on_ball']} "
+              f"gate7a_homog_dist={_shot_debug['gate7a_homog_dist']} gate7b_off_target={_shot_debug['gate7b_off_target']} "
+              f"gate7c_unattributable={_shot_debug['gate7c_unattributable']} gate7d_debounce={_shot_debug['gate7d_debounce']} "
+              f"emitted={_shot_debug['emitted']}")
+        # Per-candidate outcomes (frame, speed, gate) for offline attribution.
+        print(f"[ShotCandidates] {_cands}")
 
         # 6. GK Save Detection (Post-Hoc Analysis of Trajectories)
         # FIX: Use YOLO dominant_class (cls_id=1) instead of frames_in_box heuristic
