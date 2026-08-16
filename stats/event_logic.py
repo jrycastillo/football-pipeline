@@ -967,6 +967,7 @@ class AdvancedEventDetector:
         _SPEED_THR = float(_os.environ.get("R16_SHOT_SPEED", SHOT_SPEED_THRESHOLD))
         _DIS_ANCHOR = bool(_os.environ.get("R16_DISABLE_ANCHOR"))
         _DIS_GK = bool(_os.environ.get("R16_DISABLE_GK"))
+        _GATE1_RELAX = bool(_os.environ.get("R16_GATE1_RELAX"))  # R17 Item 4
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -980,8 +981,14 @@ class AdvancedEventDetector:
             if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip if either frame is interpolated
                 if ev_raw and (i not in ev_raw or (i-2) not in ev_raw):
-                    _shot_debug["interp_skipped"] += 1
-                    continue
+                    # R17 Item 4 ablation (env-gated): relax gate 1 to require only
+                    # ONE raw detection in the pair (a shot whose strike frame was
+                    # interpolated is invisible to the whole detector otherwise).
+                    if _GATE1_RELAX and (i in ev_raw or (i-2) in ev_raw):
+                        pass
+                    else:
+                        _shot_debug["interp_skipped"] += 1
+                        continue
                 _shot_debug["raw_pairs"] += 1
                 self._set_frame_h(i)
                 p1 = ev_bt[i-2]
