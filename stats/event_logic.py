@@ -190,6 +190,33 @@ class AdvancedEventDetector:
                     return True
         return False
 
+    def _nearest_gk_anchor(self, frame_idx, ball_pt, moving_right, window):
+        """R19: nearest keeper (cls34) centre that is BOTH on the ball's target-goal
+        side AND at the goal end (outer quarter of the frame width). Keepers stand
+        at their own goal; a keeper detected mid-pitch is either wandered upfield or
+        a misdetection and must not anchor a shot (that was the R18 flood). Used as a
+        shot anchor when no goal box (cls33) is detected — keeper ~22% of frames vs
+        goal ~0.6%. Returns the keeper centre or None."""
+        if ball_pt is None:
+            return None
+        n = len(self._gk_centers)
+        lo, hi = max(0, frame_idx - window), min(n - 1, frame_idx + window)
+        edge = self.frame_width * 0.25            # goal-end zone = outer 25% of width
+        best, bestd2 = None, None
+        for t in range(lo, hi + 1):
+            for (gx, gy) in self._gk_centers[t]:
+                if moving_right:
+                    # target = right goal: keeper ahead of the ball AND near the right edge
+                    if gx <= ball_pt[0] or gx < self.frame_width - edge:
+                        continue
+                else:
+                    if gx >= ball_pt[0] or gx > edge:
+                        continue
+                d2 = (gx - ball_pt[0]) ** 2 + (gy - ball_pt[1]) ** 2
+                if bestd2 is None or d2 < bestd2:
+                    best, bestd2 = (gx, gy), d2
+        return best
+
     def _detect_goal_restarts(self, events, ev_bt, player_tracks):
         """Babak's goal-confirmation cue: a kickoff from the CENTER circle.
 
@@ -968,6 +995,7 @@ class AdvancedEventDetector:
         _DIS_ANCHOR = bool(_os.environ.get("R16_DISABLE_ANCHOR"))
         _DIS_GK = bool(_os.environ.get("R16_DISABLE_GK"))
         _GATE1_RELAX = bool(_os.environ.get("R16_GATE1_RELAX"))  # R17 Item 4
+        _RECALL = bool(_os.environ.get("CLIPPER_RECALL"))        # R18: keeper-anchor + emit unattributable
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -1021,10 +1049,20 @@ class AdvancedEventDetector:
                     # pitch fit is wrong — the dominant cause of passes counted as
                     # shots. Falls back to the homography gate only when the run
                     # has no goal detections at all (backward compatible).
-                    if self._has_goals and not _DIS_ANCHOR:
+                    _keeper_anchored = False; _g = None
+                    if (self._has_goals or (_RECALL and self._has_gk)) and not _DIS_ANCHOR:
                         _gw = max(6, int(EFF_FPS))              # ~1s tolerance window
                         _gnear = self.frame_width * 0.30        # goal within 30% frame width of ball
-                        _g = self._nearest_goal(i, p2, window=_gw)
+                        _g = self._nearest_goal(i, p2, window=_gw) if self._has_goals else None
+                        if _g is None and _RECALL and self._has_gk:
+                            # R18/R19 keeper-anchor fallback (see _nearest_gk_anchor).
+                            _g = self._nearest_gk_anchor(i, p2, moving_right, window=_gw)
+                            _keeper_anchored = _g is not None
+                            if _keeper_anchored:
+                                # R19: a keeper anchor demands the ball genuinely close
+                                # (a real shot ends near the keeper), not 30% of the
+                                # frame away — the tighter gate kills the midfield flood.
+                                _gnear = self.frame_width * 0.13
                         if _g is None:
                             _shot_debug["candidates"][_ci][2] = "gate3_goal_anchor"; _shot_debug["gate3_goal_anchor"] += 1
                             continue
@@ -1053,7 +1091,7 @@ class AdvancedEventDetector:
                         # within 25% frame width of it confirms it's the real goal
                         # and the shooter is attacking a keeper, not firing at a
                         # false goal box or an empty end.
-                        if self._has_gk and not _DIS_GK:
+                        if self._has_gk and not _DIS_GK and not _keeper_anchored:
                             _gk_w = max(6, int(EFF_FPS))
                             if not self._gk_near_point(i, _g, window=_gk_w,
                                                        near_px=self.frame_width * 0.25):
@@ -1132,7 +1170,7 @@ class AdvancedEventDetector:
                                 # R16 Item 4: emit the shot for the clipper with no
                                 # shooter (an unnamed shot clip beats no clip). Touches
                                 # no stats[shooter], so it never lands on a player card.
-                                if _os.environ.get("R16_EMIT_UNATTRIB"):
+                                if _RECALL or _os.environ.get("R16_EMIT_UNATTRIB"):
                                     _sd = max(10, int(EFF_FPS * 5))
                                     if not [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < _sd]:
                                         events.append({"type": "shot", "player": None, "frame": i,
@@ -1304,6 +1342,29 @@ class AdvancedEventDetector:
                                             if missing >= int(EFF_FPS * 0.8):
                                                 goal_confirmed = True
                                                 goal_method = 2
+
+                                    # R19 Method 3 (homography-free, recall mode): the ball
+                                    # REACHES the anchor (keeper / goal end) in pixel space
+                                    # and then VANISHES — into the net / behind the goal.
+                                    # A save is excluded by requiring the ball to STAY gone
+                                    # (a save/clearance puts it back into play near the
+                                    # anchor). Works when the homography can't project the
+                                    # goal line and the goal box is out of frame.
+                                    if not goal_confirmed and _RECALL and _g is not None:
+                                        _reach = self.frame_width * 0.06
+                                        _reached = None
+                                        for k in range(i, min(i + int(EFF_FPS * 2.0), len(ev_bt))):
+                                            if ev_bt[k] and math.hypot(ev_bt[k][0] - _g[0], ev_bt[k][1] - _g[1]) <= _reach:
+                                                _reached = k
+                                                break
+                                        if _reached is not None:
+                                            _gend = min(_reached + int(EFF_FPS * 2.5), len(ev_bt))
+                                            _gone = sum(1 for k in range(_reached + 1, _gend) if _ball_gone(k))
+                                            _back = any(ev_bt[k] and math.hypot(ev_bt[k][0] - _g[0], ev_bt[k][1] - _g[1]) <= _reach * 1.6
+                                                        for k in range(_reached + 1, _gend) if ev_bt[k])
+                                            if _gone >= int(EFF_FPS * 1.2) and not _back:
+                                                goal_confirmed = True
+                                                goal_method = 3
 
                                     if goal_confirmed:
                                         # Round 16: Validate shooter's team attacks this goal
