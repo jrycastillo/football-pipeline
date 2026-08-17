@@ -678,8 +678,11 @@ class StatsEngine:
         player_tracks = all_frames
         
         # Extract Ball Track
+        import os as _os
         from vision.ball_tracking import BallTracker
-        ball_tracker = BallTracker()
+        _fw = getattr(self.detector, "frame_width", 1920)
+        _traj = bool(_os.environ.get("CLIPPER_RECALL"))   # R20: gated ball-track cleanup
+        ball_tracker = BallTracker(frame_width=_fw)
         for t, f in enumerate(all_frames):
              ball_tracker.update(t, f["boxes"])
         ball_track = ball_tracker.interpolate(len(all_frames))
@@ -704,7 +707,7 @@ class StatsEngine:
         # silenced a real goal even after the disappearance tests ignored
         # zoom-only frames. Possession keeps the zoom-enhanced track — that
         # is what the zoom is for.
-        event_tracker = BallTracker()
+        event_tracker = BallTracker(frame_width=_fw, trajectory_select=_traj)
         for t, f in enumerate(all_frames):
             event_tracker.update(t, [b for b in f.get("boxes", [])
                                      if not (b.get("cls") == 32 and b.get("zoom"))])
