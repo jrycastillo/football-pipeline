@@ -1004,6 +1004,12 @@ class AdvancedEventDetector:
         # env-tunable; with CLIPPER_RECALL off this whole pass is inert.
         _SHOT_MIN_CONF = float(_os.environ.get("R21_SHOT_MIN_CONF", 0.45))
         _KEEP_UNATTRIB = bool(_os.environ.get("R21_KEEP_UNATTRIB"))
+        # R21b goalmouth override: a shot whose ball is within this fraction of the
+        # frame width of the detected goal/keeper is kept regardless of the floor
+        # (and even unattributed) — the goalmouth chance the client most wants. Clean
+        # on broadcast; looser on amateur (noisier goal/keeper detection), so it is
+        # tunable: lower it to tighten, set 0 to disable the override entirely.
+        _GM_FRAC = float(_os.environ.get("R21_GOALMOUTH_FRAC", 0.10))
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -1057,7 +1063,7 @@ class AdvancedEventDetector:
                     # pitch fit is wrong — the dominant cause of passes counted as
                     # shots. Falls back to the homography gate only when the run
                     # has no goal detections at all (backward compatible).
-                    _keeper_anchored = False; _g = None
+                    _keeper_anchored = False; _g = None; _goalmouth = False
                     if (self._has_goals or (_RECALL and self._has_gk)) and not _DIS_ANCHOR:
                         _gw = max(6, int(EFF_FPS))              # ~1s tolerance window
                         _gnear = self.frame_width * 0.30        # goal within 30% frame width of ball
@@ -1076,6 +1082,13 @@ class AdvancedEventDetector:
                             continue
                         _d2 = math.hypot(p2[0] - _g[0], p2[1] - _g[1])   # ball->goal at end
                         _d1 = math.hypot(p1[0] - _g[0], p1[1] - _g[1])   # ball->goal at start
+                        # R21b: the ball is RIGHT AT the goal/keeper (<=10% frame
+                        # width). This is the most valuable clip for the client — a
+                        # genuine goalmouth chance — so keep it regardless of the
+                        # confidence floor and even if no shooter can be attributed.
+                        # Midfield false shots sit far from goal (up to the 30% anchor
+                        # gate), so this override never re-admits them.
+                        _goalmouth = _GM_FRAC > 0 and _d2 <= self.frame_width * _GM_FRAC
                         # Reject unless the ball is near the goal AND moving
                         # toward it. A goal kick / defensive clearance sits near
                         # the OWN goal but travels AWAY from it (d2 >= d1) — the
@@ -1181,7 +1194,10 @@ class AdvancedEventDetector:
                                 # R21: default OFF — an unshootered "shot" is the noisiest
                                 # class (half the false midfield clips), and produces no
                                 # player/assist value. Opt back in with R21_KEEP_UNATTRIB.
-                                if (_RECALL and _KEEP_UNATTRIB) or _os.environ.get("R16_EMIT_UNATTRIB"):
+                                # R21b exception: a goalmouth chance (ball right at the
+                                # goal/keeper) is kept even unattributed — it's the clip
+                                # the client most wants, shooter or not.
+                                if (_RECALL and (_KEEP_UNATTRIB or _goalmouth)) or _os.environ.get("R16_EMIT_UNATTRIB"):
                                     _sd = max(10, int(EFF_FPS * 5))
                                     if not [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < _sd]:
                                         events.append({"type": "shot", "player": None, "frame": i,
@@ -1222,7 +1238,7 @@ class AdvancedEventDetector:
                                                             + 0.15 * center_norm + 0.15 * attrib_norm)
                                     if not geometry_reliable:
                                         shot_conf = _clamp_conf(shot_conf * 0.5)  # geometry can't be trusted
-                                    if _RECALL and shot_conf < _SHOT_MIN_CONF:
+                                    if _RECALL and shot_conf < _SHOT_MIN_CONF and not _goalmouth:
                                         _shot_debug["candidates"][_ci][2] = "gate8_low_conf"; _shot_debug["gate8_low_conf"] += 1
                                         continue
                                     _shot_debug["candidates"][_ci][2] = "emitted"; _shot_debug["emitted"] += 1
