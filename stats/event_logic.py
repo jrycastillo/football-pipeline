@@ -996,6 +996,14 @@ class AdvancedEventDetector:
         _DIS_GK = bool(_os.environ.get("R16_DISABLE_GK"))
         _GATE1_RELAX = bool(_os.environ.get("R16_GATE1_RELAX"))  # R17 Item 4
         _RECALL = bool(_os.environ.get("CLIPPER_RECALL"))        # R18: keeper-anchor + emit unattributable
+        # R21 precision pass. Real near-goal shots score confidence >=0.45; the
+        # midfield false shots score <=0.37 (measured on the HB broadcast clips), so
+        # a floor cleanly separates them. Unattributable shots (no shooter resolved)
+        # are the weakest signal and can't land on a player card or an assist —
+        # suppressed by default, kept only with R21_KEEP_UNATTRIB. RECALL-only and
+        # env-tunable; with CLIPPER_RECALL off this whole pass is inert.
+        _SHOT_MIN_CONF = float(_os.environ.get("R21_SHOT_MIN_CONF", 0.45))
+        _KEEP_UNATTRIB = bool(_os.environ.get("R21_KEEP_UNATTRIB"))
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -1004,7 +1012,7 @@ class AdvancedEventDetector:
                        "gate5_sustained": 0, "gate6a_gk_far": 0, "gate6b_gk_on_ball": 0,
                        "gate7a_homog_dist": 0, "gate7b_off_target": 0,
                        "gate7c_unattributable": 0, "gate7d_debounce": 0,
-                       "emitted": 0, "candidates": []}
+                       "gate8_low_conf": 0, "emitted": 0, "candidates": []}
         for i in range(2, frames_count):
             if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip if either frame is interpolated
@@ -1170,7 +1178,10 @@ class AdvancedEventDetector:
                                 # R16 Item 4: emit the shot for the clipper with no
                                 # shooter (an unnamed shot clip beats no clip). Touches
                                 # no stats[shooter], so it never lands on a player card.
-                                if _RECALL or _os.environ.get("R16_EMIT_UNATTRIB"):
+                                # R21: default OFF — an unshootered "shot" is the noisiest
+                                # class (half the false midfield clips), and produces no
+                                # player/assist value. Opt back in with R21_KEEP_UNATTRIB.
+                                if (_RECALL and _KEEP_UNATTRIB) or _os.environ.get("R16_EMIT_UNATTRIB"):
                                     _sd = max(10, int(EFF_FPS * 5))
                                     if not [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < _sd]:
                                         events.append({"type": "shot", "player": None, "frame": i,
@@ -1186,7 +1197,6 @@ class AdvancedEventDetector:
                                 if recent:
                                     _shot_debug["candidates"][_ci][2] = "gate7d_debounce"; _shot_debug["gate7d_debounce"] += 1
                                 if not recent:
-                                    _shot_debug["candidates"][_ci][2] = "emitted"; _shot_debug["emitted"] += 1
                                     # Check if under pressure
                                     under_pressure = self._is_opponent_near(i, shooter, player_tracks, dist_m=3.0) is not None
                                     # Physical sanity of this frame's homography: a
@@ -1196,6 +1206,26 @@ class AdvancedEventDetector:
                                     # but keep its untrustworthy xG / range out of the
                                     # aggregates rather than inflate them.
                                     geometry_reliable = speed_mps <= MAX_BALL_SPEED_MPS
+                                    # R21: score confidence up-front so a low-confidence
+                                    # candidate (the midfield false shots score <=0.37 vs
+                                    # real near-goal shots >=0.45) is rejected BEFORE it
+                                    # touches stats or emits a clip. speed margin over the
+                                    # gate, proximity to goal, how central the projected
+                                    # trajectory hits the mouth, attribution quality; halved
+                                    # when the frame's homography can't be trusted.
+                                    speed_norm = min(1.0, (speed_mps - SHOT_SPEED_THRESHOLD) / SHOT_SPEED_THRESHOLD)
+                                    prox_norm = 1.0 - min(1.0, dist_to_goal / 35.0)
+                                    center_norm = (1.0 - min(1.0, abs(y_at_goal - 34.0) / GOAL_WIDTH_HALF)
+                                                   if y_at_goal is not None else 0.5)
+                                    attrib_norm = 1.0 if shot_attrib_direct else 0.5
+                                    shot_conf = _clamp_conf(0.20 + 0.30 * speed_norm + 0.20 * prox_norm
+                                                            + 0.15 * center_norm + 0.15 * attrib_norm)
+                                    if not geometry_reliable:
+                                        shot_conf = _clamp_conf(shot_conf * 0.5)  # geometry can't be trusted
+                                    if _RECALL and shot_conf < _SHOT_MIN_CONF:
+                                        _shot_debug["candidates"][_ci][2] = "gate8_low_conf"; _shot_debug["gate8_low_conf"] += 1
+                                        continue
+                                    _shot_debug["candidates"][_ci][2] = "emitted"; _shot_debug["emitted"] += 1
                                     xg = calculate_xg(m1, goal_x=goal_x, under_pressure=under_pressure)
                                     stats[shooter]["shots_on_target"] += 1
                                     if geometry_reliable:
@@ -1222,26 +1252,8 @@ class AdvancedEventDetector:
                                             stats[assister]["expected_assists"] += xg
                                             self.last_pass_info["xg_assigned"] = True
 
-                                    # Confidence: speed margin over the shot gate,
-                                    # proximity to goal, how central the projected
-                                    # trajectory hits the goal mouth, and shooter
-                                    # attribution quality.
-                                    # geometry_reliable (computed above) is False when
-                                    # the homography mis-projected this frame. The shot
-                                    # is still real (visual-goal gated), so keep it but
-                                    # halve confidence and don't publish an impossible
-                                    # speed or a bogus xG.
-                                    speed_norm = min(1.0, (speed_mps - SHOT_SPEED_THRESHOLD) / SHOT_SPEED_THRESHOLD)
-                                    prox_norm = 1.0 - min(1.0, dist_to_goal / 35.0)
-                                    # y_at_goal can be None (ball moving vertically, or
-                                    # visually confirmed without a usable projection).
-                                    center_norm = (1.0 - min(1.0, abs(y_at_goal - 34.0) / GOAL_WIDTH_HALF)
-                                                   if y_at_goal is not None else 0.5)
-                                    attrib_norm = 1.0 if shot_attrib_direct else 0.5
-                                    shot_conf = _clamp_conf(0.20 + 0.30 * speed_norm + 0.20 * prox_norm
-                                                            + 0.15 * center_norm + 0.15 * attrib_norm)
-                                    if not geometry_reliable:
-                                        shot_conf = _clamp_conf(shot_conf * 0.5)  # geometry can't be trusted
+                                    # (shot_conf was scored up-front, before the stats
+                                    # increment, so the R21 floor could reject cleanly.)
                                     # Raw xG inputs for the downstream xG model
                                     # (meters / degrees). body_part is "foot" here —
                                     # header shots are not distinguished yet.
@@ -1480,6 +1492,7 @@ class AdvancedEventDetector:
               f"gate6a_gk_far={_shot_debug['gate6a_gk_far']} gate6b_gk_on_ball={_shot_debug['gate6b_gk_on_ball']} "
               f"gate7a_homog_dist={_shot_debug['gate7a_homog_dist']} gate7b_off_target={_shot_debug['gate7b_off_target']} "
               f"gate7c_unattributable={_shot_debug['gate7c_unattributable']} gate7d_debounce={_shot_debug['gate7d_debounce']} "
+              f"gate8_low_conf={_shot_debug['gate8_low_conf']} "
               f"emitted={_shot_debug['emitted']}")
         # Per-candidate outcomes (frame, speed, gate) for offline attribution.
         print(f"[ShotCandidates] {_cands}")
