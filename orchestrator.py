@@ -618,7 +618,7 @@ def is_video_processed(matches_video_id, source_url, retry_failed=False):
 
 def run_pipeline(video_path, output_dir, max_frames=None, no_db=False, video_id=None, user_id=None, spaces_url=None,
                  locking_mode=2, jnr_stride=None, vid_stride=None, tracking_mode="bytetrack", make_video=False,
-                 task_id=0, roster_file=None, clip_events=None, clip_pad_s=3.0,
+                 task_id=0, roster_file=None, clip_events=None, clip_pad_s=4.0,
                  write_db=False, db_dry_run=False, analysis_id=None, pitch_homography=False):
     """
     Unified metadata-aware pipeline wrapper.
@@ -878,7 +878,7 @@ def _extract_video_roster(video_item, out_dir):
 def process_spaces_video(video_item, save_local=True, no_db=True, max_frames=None,
                          locking_mode=2, jnr_stride=None, vid_stride=None,
                          tracking_mode="bytetrack", make_video=False,
-                         roster_file=None, clip_events=None, clip_pad_s=3.0,
+                         roster_file=None, clip_events=None, clip_pad_s=4.0,
                          write_db=False, db_dry_run=False, analysis_id=None,
                          pitch_homography=False):
     """
@@ -977,7 +977,7 @@ def start_polling_loop(poll_interval=60, max_videos=None, min_size_mb=0, max_siz
                        locking_mode=2, jnr_stride=None, vid_stride=None,
                        make_video=False, parallel_workers=1, max_frames=None,
                        video_ids_filter=None, roster_file=None, clip_events=None,
-                       clip_pad_s=3.0, write_db=False, db_dry_run=False,
+                       clip_pad_s=4.0, write_db=False, db_dry_run=False,
                        analysis_id=None, pitch_homography=False, retry_failed=False):
     """
     Continuously poll for pending videos and process them.
@@ -1136,7 +1136,7 @@ def main():
                         help="Optional roster JSON passed through to the pipeline and persisted with --write_db")
     parser.add_argument("--clip_events", type=str,
                         help="Comma-separated event types to clip; writes clips_manifest.json")
-    parser.add_argument("--clip_pad_s", type=float, default=3.0,
+    parser.add_argument("--clip_pad_s", type=float, default=4.0,
                         help="Seconds of video kept on each side of a clipped event")
     parser.add_argument("--pitch_homography", action="store_true",
                         help="Enable Nabeel v3 pitch-keypoint homography (px->meters). "

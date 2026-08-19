@@ -1878,8 +1878,9 @@ if __name__ == "__main__":
                         help="Comma-separated event types to clip after analysis "
                              "(e.g. 'goal,shot,save'). Writes ±clip_pad_s clips + "
                              "clips_manifest.json for the admin verification flow.")
-    parser.add_argument('--clip_pad_s', type=float, default=3.0,
-                        help="Seconds of video kept on each side of a clipped event.")
+    parser.add_argument('--clip_pad_s', type=float, default=4.0,
+                        help="Seconds of video kept on each side of a clipped event "
+                             "(4.0 => 8s clips: extra build-up before + outcome after).")
     parser.add_argument('--pitch_homography', action="store_true",
                         help="Fit a real pixel->meter homography from the 32-landmark pitch "
                              "keypoint model (env.PITCH_KP_WEIGHTS, default "
