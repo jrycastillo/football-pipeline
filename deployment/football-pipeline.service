@@ -10,17 +10,23 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/football
 Environment="PATH=/home/ubuntu/football/venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONUNBUFFERED=1"
+# Hardened shot detection + R21 precision. Without this the shots product is off.
+# (Also settable via .env; kept here so the unit is self-documenting.)
+Environment="CLIPPER_RECALL=1"
 
-# Load environment variables from .env file
+# Load environment variables from .env file (secrets + CLIPPER_RECALL / R21_* knobs)
 EnvironmentFile=/home/ubuntu/football/.env
 
-# Main command - polling mode with 3 parallel workers
+# Main command - polling mode with 3 parallel workers.
+# --clip_events is REQUIRED to write the event clips the frontend consumes;
+# without it the run produces stats only and no clips.
 ExecStart=/home/ubuntu/football/venv/bin/python orchestrator.py \
     --poll \
     --poll_interval 60 \
     --parallel 3 \
     --locking_mode 2 \
-    --tracking_mode bytetrack
+    --tracking_mode bytetrack \
+    --clip_events shot,goal,assist,goal_restart
 
 # Restart policy
 Restart=always
