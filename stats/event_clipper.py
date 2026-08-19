@@ -701,6 +701,12 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
 
     cv2 = _load_cv2()
 
+    # Clean-clip mode: with CLIPPER_NO_BOXES set the clips render as raw event
+    # footage — no player bounding boxes, labels, or overlays (the boxes clutter
+    # the frontend review clips). The actor is still resolved below so the
+    # require_box quality filter is unaffected; we simply don't draw anything.
+    _no_boxes = bool(os.environ.get("CLIPPER_NO_BOXES"))
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"[Clipper] Cannot open video: {video_path} — no clips written")
@@ -893,7 +899,7 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
 
         written, actual_codec = _write_clip(
             cv2, cap, clip_path, start, end, fps, width, height,
-            selected_codec, ffmpeg_path, draw_hook)
+            selected_codec, ffmpeg_path, None if _no_boxes else draw_hook)
 
         if written == 0:
             _remove_file_quiet(clip_path)
