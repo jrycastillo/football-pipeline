@@ -21,20 +21,34 @@ normally; pitch homography (distance/xG geometry) just stays off. If you don't h
 > `resnet34_rgb_jnr.pt` / `yolo_ball.pt` — those are superseded. Always match the
 > filenames in `config.yaml`.
 
-## Install
+## Install — production model bundle (Google Drive)
+
+All runtime models are packaged in a single tarball, **`models_deploy.tar.gz`**
+(~670 MB): the required models above plus the optional ones (homography re-id,
+legibility, fallback digit reader) and a `MODELS_MANIFEST.txt` describing each.
+
+**Download link:** https://drive.google.com/file/d/11MjXkc00fXAnXBqHYtL-WYN3zDaJs5Ml/view?usp=sharing
 
 ```bash
-mkdir -p models
-# copy/download the files into models/, e.g.:
-#   models/yolo_player.pt
-#   models/resnet34_clean.pt
-#   models/nabeel_best.pt
-#   models/yolo_pitch.pt        # optional
+# On the deploy server (gdown handles Google Drive's large-file scan prompt;
+# a plain wget on the share link returns the HTML warning page, not the file):
+pip install gdown
+gdown 11MjXkc00fXAnXBqHYtL-WYN3zDaJs5Ml -O models_deploy.tar.gz
+
+# Verify integrity — MUST match:
+sha256sum -c <<< "4511fded7d10bf8ea340116ee55b0c8c2a9cbfc4cffcaad34229799c6696c186  models_deploy.tar.gz"
+
+# Extract into models/ (filenames then line up with config.yaml):
+mkdir -p models && tar -xzf models_deploy.tar.gz -C models/
 ```
 
-Source of the weights: the team's shared storage. **For production, host them in
-object storage (S3 / GCS / DigitalOcean Spaces)** and pull them in at deploy time —
-not Google Drive, which isn't reliable for automated setup.
+If you can't use `gdown`, open the link in a browser, download the tarball, and
+copy it to the server, then run the `sha256sum` + `tar` steps above.
+
+> **Production note:** Google Drive works for a manual pull like this, but for a
+> fully automated deploy the sturdier option is object storage (S3 / GCS /
+> DigitalOcean Spaces) — mirror the bundle there and swap the `gdown` line for a
+> `aws s3 cp` / `curl`. The Drive link is the current source of record.
 
 ## Verify
 

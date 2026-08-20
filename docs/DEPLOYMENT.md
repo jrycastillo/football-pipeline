@@ -63,7 +63,17 @@ models/resnet34_clean.pt     # jersey numbers (required)
 models/nabeel_best.pt        # ball + goal    (required)
 models/yolo_pitch.pt         # homography     (optional)
 ```
-Host these in object storage (S3/GCS/Spaces) and pull them in during provisioning.
+
+**Model bundle (all weights, ~670 MB):** https://drive.google.com/file/d/11MjXkc00fXAnXBqHYtL-WYN3zDaJs5Ml/view?usp=sharing
+
+```bash
+pip install gdown
+gdown 11MjXkc00fXAnXBqHYtL-WYN3zDaJs5Ml -O models_deploy.tar.gz
+sha256sum -c <<< "4511fded7d10bf8ea340116ee55b0c8c2a9cbfc4cffcaad34229799c6696c186  models_deploy.tar.gz"
+mkdir -p models && tar -xzf models_deploy.tar.gz -C models/
+```
+See **[MODEL_SETUP.md](../MODEL_SETUP.md)** for details. For a fully automated
+deploy, mirror the bundle to object storage (S3/GCS/Spaces) and pull from there.
 
 ---
 
