@@ -1010,6 +1010,12 @@ class AdvancedEventDetector:
         # on broadcast; looser on amateur (noisier goal/keeper detection), so it is
         # tunable: lower it to tighten, set 0 to disable the override entirely.
         _GM_FRAC = float(_os.environ.get("R21_GOALMOUTH_FRAC", 0.10))
+        # R22 aim cone: cosine of the maximum angle between the ball's travel
+        # direction and the direction to the goal. A shot is aimed AT the goal; a
+        # cross/pass into the box travels ACROSS its face. Both close on the goal,
+        # so the distance gates can't separate them — this is the dominant
+        # remaining false-shot class. Default 0.70 (~45 degrees). Set -1 to disable.
+        _CONE = float(_os.environ.get("R22_SHOT_CONE", 0.70))
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -1018,7 +1024,7 @@ class AdvancedEventDetector:
                        "gate5_sustained": 0, "gate6a_gk_far": 0, "gate6b_gk_on_ball": 0,
                        "gate7a_homog_dist": 0, "gate7b_off_target": 0,
                        "gate7c_unattributable": 0, "gate7d_debounce": 0,
-                       "gate8_low_conf": 0, "emitted": 0, "candidates": []}
+                       "gate8_low_conf": 0, "gate9_cross": 0, "emitted": 0, "candidates": []}
         for i in range(2, frames_count):
             if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip if either frame is interpolated
@@ -1102,6 +1108,22 @@ class AdvancedEventDetector:
                         # 2-frame jitter looks like it is approaching (this is what
                         # made GK passes register as shots). A real shot approaches
                         # the goal over the whole run-up.
+                        # R22 AIM CONE — the ball must travel TOWARD the goal, not
+                        # merely get closer to it. A cross or a ball played into the
+                        # box passes gate4/gate5 (it does close on the goal) but its
+                        # direction is across the goal face, not at it. Comparing the
+                        # travel vector against the ball->goal vector separates the
+                        # two in pure pixel space (no homography). Exempt a ball
+                        # already AT the goalmouth, where the angle is dominated by
+                        # detection noise and the clip is valuable regardless.
+                        if _CONE > -1.0 and not _goalmouth:
+                            _vx, _vy = p2[0] - p1[0], p2[1] - p1[1]
+                            _ux, _uy = _g[0] - p2[0], _g[1] - p2[1]
+                            _vn, _un = math.hypot(_vx, _vy), math.hypot(_ux, _uy)
+                            if _vn > 1e-6 and _un > 1e-6:
+                                if (_vx * _ux + _vy * _uy) / (_vn * _un) < _CONE:
+                                    _shot_debug["candidates"][_ci][2] = "gate9_cross"; _shot_debug["gate9_cross"] += 1
+                                    continue
                         _wb = max(2, int(EFF_FPS * 0.6))
                         _pe = ev_bt[i - _wb] if i - _wb >= 0 else None
                         if _pe is not None and math.hypot(_pe[0] - _g[0], _pe[1] - _g[1]) <= _d2:
@@ -1509,6 +1531,7 @@ class AdvancedEventDetector:
               f"gate7a_homog_dist={_shot_debug['gate7a_homog_dist']} gate7b_off_target={_shot_debug['gate7b_off_target']} "
               f"gate7c_unattributable={_shot_debug['gate7c_unattributable']} gate7d_debounce={_shot_debug['gate7d_debounce']} "
               f"gate8_low_conf={_shot_debug['gate8_low_conf']} "
+              f"gate9_cross={_shot_debug['gate9_cross']} "
               f"emitted={_shot_debug['emitted']}")
         # Per-candidate outcomes (frame, speed, gate) for offline attribution.
         print(f"[ShotCandidates] {_cands}")
@@ -2062,3 +2085,88 @@ class AdvancedEventDetector:
     def _check_opp_cone(self, frame_idx, pid, player_tracks, ball_px):
         # Placeholder: Check if any opp is < 3m towards goal
         return self._is_opponent_near(frame_idx, pid, player_tracks, dist_m=3.0)
+
+
+def inject_scoreboard_goals(events, sb_goals, fps, vid_stride, team_map=None,
+                            before_s=90.0, after_s=30.0, assist_window_s=15.0):
+    """Replace guessed goals with scoreboard-confirmed ones, and unlock assists.
+
+    Division of labour: the scorebug is ground truth for WHETHER and WHEN a goal
+    happened — it cannot be argued with — while the shot stream is our only
+    source for WHO scored. Pairing them gives a goal that is both certain and
+    attributed, which the vision-only path could never produce (0-1 goals per
+    match, all low confidence).
+
+    The score-change timestamp is approximate: the graphic updates during the
+    celebration, and the reader's modal smoothing shifts the edge further. So the
+    scorer is the shot NEAREST the change within a generous asymmetric window
+    (mostly before it), not simply the last one, and the goal is anchored on that
+    shot's frame so the clip opens on the strike rather than the replay.
+
+    Assists follow for free: the last completed pass to the scorer by a team-mate
+    inside `assist_window_s`. This is the same Opta/StatsBomb rule the vision path
+    used — it just never had a real goal to run on.
+    """
+    if not sb_goals or not fps:
+        return events
+    stride = max(1, int(vid_stride or 1))
+    fps = float(fps)
+    per_s = fps / stride                       # processed frames per second
+
+    # The scoreboard is authoritative: previous goal/assist guesses are dropped
+    # rather than merged, so a match cannot report both a real and a phantom goal.
+    kept = [e for e in events
+            if not isinstance(e, dict) or e.get("type") not in ("goal", "assist")]
+    shots = sorted((e for e in kept if e.get("type") == "shot"),
+                   key=lambda e: e.get("frame") or 0)
+    passes = sorted((e for e in kept if e.get("type") == "pass"),
+                    key=lambda e: e.get("frame") or 0)
+
+    for t, side, score in sb_goals:
+        gf = max(0, int(round(t * per_s)) - 1)
+        lo, hi = gf - before_s * per_s, gf + after_s * per_s
+        window = [s for s in shots if lo <= (s.get("frame") or 0) <= hi]
+        best = min(window, key=lambda s: abs((s.get("frame") or 0) - gf)) if window else None
+
+        scorer = best.get("player") if best else None
+        frame = (best.get("frame") if best else gf) or gf
+        # Certainty of the GOAL is the scoreboard's; certainty of the SCORER
+        # decays with how far the paired shot sits from the score change.
+        conf = 0.95
+        if best is None:
+            conf = 0.80                        # goal certain, scorer unknown
+        elif abs((best.get("frame") or 0) - gf) > 45 * per_s:
+            conf = 0.85                        # paired, but loosely
+        kept.append({"type": "goal", "player": scorer, "frame": frame,
+                     "source": "scoreboard", "side": side,
+                     "score_after": {"home": score[0], "away": score[1]},
+                     "shot_attributed": best is not None,
+                     "confidence": round(conf, 2)})
+        if scorer is None:
+            continue
+
+        awin = assist_window_s * per_s
+        for p in reversed(passes):
+            pf = p.get("frame") or 0
+            if pf > frame:
+                continue
+            if frame - pf > awin:
+                break                          # older passes cannot be the assist
+            if p.get("to") != scorer:
+                continue
+            passer = p.get("from")
+            if passer in (None, scorer) or p.get("complete") is False:
+                continue
+            if team_map and team_map.get(str(passer)) != team_map.get(str(scorer)):
+                continue                       # a turnover is not an assist
+            kept.append({"type": "assist", "player": passer, "to": scorer,
+                         "frame": pf, "source": "scoreboard",
+                         "confidence": 0.75})
+            break
+
+    kept.sort(key=lambda e: e.get("frame") or 0)
+    for e in kept:                             # re-stamp time_s for injected events
+        fr = e.get("frame")
+        if isinstance(fr, (int, float)):
+            e["time_s"] = round(((fr + 1) * stride) / fps, 2)
+    return kept
