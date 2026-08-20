@@ -1,0 +1,13 @@
+{
+  "match": "hb_full (Hamburg vs Bayern, full broadcast, test_gdrive.mp4)",
+  "notes": "Goal times are the scorebug score-change instants (authoritative for WHETHER/WHEN a goal occurred; the broadcast graphic lags the goal itself by a few seconds). Final score 2-2. Shots/assists are NOT yet annotated - add them with timestamps to score those detectors.",
+  "final_score": {"home": 2, "away": 2},
+  "goals": [
+    {"time_s": 2031, "team": "home", "scorer": null},
+    {"time_s": 2496, "team": "away", "scorer": null},
+    {"time_s": 3114, "team": "away", "scorer": null},
+    {"time_s": 3516, "team": "home", "scorer": null}
+  ],
+  "shots": [],
+  "assists": []
+}
