@@ -2982,6 +2982,32 @@ if __name__ == "__main__":
     except Exception as _e:
         log(f"R14 team_map dump failed (non-fatal): {_e}")
 
+    # Scoreboard goals (+ the assists they unlock). The on-screen score is the
+    # only unambiguous goal signal on broadcast footage: the vision methods all
+    # depend on seeing the ball vanish into the net, which single-camera footage
+    # rarely shows cleanly (measured: 0-1 goals per match, all low confidence).
+    # Reading the scorebug instead gives certain goals; pairing each with the
+    # nearest shot supplies the scorer, and the assist rule then runs for free.
+    # No-ops on footage without a scorebug (amateur), leaving vision goals as-is.
+    if os.environ.get("SCOREBOARD_GOALS", "1") != "0":
+        try:
+            from vision.scoreboard import GlyphScoreboardReader
+            from stats.event_logic import inject_scoreboard_goals
+            _sb_goals = GlyphScoreboardReader().detect_goals(video_path)
+            if _sb_goals:
+                _before = sum(1 for e in raw_tracks if e.get("type") == "goal")
+                raw_tracks = inject_scoreboard_goals(
+                    raw_tracks, _sb_goals,
+                    fps=fps,
+                    vid_stride=args.vid_stride,
+                    team_map=getattr(stats_adapter.engine, "team_map", None))
+                _after = sum(1 for e in raw_tracks if e.get("type") == "goal")
+                _ass = sum(1 for e in raw_tracks if e.get("type") == "assist")
+                log(f"[Scoreboard] goals {_before} (vision) -> {_after} (scoreboard), "
+                    f"{_ass} assist(s)")
+        except Exception as _e:
+            log(f"[Scoreboard] skipped (non-fatal): {_e}")
+
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
         json.dump(raw_tracks, f, indent=2)
