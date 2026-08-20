@@ -1,0 +1,12 @@
+{
+  "match": "hb_goals segment (min 32-56 cut of test_gdrive.mp4, offset 1920s)",
+  "notes": "Goal times re-offset from the full-match scorebug ground truth (ground_truth/hb_full_gt.json) into this segment's clock. The 4th full-match goal (58:36) falls after this 24-min clip ends and is correctly absent.",
+  "final_score_in_segment": {"home": 1, "away": 2},
+  "goals": [
+    {"time_s": 111,  "team": "home", "scorer": null},
+    {"time_s": 576,  "team": "away", "scorer": null},
+    {"time_s": 1194, "team": "away", "scorer": null}
+  ],
+  "shots": [],
+  "assists": []
+}
