@@ -2068,6 +2068,16 @@ if __name__ == "__main__":
         homography_estimator = PitchHomographyEstimator(
             model_path=CONFIG['env'].get('PITCH_KP_WEIGHTS', 'models/pitch_keypoints.pt'),
             device=get_device().type)
+        # Amateur plan Phase A: a fixed camera doesn't need the 24-frame refit
+        # broadcast requires (that cadence exists because a moving camera
+        # invalidates the last fit almost immediately). Probe first — this
+        # verifies staticness before locking, so it safely no-ops on broadcast
+        # footage (declines to lock, per-frame refit proceeds unchanged below).
+        if os.environ.get("PITCH_STATIC_LOCK", "1") != "0":
+            try:
+                homography_estimator.calibrate_static(video_path)
+            except Exception as _e:
+                log(f"[pitch_homography] calibrate_static skipped (non-fatal): {_e}")
 
 
     _device = get_device().type  # cuda > mps > cpu

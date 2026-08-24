@@ -138,6 +138,11 @@ class PitchHomographyEstimator:
         self.frames_reused = 0
         self.last_num_points = 0
 
+        # Set by calibrate_static() when a fixed (amateur) camera is locked to a
+        # single robust homography; fit_from_keypoints then refuses to overwrite
+        # it. Broadcast footage never sets this and behaves exactly as before.
+        self.locked = False
+
         self.model = None
         if model_path and os.path.exists(model_path):
             try:
@@ -162,6 +167,13 @@ class PitchHomographyEstimator:
         previous matrix was kept (partial pitch / degenerate fit).
         """
         self.frames_seen += 1
+
+        if self.locked:
+            # A robust one-time fit already stands (calibrate_static); a single
+            # frame's keypoints are strictly noisier than the pooled fit, so
+            # refitting here could only make it worse.
+            self.frames_reused += 1
+            return False
 
         if kps_xy is None or kps_conf is None:
             self.frames_reused += 1
@@ -208,6 +220,108 @@ class PitchHomographyEstimator:
             print(f"[pitch_homography] Fit error: {e}")
             self.frames_reused += 1
             return False
+
+    def calibrate_static(self, video_path, probes=60, jitter_px_thr=6.0, min_shared=6):
+        """One-time robust calibration for a camera that does not pan/zoom
+        (amateur fixed-camera footage).
+
+        Broadcast homography is refit every ~24 frames because a moving camera
+        invalidates the last fit almost immediately — and even so only a
+        fraction of single-frame fits land, which is why goal detection that
+        depends on this projection is unreliable. A static camera does not have
+        that problem: the same landmark sits in the same pixel place all match,
+        so ONE fit pooled from many frames sees far more correspondences than
+        any single frame and is not vulnerable to one frame's bad luck.
+
+        Staticness is verified, not assumed: keypoints landmarks seen across
+        multiple probes must sit within `jitter_px_thr` pixels of each other.
+        A panning/zooming camera fails this and the method backs off, leaving
+        the normal per-frame predict()/fit_from_keypoints() path untouched —
+        so calling this unconditionally on broadcast footage is safe, it just
+        declines to lock.
+
+        Returns True if a lock was set, False if it backed off (moving camera,
+        model unavailable, or too few usable correspondences).
+        """
+        if self.model is None:
+            return False
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return False
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        if n <= 0:
+            cap.release()
+            return False
+
+        per_landmark = {}                          # idx -> [(x, y), ...] across probes
+        pooled_cam, pooled_pitch = [], []
+        for k in range(probes):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(n * (k + 0.5) / probes))
+            ok, f = cap.read()
+            if not ok:
+                continue
+            try:
+                results = self.model.predict(f, conf=0.05, imgsz=640,
+                                             device=self.device, verbose=False)
+            except Exception:
+                continue
+            if not results:
+                continue
+            r = results[0]
+            kp = getattr(r, "keypoints", None)
+            if kp is None or kp.xy is None or kp.xy.shape[0] == 0:
+                continue
+            xy = kp.xy.cpu().numpy()
+            conf = kp.conf.cpu().numpy() if kp.conf is not None else np.ones(xy.shape[:2], np.float32)
+            best = 0
+            if xy.shape[0] > 1 and r.boxes is not None and len(r.boxes) == xy.shape[0]:
+                best = int(r.boxes.conf.argmax())
+            kxy, kc = xy[best], conf[best]
+            mask = (kc >= self.conf_threshold) & (kxy[:, 0] > 0) & (kxy[:, 1] > 0)
+            for idx in np.where(mask)[0]:
+                per_landmark.setdefault(int(idx), []).append(kxy[idx])
+            if int(mask.sum()) >= self.min_keypoints:
+                pooled_cam.append(kxy[mask])
+                pooled_pitch.append(self.pitch_points[mask])
+        cap.release()
+
+        # A landmark seen on a static camera should sit in a tight pixel
+        # cluster across probes; one that pans/zooms scatters it widely. Median
+        # over landmarks (not mean) so one noisy landmark can't flip the call.
+        jitters = [float(np.std(np.array(pts), axis=0).mean())
+                   for pts in per_landmark.values() if len(pts) >= min_shared]
+        if len(jitters) < 3:
+            print(f"[pitch_homography] calibrate_static: only {len(jitters)} landmarks "
+                  f"seen >={min_shared}x — cannot judge staticness, declining to lock")
+            return False
+        median_jitter = float(np.median(jitters))
+        print(f"[pitch_homography] calibrate_static: median landmark jitter "
+              f"{median_jitter:.1f}px over {len(jitters)} landmarks, {len(pooled_cam)} usable "
+              f"probe frames (static threshold {jitter_px_thr}px)")
+        if median_jitter > jitter_px_thr:
+            print("[pitch_homography] calibrate_static: camera moves — using per-frame refit")
+            return False
+        if not pooled_cam:
+            return False
+
+        cam_pts = np.concatenate(pooled_cam, axis=0)
+        pitch_pts = np.concatenate(pooled_pitch, axis=0)
+        if len(cam_pts) < self.min_keypoints:
+            return False
+        try:
+            H, inliers = cv2.findHomography(cam_pts, pitch_pts, cv2.RANSAC, self.ransac_reproj_px)
+        except Exception as e:
+            print(f"[pitch_homography] calibrate_static: fit error: {e}")
+            return False
+        if H is None:
+            return False
+
+        self.H = H
+        self.locked = True
+        n_in = int(inliers.sum()) if inliers is not None else len(cam_pts)
+        print(f"[pitch_homography] calibrate_static: LOCKED — {len(cam_pts)} pooled points "
+              f"from {len(pooled_cam)} frames, {n_in} RANSAC inliers")
+        return True
 
     def predict(self, frame):
         """
