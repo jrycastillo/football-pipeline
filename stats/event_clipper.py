@@ -917,6 +917,7 @@ def clip_events(video_path, events, output_dir, vid_stride=1, pad_s=3.0,
             "clip": os.path.join("clips", name),
             "type": ev["type"],
             "player": player,
+            "to": ev.get("to"),          # assist target (the scorer); None for other types
             "confidence": ev.get("confidence"),
             "identity_confidence": ev.get("identity_confidence"),
             "identity_confidence_receiver": ev.get("identity_confidence_receiver"),
