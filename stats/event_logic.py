@@ -1016,6 +1016,15 @@ class AdvancedEventDetector:
         # so the distance gates can't separate them — this is the dominant
         # remaining false-shot class. Default 0.70 (~45 degrees). Set -1 to disable.
         _CONE = float(_os.environ.get("R22_SHOT_CONE", 0.70))
+        # R23: the goalmouth override (R21b) was fully exempting near-goal
+        # candidates from BOTH the confidence floor and the aim cone — measured
+        # on the full match, 43% of all "shots" were override survivors, most
+        # of them corners/crosses/knockdowns that are close to goal but not
+        # aimed at it (the exact thing the cone exists to catch). A full bypass
+        # was too blunt: near-goal candidates still need discipline, just looser
+        # than open play (detection noise near a crowded box is real).
+        _GM_MIN_CONF = float(_os.environ.get("R21_GOALMOUTH_MIN_CONF", 0.35))
+        _GM_CONE = float(_os.environ.get("R22_GOALMOUTH_CONE", 0.45))
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -1116,12 +1125,13 @@ class AdvancedEventDetector:
                         # two in pure pixel space (no homography). Exempt a ball
                         # already AT the goalmouth, where the angle is dominated by
                         # detection noise and the clip is valuable regardless.
-                        if _CONE > -1.0 and not _goalmouth:
+                        _cone_thr = _GM_CONE if _goalmouth else _CONE
+                        if _cone_thr > -1.0:
                             _vx, _vy = p2[0] - p1[0], p2[1] - p1[1]
                             _ux, _uy = _g[0] - p2[0], _g[1] - p2[1]
                             _vn, _un = math.hypot(_vx, _vy), math.hypot(_ux, _uy)
                             if _vn > 1e-6 and _un > 1e-6:
-                                if (_vx * _ux + _vy * _uy) / (_vn * _un) < _CONE:
+                                if (_vx * _ux + _vy * _uy) / (_vn * _un) < _cone_thr:
                                     _shot_debug["candidates"][_ci][2] = "gate9_cross"; _shot_debug["gate9_cross"] += 1
                                     continue
                         _wb = max(2, int(EFF_FPS * 0.6))
@@ -1219,7 +1229,13 @@ class AdvancedEventDetector:
                                 # R21b exception: a goalmouth chance (ball right at the
                                 # goal/keeper) is kept even unattributed — it's the clip
                                 # the client most wants, shooter or not.
-                                if (_RECALL and (_KEEP_UNATTRIB or _goalmouth)) or _os.environ.get("R16_EMIT_UNATTRIB"):
+                                # R23: an unattributed goalmouth shot must still clear
+                                # the goalmouth floor (0.3 confidence < the 0.35 default
+                                # now rejects these unless the floor is tuned down) —
+                                # was the biggest single leak (43% of all full-match
+                                # "shots" were exactly this: no shooter, no real gate).
+                                if (_RECALL and (_KEEP_UNATTRIB or (_goalmouth and 0.3 >= _GM_MIN_CONF))) \
+                                        or _os.environ.get("R16_EMIT_UNATTRIB"):
                                     _sd = max(10, int(EFF_FPS * 5))
                                     if not [e for e in events if e["type"] == "shot" and abs(e["frame"] - i) < _sd]:
                                         events.append({"type": "shot", "player": None, "frame": i,
@@ -1260,7 +1276,13 @@ class AdvancedEventDetector:
                                                             + 0.15 * center_norm + 0.15 * attrib_norm)
                                     if not geometry_reliable:
                                         shot_conf = _clamp_conf(shot_conf * 0.5)  # geometry can't be trusted
-                                    if _RECALL and shot_conf < _SHOT_MIN_CONF and not _goalmouth:
+                                    # R23: goalmouth candidates get their OWN floor
+                                    # (lower than the main gate, not zero) — a full
+                                    # bypass let anything through as long as the ball
+                                    # was near goal, which on the full match measured
+                                    # 43% of all "shots". Still needs SOME confidence.
+                                    _min_conf = _GM_MIN_CONF if _goalmouth else _SHOT_MIN_CONF
+                                    if _RECALL and shot_conf < _min_conf:
                                         _shot_debug["candidates"][_ci][2] = "gate8_low_conf"; _shot_debug["gate8_low_conf"] += 1
                                         continue
                                     _shot_debug["candidates"][_ci][2] = "emitted"; _shot_debug["emitted"] += 1
