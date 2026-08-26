@@ -1,0 +1,22 @@
+{
+  "match": "hb_full (Hamburg vs Bayern, full broadcast, test_gdrive.mp4)",
+  "notes": "Built by visually reviewing the mid-clip frame of all 52 shot candidates from the R24/R23 run (the widest candidate pool, before the shooter-origin-distance gate existed). A candidate was labeled true only when the goal/box was visible with genuine attacking action; labeled false when the frame showed open midfield play (often with a center-circle or halfway-line landmark clearly visible, confirming deep position regardless of camera zoom). 14 of 52 were labeled true. Source clips: output/full_r24/merged_clips (worker). Timestamps are global match time (mm:ss from filename).",
+  "shots": [
+    {"time_s": 881,  "mmss": "14:41", "player": 2,  "note": "goal visible, box lines, players clustered"},
+    {"time_s": 1437, "mmss": "23:57", "player": 6,  "note": "goal visible top-left, players near box"},
+    {"time_s": 1587, "mmss": "26:27", "player": 6,  "note": "goal visible, players clustered near penalty area"},
+    {"time_s": 2271, "mmss": "37:51", "player": 2,  "note": "box area visible, players clustered"},
+    {"time_s": 2979, "mmss": "49:39", "player": 21, "note": "close-up box action, opponent challenge"},
+    {"time_s": 2989, "mmss": "49:49", "player": 2,  "note": "goalmouth scramble, players clustered"},
+    {"time_s": 3002, "mmss": "50:02", "player": 44, "note": "goal clearly visible, box action"},
+    {"time_s": 3895, "mmss": "64:55", "player": 19, "note": "goal directly in frame"},
+    {"time_s": 4198, "mmss": "69:58", "player": 44, "note": "goal visible with keeper, box cluster"},
+    {"time_s": 4359, "mmss": "72:39", "player": 6,  "note": "close-range dynamic action, ball in air"},
+    {"time_s": 4997, "mmss": "83:17", "player": 17, "note": "goal visible, box lines"},
+    {"time_s": 5023, "mmss": "83:43", "player": 6,  "note": "goal visible, players around it"},
+    {"time_s": 5504, "mmss": "91:44", "player": 4,  "note": "goal visible, players clustered in box"},
+    {"time_s": 5988, "mmss": "99:48", "player": 44, "note": "goal visible, box area"}
+  ],
+  "goals": [],
+  "assists": []
+}

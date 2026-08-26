@@ -1025,6 +1025,36 @@ class AdvancedEventDetector:
         # than open play (detection noise near a crowded box is real).
         _GM_MIN_CONF = float(_os.environ.get("R21_GOALMOUTH_MIN_CONF", 0.35))
         _GM_CONE = float(_os.environ.get("R22_GOALMOUTH_CONE", 0.45))
+        # R23 shooter-origin distance. Once a goal/keeper PIXEL anchor is found,
+        # gate7a's meters-based "attacking third" check (35m, see R19 below) was
+        # SKIPPED entirely — a fast, well-directed long ball from near the
+        # halfway line satisfies every remaining gate (speed, pixel-approach,
+        # cone) and gets credited to whoever launched it. Measured on the full
+        # match: 3 players (deep positions) accounted for 63% of all "shots",
+        # several originating 45-63m from goal — a pitch is 105m end to end, so
+        # that is a long pass, not a shot. Re-apply the SAME 35m threshold
+        # unconditionally (not just in the homography-fallback path), gated on
+        # the frame's own physical plausibility (speed_mps within the max ball
+        # speed) so it isn't hung on a frame already known to be untrustworthy.
+        # R23d: DISABLED BY DEFAULT. Built on the hypothesis that shots
+        # originating far from goal (via per-frame homography) were long balls,
+        # not shots — measured on hand-built ground truth (52 candidates,
+        # visually labelled true/false against the actual clip footage), it did
+        # the opposite of what it was designed for: of the 14 shots it kept,
+        # only 1 was genuinely real (7% precision), while 13 of the 14 true
+        # shots got cut. The pre-gate baseline (52 candidates, no origin check)
+        # caught all 14 true shots (100% recall) at 27% precision — worse
+        # precision, but strictly more useful than a gate that discards real
+        # positives and keeps false ones. Root cause: broadcast homography is
+        # only ~24% reliable per-frame, and on the unreliable frames it isn't
+        # merely noisy, it's backwards — computing a SHORT distance for a ball
+        # visibly at the center circle, and a LONG one for a ball visibly in the
+        # box. Kept in code (opt-in) for whoever revisits this with a
+        # homography-free discriminator; do not re-enable by raw distance alone.
+        _ORIGIN_ENABLED = bool(_os.environ.get("R23_SHOT_ORIGIN_ENABLED"))
+        _ORIGIN_SOFT_M = float(_os.environ.get("R23_SHOT_ORIGIN_SOFT_M", 30.0))
+        _MAX_ORIGIN_M = float(_os.environ.get("R23_MAX_SHOT_ORIGIN_M", 50.0))
+        _ORIGIN_PENALTY_MAX = float(_os.environ.get("R23_ORIGIN_PENALTY_MAX", 0.35))
         # R16 Item 1: per-gate rejection telemetry (measurement-only). Each
         # speed-passing pair is a candidate; its final outcome names the gate that
         # rejected it (or "emitted"). gate2_speed rejects = raw_pairs - candidates.
@@ -1033,7 +1063,8 @@ class AdvancedEventDetector:
                        "gate5_sustained": 0, "gate6a_gk_far": 0, "gate6b_gk_on_ball": 0,
                        "gate7a_homog_dist": 0, "gate7b_off_target": 0,
                        "gate7c_unattributable": 0, "gate7d_debounce": 0,
-                       "gate8_low_conf": 0, "gate9_cross": 0, "emitted": 0, "candidates": []}
+                       "gate8_low_conf": 0, "gate9_cross": 0, "gate10_long_range": 0,
+                       "emitted": 0, "candidates": []}
         for i in range(2, frames_count):
             if ev_bt[i] and ev_bt[i-2]:
                 # Round 2 fix: Skip if either frame is interpolated
@@ -1177,6 +1208,32 @@ class AdvancedEventDetector:
                         goal_x = 0.0    # Left goal
                         goal_center_y = 34.0
 
+                    # R23: shot ORIGIN sanity check, always applied (a pixel
+                    # anchor confirms the ball's END is near goal, not where it
+                    # was struck from). Only hung on frames whose projected speed
+                    # is already physically plausible — an unreliable frame's
+                    # distance number isn't trustworthy enough to hard-reject on,
+                    # and its confidence is already halved further down instead.
+                    # Beyond _ORIGIN_SOFT_M the candidate survives but at reduced
+                    # confidence (applied where shot_conf is computed below) —
+                    # only beyond _MAX_ORIGIN_M, a distance no real shot origin
+                    # plausibly reaches even with homography noise, is it dropped.
+                    _origin_penalty = 1.0
+                    if _ORIGIN_ENABLED and speed_mps <= MAX_BALL_SPEED_MPS:
+                        _dist_origin = abs(m1[0] - goal_x)
+                        if _dist_origin > _MAX_ORIGIN_M:
+                            _shot_debug["candidates"][_ci][2] = "gate10_long_range"; _shot_debug["gate10_long_range"] += 1
+                            continue  # struck from too far out to be a shot — a long ball
+                        if _dist_origin > _ORIGIN_SOFT_M:
+                            # R23c: 60% max penalty proved too harsh at full-match
+                            # scale — it pushed genuine 30-45m efforts below the
+                            # confidence floor, costing goal-scorer attribution
+                            # entirely (0/4 resolved, was 2/4) and assists (0, was 2).
+                            # Softened default; the hard 50m cutoff is unchanged and
+                            # still catches the clear long-ball outliers on its own.
+                            _span = max(1e-6, _MAX_ORIGIN_M - _ORIGIN_SOFT_M)
+                            _origin_penalty = 1.0 - _ORIGIN_PENALTY_MAX * min(1.0, (_dist_origin - _ORIGIN_SOFT_M) / _span)
+
                     # R19: Ball must be in attacking third (within 35m of target
                     # goal). HOMOGRAPHY fallback only — when the visual gates
                     # confirmed the shot, the detected goal already localises it.
@@ -1276,6 +1333,8 @@ class AdvancedEventDetector:
                                                             + 0.15 * center_norm + 0.15 * attrib_norm)
                                     if not geometry_reliable:
                                         shot_conf = _clamp_conf(shot_conf * 0.5)  # geometry can't be trusted
+                                    if _origin_penalty < 1.0:
+                                        shot_conf = _clamp_conf(shot_conf * _origin_penalty)  # struck from distance
                                     # R23: goalmouth candidates get their OWN floor
                                     # (lower than the main gate, not zero) — a full
                                     # bypass let anything through as long as the ball
@@ -1284,6 +1343,20 @@ class AdvancedEventDetector:
                                     _min_conf = _GM_MIN_CONF if _goalmouth else _SHOT_MIN_CONF
                                     if _RECALL and shot_conf < _min_conf:
                                         _shot_debug["candidates"][_ci][2] = "gate8_low_conf"; _shot_debug["gate8_low_conf"] += 1
+                                        # R23c: this candidate already cleared every
+                                        # near-goal/approach/cone gate — it's only
+                                        # failing on confidence (often the origin
+                                        # penalty). It's too weak to count as a shot,
+                                        # but a scoreboard-confirmed goal (ground
+                                        # truth already) still needs a best-guess
+                                        # scorer, and this is a far better source for
+                                        # that than nothing. Emitted as a DIFFERENT
+                                        # type so it never appears in the shots list/
+                                        # count/clips — only inject_scoreboard_goals
+                                        # widens its search to include it.
+                                        if _RECALL and shooter:
+                                            events.append({"type": "shot_candidate", "player": shooter,
+                                                           "frame": i, "confidence": shot_conf})
                                         continue
                                     _shot_debug["candidates"][_ci][2] = "emitted"; _shot_debug["emitted"] += 1
                                     xg = calculate_xg(m1, goal_x=goal_x, under_pressure=under_pressure)
@@ -1554,6 +1627,7 @@ class AdvancedEventDetector:
               f"gate7c_unattributable={_shot_debug['gate7c_unattributable']} gate7d_debounce={_shot_debug['gate7d_debounce']} "
               f"gate8_low_conf={_shot_debug['gate8_low_conf']} "
               f"gate9_cross={_shot_debug['gate9_cross']} "
+              f"gate10_long_range={_shot_debug['gate10_long_range']} "
               f"emitted={_shot_debug['emitted']}")
         # Per-candidate outcomes (frame, speed, gate) for offline attribution.
         print(f"[ShotCandidates] {_cands}")
@@ -2141,6 +2215,14 @@ def inject_scoreboard_goals(events, sb_goals, fps, vid_stride, team_map=None,
             if not isinstance(e, dict) or e.get("type") not in ("goal", "assist")]
     shots = sorted((e for e in kept if e.get("type") == "shot"),
                    key=lambda e: e.get("frame") or 0)
+    # R23c: shot_candidate events cleared every near-goal/approach/cone gate but
+    # were too weak on confidence to count as a shot. A scoreboard goal is
+    # already certain — the only open question is WHO — so widen the search to
+    # this weaker pool ONLY when no confirmed shot exists in the window, rather
+    # than leaving a real goal permanently unattributed. Never counted as a shot
+    # and never appear in the returned events (stripped out below).
+    candidates = sorted((e for e in kept if e.get("type") == "shot_candidate"),
+                        key=lambda e: e.get("frame") or 0)
     passes = sorted((e for e in kept if e.get("type") == "pass"),
                     key=lambda e: e.get("frame") or 0)
 
@@ -2149,20 +2231,28 @@ def inject_scoreboard_goals(events, sb_goals, fps, vid_stride, team_map=None,
         lo, hi = gf - before_s * per_s, gf + after_s * per_s
         window = [s for s in shots if lo <= (s.get("frame") or 0) <= hi]
         best = min(window, key=lambda s: abs((s.get("frame") or 0) - gf)) if window else None
+        from_candidate = False
+        if best is None:
+            cand_window = [c for c in candidates if lo <= (c.get("frame") or 0) <= hi]
+            best = min(cand_window, key=lambda c: abs((c.get("frame") or 0) - gf)) if cand_window else None
+            from_candidate = best is not None
 
         scorer = best.get("player") if best else None
         frame = (best.get("frame") if best else gf) or gf
         # Certainty of the GOAL is the scoreboard's; certainty of the SCORER
-        # decays with how far the paired shot sits from the score change.
+        # decays with how far the paired shot sits from the score change, and
+        # further when the pairing came from the weaker candidate pool.
         conf = 0.95
         if best is None:
             conf = 0.80                        # goal certain, scorer unknown
+        elif from_candidate:
+            conf = 0.65                        # goal certain, scorer is a soft guess
         elif abs((best.get("frame") or 0) - gf) > 45 * per_s:
             conf = 0.85                        # paired, but loosely
         kept.append({"type": "goal", "player": scorer, "frame": frame,
                      "source": "scoreboard", "side": side,
                      "score_after": {"home": score[0], "away": score[1]},
-                     "shot_attributed": best is not None,
+                     "shot_attributed": best is not None and not from_candidate,
                      "confidence": round(conf, 2)})
         if scorer is None:
             continue
@@ -2186,6 +2276,10 @@ def inject_scoreboard_goals(events, sb_goals, fps, vid_stride, team_map=None,
                          "confidence": 0.75})
             break
 
+    # shot_candidate was only ever a search pool for scorer attribution above —
+    # strip it out now so it never appears in the returned events (stats, clips,
+    # or the DB).
+    kept = [e for e in kept if not isinstance(e, dict) or e.get("type") != "shot_candidate"]
     kept.sort(key=lambda e: e.get("frame") or 0)
     for e in kept:                             # re-stamp time_s for injected events
         fr = e.get("frame")
