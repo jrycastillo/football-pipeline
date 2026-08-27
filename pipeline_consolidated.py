@@ -3018,6 +3018,14 @@ if __name__ == "__main__":
         except Exception as _e:
             log(f"[Scoreboard] skipped (non-fatal): {_e}")
 
+    # shot_candidate is an internal-only pool for scoreboard goal-scorer
+    # attribution (inject_scoreboard_goals strips it after using it). This is
+    # the unconditional backstop: it must never reach output regardless of
+    # whether that branch ran at all (no scorebug, SCOREBOARD_GOALS=0, or the
+    # try above raised) — it was never a real shot and has no place in
+    # stats/clips/DB.
+    raw_tracks = [e for e in raw_tracks if not isinstance(e, dict) or e.get("type") != "shot_candidate"]
+
     # Save Raw Tracks
     with open(os.path.join(output_dir, "raw_tracks.json"), "w") as f:
         json.dump(raw_tracks, f, indent=2)
