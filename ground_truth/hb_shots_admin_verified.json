@@ -1,0 +1,14 @@
+{
+  "match": "hb_full (Hamburg vs Bayern, full broadcast, test_gdrive.mp4)",
+  "source": "Admin-reviewed CSV (scoutbridge-shot-events), filename-verified against our actual clip pool (5/5 exact matches, no mapping ambiguity)",
+  "notes": "Each row is a CONFIRMED genuine shot from our 52-candidate pool. shooter_jersey is the admin's read (ground truth); our_player is what our pipeline credited at the time (R28 run) - only 1/5 correct. This file validates RECALL (these 5 real shots were present in our candidates) but exposes an ATTRIBUTION bug (wrong shooter credited on 4/5), separate from the detection/precision problem.",
+  "shots": [
+    {"clip": "006m53s_shot_p2_seg_00", "time_s": 413, "side": "home", "shooter_jersey": 11, "our_player": 2, "attribution_correct": false, "xg": 0.11, "position": "Penalty area", "result": "Blocked by outfield player"},
+    {"clip": "023m57s_shot_p6_seg_01", "time_s": 1437, "side": "home", "shooter_jersey": 20, "our_player": 6, "attribution_correct": false, "xg": 0.02, "position": "Outside the box", "result": "Wide"},
+    {"clip": "028m37s_shot_p44_seg_01", "time_s": 1717, "side": "away", "shooter_jersey": 6, "our_player": 44, "attribution_correct": false, "xg": 0.02, "position": "Outside the box", "result": "Crossbar"},
+    {"clip": "049m49s_shot_p2_seg_02", "time_s": 2989, "side": "home", "shooter_jersey": 20, "our_player": 2, "attribution_correct": false, "xg": 0.15, "position": "Penalty area", "result": "Blocked by outfield player"},
+    {"clip": "064m27s_shot_p24_seg_03", "time_s": 3867, "side": "home", "shooter_jersey": 24, "our_player": 24, "attribution_correct": true, "xg": 0.12, "position": "Penalty area", "result": "Wide"}
+  ],
+  "goals": [],
+  "assists": []
+}
