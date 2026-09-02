@@ -1124,6 +1124,15 @@ def main():
     
     parser = argparse.ArgumentParser(description="Football Pipeline Orchestrator")
     parser.add_argument("--local_video", type=str, help="Path to local video file or SPACES URL for debug mode")
+    parser.add_argument("--video_id", type=str, default=None,
+                        help="Real video ID for the DB record. REQUIRED for triggered/production "
+                             "runs (--local_video): without it the ID is derived from the filename, "
+                             "so results are written under an ID the front-end can't find. Polling "
+                             "mode takes this from the ScoutBridge record automatically.")
+    parser.add_argument("--user_id", type=str, default=None,
+                        help="Real user ID owning this match. Same reason as --video_id: the "
+                             "single-video path otherwise falls back to 'local_user' and the rows "
+                             "are orphaned from the front-end.")
     parser.add_argument("--no_db", action="store_true", help="Skip DB connections")
     parser.add_argument("--save_local", action="store_true", help="Save output to ./output folder (or --output_dir)")
     parser.add_argument("--make_video", action="store_true", help="Generate debug video output")
@@ -1207,6 +1216,15 @@ def main():
             sys.exit(1)
             
         print(f"Running Debug Mode on {args.local_video}")
+
+        # Writing to the shared DB under a filename-derived video_id / "local_user"
+        # produces rows the front-end can never match to the real match record —
+        # the run "succeeds" (exit 0) but the results are orphaned. Loud warning
+        # rather than a hard failure, so local debugging with --write_db still works.
+        if args.write_db and not (args.video_id and args.user_id):
+            print("WARNING: --write_db without --video_id/--user_id. Results will be written "
+                  "under a filename-derived ID and 'local_user', and the front-end will NOT "
+                  "find them. Pass both for triggered/production runs.")
         
         # Determine output directory
         if args.output_dir:
@@ -1226,8 +1244,8 @@ def main():
                 output_dir=out_dir,
                 no_db=args.no_db, 
                 max_frames=args.max_frames,
-                video_id=os.path.splitext(os.path.basename(args.local_video))[0].split('?')[0],
-                user_id="local_user",
+                video_id=args.video_id or os.path.splitext(os.path.basename(args.local_video))[0].split('?')[0],
+                user_id=args.user_id or "local_user",
                 locking_mode=args.locking_mode,
                 jnr_stride=args.jnr_stride,
                 vid_stride=args.vid_stride,
