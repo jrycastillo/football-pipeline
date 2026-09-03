@@ -1261,6 +1261,22 @@ class AdvancedEventDetector:
                             # nearest player then is often a DEFENDER it is passing
                             # (this credited an opponent). Walk back to the last
                             # player who actually held the ball.
+                            # R29: `_bk == 0` used to short-circuit this loop on its
+                            # very first iteration whenever the ball had ANY owner at
+                            # the shot frame - skipping the sustained-possession check
+                            # the comment above describes, and defeating the walk-back
+                            # entirely. `_held >= 2` now applies uniformly; the raw
+                            # instant owner is only a last resort when nobody ever
+                            # holds the ball long enough.
+                            #
+                            # NOTE: this corrects the loop's logic but does NOT fix
+                            # shot attribution. Measured against the admin-verified
+                            # ground truth (4/5 shots credited to the wrong player):
+                            # 3/4 still resolve to the SAME wrong player at the same
+                            # timestamp, 1/4 no longer matches a shot at all. The
+                            # wrong player already holds sustained possession, so the
+                            # real defect is upstream - in the ownership computation
+                            # or in track-ID stability - not in this walk-back.
                             shooter = None
                             for _bk in range(0, int(EFF_FPS * 2) + 1):
                                 _j = i - _bk
@@ -1268,9 +1284,11 @@ class AdvancedEventDetector:
                                     _cand = ownership[_j]
                                     _held = sum(1 for _k in range(max(0, _j - 3), _j + 1)
                                                 if 0 <= _k < len(ownership) and ownership[_k] == _cand)
-                                    if _bk == 0 or _held >= 2:
+                                    if _held >= 2:
                                         shooter = _cand
                                         break
+                            if shooter is None and i < len(ownership) and ownership[i] is not None:
+                                shooter = ownership[i]
                             shot_attrib_direct = (i < len(ownership) and ownership[i] == shooter)
                             # FIX: Skip if shooter is a GK (cls_id=1) - goal kicks/punts shouldn't count as shots
                             if shooter and stats.get(shooter, {}).get("dominant_class") == 1:
