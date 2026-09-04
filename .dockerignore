@@ -1,10 +1,22 @@
 # Build context hygiene - keep the image small and the build fast.
+# Note: models/ is deliberately NOT excluded; the image bakes the weights in.
 .git
 .gitignore
 venv/
 .venv/
 __pycache__/
 *.py[cod]
+
+# Archives. The repo root accumulates multi-GB delivery bundles (v2/v3 zips,
+# .rar deliverables) that are gitignored but would otherwise be copied into
+# the image by `COPY . /app` - roughly 14 GB, enough to exhaust the disk
+# mid-build. Mirror the .gitignore archive rules here.
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tgz
 
 # Media: test videos are multi-GB and must never enter the context.
 test_videos/
